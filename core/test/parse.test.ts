@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { parseCatFileBatch, parseNote, parseNotesList, releaseName } from "../notes.ts";
-import { pollRef } from "../poll.ts";
+import { describe, pollRef } from "../poll.ts";
 import { route } from "../route.ts";
 import { parseAgentSession, parseSessionValue } from "../trailer.ts";
 import { fakeGitHub, note, session } from "./fakes.ts";
@@ -59,4 +59,11 @@ test("rota: uma sessão → investigar no host dela; várias → só o incident-
   assert.deepEqual(route(two, me), []);
   assert.deepEqual(route(two, { ...me, incidentHost: true }), [{ kind: "investigation", release: "release-2", lock: "investigation" }]);
   assert.deepEqual(route({ ...two, state: "investigating" }, { ...me, incidentHost: true }), []);
+});
+
+test("describe: erro marcado sem message vira o _tag", () => {
+  const tagged = Object.assign(new Error(""), { _tag: "SessionNotFoundError" });
+  assert.equal(describe(tagged), "SessionNotFoundError");
+  assert.equal(describe(new Error("caiu")), "caiu");
+  assert.equal(describe({ code: 7 }), '{"code":7}');
 });

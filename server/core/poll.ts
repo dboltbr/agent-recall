@@ -49,6 +49,17 @@ export async function pollRef(input: PollInput): Promise<PollResult> {
   return { kind: "changed", etag: response.headers.get("etag"), sha };
 }
 
+/** One line for a thrown value. Harness clients throw tagged errors with an empty `message`. */
 export function describe(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  if (error === null || typeof error !== "object") return String(error);
+  const fields = error as { message?: unknown; _tag?: unknown; name?: unknown };
+  const message = typeof fields.message === "string" ? fields.message.trim() : "";
+  const tag = typeof fields._tag === "string" ? fields._tag : typeof fields.name === "string" ? fields.name : "";
+  if (message) return tag && tag !== "Error" && !message.includes(tag) ? `${tag}: ${message}` : message;
+  if (tag && tag !== "Error") return tag;
+  try {
+    return JSON.stringify(error).slice(0, 300);
+  } catch {
+    return String(error);
+  }
 }
