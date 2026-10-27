@@ -1,0 +1,8 @@
+{
+  "id": "agent-recall",
+  "name": "Agent Recall",
+  "media": [],
+  "requirements": {
+    "paseo": ">=0.13.2"
+  }
+}

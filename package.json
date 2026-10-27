@@ -1,0 +1,28 @@
+{
+  "name": "agent-recall",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "license": "UNLICENSED",
+  "files": [
+    "paseo-plugin.json",
+    "OVERVIEW.md",
+    "index.server.ts",
+    "server/",
+    "core/",
+    "scripts/",
+    "dist/"
+  ],
+  "scripts": {
+    "test": "node --test core/test/",
+    "sync": "node scripts/sync-core.mjs",
+    "build": "node scripts/sync-core.mjs && node scripts/build-opencode.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@getpaseo/plugin": "0.13.2",
+    "@types/node": "^24.0.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.9.3"
+  }
+}
