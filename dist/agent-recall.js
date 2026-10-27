@@ -144,7 +144,17 @@ async function pollRef(input) {
   return { kind: "changed", etag: response.headers.get("etag"), sha };
 }
 function describe(error) {
-  return error instanceof Error ? error.message : String(error);
+  if (error === null || typeof error !== "object") return String(error);
+  const fields = error;
+  const message = typeof fields.message === "string" ? fields.message.trim() : "";
+  const tag = typeof fields._tag === "string" ? fields._tag : typeof fields.name === "string" ? fields.name : "";
+  if (message) return tag && tag !== "Error" && !message.includes(tag) ? `${tag}: ${message}` : message;
+  if (tag && tag !== "Error") return tag;
+  try {
+    return JSON.stringify(error).slice(0, 300);
+  } catch {
+    return String(error);
+  }
 }
 
 // core/watcher.ts
@@ -608,7 +618,7 @@ async function installedSha() {
     if (/^[0-9a-f]{7,40}$/.test(sidecar)) return sidecar;
   } catch {
   }
-  return true ? "c1c64264901b9560fbd84437a7b7d8c124dadcce" : "unknown";
+  return true ? "defaf3cbc18499e65de37adbe64b91589d1e898f" : "unknown";
 }
 function opencodeBinary() {
   return /opencode/.test(process.execPath) ? process.execPath : "opencode";
