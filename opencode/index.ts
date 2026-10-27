@@ -58,7 +58,7 @@ async function readHolder(path: string): Promise<number | null> {
 }
 
 /** True when this process holds the host poller lock (keeps it, creates it, or takes a dead one). */
-export async function claimPoller(stateDir: string, pid = process.pid): Promise<boolean> {
+async function claimPoller(stateDir: string, pid = process.pid): Promise<boolean> {
   const path = pollerPath(stateDir);
   await mkdir(stateDir, { recursive: true });
   const body = `${JSON.stringify({ pid })}\n`;
