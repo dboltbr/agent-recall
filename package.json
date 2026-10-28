@@ -3,6 +3,10 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "main": "./dist/agent-recall.js",
+  "exports": {
+    ".": "./dist/agent-recall.js"
+  },
   "license": "UNLICENSED",
   "files": [
     "paseo-plugin.json",
