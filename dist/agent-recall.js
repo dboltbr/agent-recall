@@ -746,7 +746,7 @@ var index_default = {
   // No dispose: the poller and the newest context outlive location eviction (see ./poller.ts).
   setup(ctx) {
     attach(registry, ctx, {
-      sha: true ? "6093476b4436657fd3bd917b8b4d4d09bf75166a" : "unknown",
+      sha: true ? "15a9bacf85315b1cad7174fa864c2567dfb994e5" : "unknown",
       stateDir: stateDirectory(),
       pid: process.pid,
       clock: { now: () => /* @__PURE__ */ new Date() },

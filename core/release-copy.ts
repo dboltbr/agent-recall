@@ -99,13 +99,13 @@ export function stepDetail(release: Release, step: Step): string {
       return step.state === "skipped" ? "nada a publicar" : "";
     case "deploy":
       if (step.state === "failed" && step.failedJob) return `${step.failedJob} falhou`;
-      return names.length ? names.join(" · ") : "staging → produção";
+      return names.length ? names.join(" · ") : "produção";
     case "tag":
       return release.tag ?? release.name;
     case "watch":
       if (!isActive(release) && release.verdict === "reverted") return revertSummary(release) ?? "";
-      if (!isActive(release) && release.verdict === "green") return "10 min sem regressão";
-      return "janela de 10 min · sinais do blast radius → veredito";
+      if (!isActive(release) && release.verdict === "green") return "sem regressão";
+      return "sinais do blast radius → veredito";
   }
 }
 
@@ -124,7 +124,7 @@ export function pipeMeta(release: Release, step: Step, now: Date): string {
       return release.tag ?? release.name;
     case "watch":
       if (!isActive(release) && release.verdict) return VERDICT_LABELS[release.verdict];
-      return step.state === "running" ? short : "10 min";
+      return step.state === "running" ? short : "";
     default:
       if (step.state === "pending") return "";
       return isActive(release) ? formatDuration(duration) : short;
@@ -278,7 +278,7 @@ export function verdictBanner(release: Release): { tone: Tone; text: string; lin
   if (isActive(release)) return null;
   switch (release.verdict) {
     case "green":
-      return { tone: "ok", text: "vigia: 10 min sem regressão", link: "signals" };
+      return { tone: "ok", text: "vigia: sem regressão", link: "signals" };
     case "reverted":
       return { tone: "warn", text: revertSummary(release) ?? "vigia reverteu", link: "signals" };
     case "red": {

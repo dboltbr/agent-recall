@@ -73,14 +73,14 @@ test("pusherLine: agente Paseo com título, sessão OpenCode pelo host", () => {
 test("stepDetail e pipeMeta: as linhas do mock p1b/p4a", () => {
   const release = active();
   assert.equal(stepDetail(release, stepOf(release, "verify")), "qlty · opengrep · secrets · check");
-  assert.equal(stepDetail(release, stepOf(release, "deploy")), "staging → produção");
+  assert.equal(stepDetail(release, stepOf(release, "deploy")), "produção");
   assert.equal(stepDetail(release, stepOf(release, "tag")), "release-172");
-  assert.equal(stepDetail(release, stepOf(release, "watch")), "janela de 10 min · sinais do blast radius → veredito");
+  assert.equal(stepDetail(release, stepOf(release, "watch")), "sinais do blast radius → veredito");
   assert.equal(pipeMeta(release, stepOf(release, "verify"), NOW), "23m 30s");
   assert.equal(pipeMeta(release, stepOf(release, "images"), NOW), "3/9 · 11m");
   assert.equal(pipeMeta(release, stepOf(release, "deploy"), NOW), "");
   assert.equal(pipeMeta(release, stepOf(release, "tag"), NOW), "release-172");
-  assert.equal(pipeMeta(release, stepOf(release, "watch"), NOW), "10 min");
+  assert.equal(pipeMeta(release, stepOf(release, "watch"), NOW), "");
   const green = done(171);
   assert.equal(pipeMeta(green, stepOf(green, "watch"), NOW), "verde");
   assert.equal(pipeMeta(green, stepOf(green, "tag"), NOW), "release-171");
