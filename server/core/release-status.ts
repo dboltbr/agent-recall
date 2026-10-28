@@ -514,8 +514,11 @@ export function isActive(release: Release): boolean {
   return release.status !== "completed";
 }
 
+/** Runs in flight, the running ones before the queued ones (a run waiting on the concurrency
+ * group says less than the one it waits on); newest first within each group. */
 export function activeReleases(snapshot: ReleaseSnapshot): Release[] {
-  return snapshot.releases.filter(isActive);
+  const active = snapshot.releases.filter(isActive);
+  return [...active.filter((release) => release.status === "running"), ...active.filter((release) => release.status !== "running")];
 }
 
 /** Newest finished release that published or tried to (not cancelled, not a no-op). */

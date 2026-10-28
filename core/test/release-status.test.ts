@@ -259,6 +259,10 @@ test("rodapé: a ativa; depois o último veredito por 2 h; depois nada", () => {
   assert.equal(footerRelease(snapshotOf(done), later(121)), null);
   const active = buildRelease({ run: run({ run_number: 172 }), jobs: midImages(), note: null, commits: null, now: NOW });
   assert.equal(footerRelease(snapshotOf(done, active), later(500))?.number, 172);
+  const waiting = buildRelease({ run: run({ run_number: 173, status: "queued" }), jobs: [], note: null, commits: null, now: NOW });
+  assert.equal(waiting.status, "queued");
+  assert.equal(footerRelease(snapshotOf(done, active, waiting), NOW)?.number, 172);
+  assert.equal(footerRelease(snapshotOf(done, waiting), NOW)?.number, 173);
 });
 
 test("snapshot: runners self-hosted com o job em execução, fila por label, contrato Zod", () => {

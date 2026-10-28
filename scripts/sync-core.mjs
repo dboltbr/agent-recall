@@ -6,7 +6,7 @@ import { cpSync, mkdirSync, rmSync } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const SHARED_FROM_CORE = ["release-status.ts", "trailer.ts", "types.ts"];
+export const SHARED_FROM_CORE = ["release-cards.ts", "release-copy.ts", "release-status.ts", "trailer.ts", "types.ts"];
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const source = join(root, "core");
