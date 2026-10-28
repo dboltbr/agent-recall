@@ -94,6 +94,10 @@ button { font: inherit; }
 .rl-step.pending .sn, .rl-step.skipped .sn { color: var(--rl-muted); font-weight: 400; }
 .rl-step:not(:last-child)::after { content: ""; position: absolute; left: 8.5px; top: 26px; bottom: -6px; width: 1px; background: var(--rl-border2); }
 .pend-dot { width: 9px; height: 9px; border-radius: 50%; border: 1.5px solid var(--rl-xmuted); display: block; }
+.wl { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; margin-top: 4px; min-width: 0; }
+.wl.row { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 4px 14px; margin: 2px 0 6px; font-size: 12px; }
+.wl .link { max-width: 100%; min-width: 0; font-size: 12px; }
+.wl .link .ellipsis { min-width: 0; }
 .rl-imgs { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
 .chip { display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 8px; border-radius: 6px; background: var(--rl-s2); color: var(--rl-fg); font-size: 11.5px; font-family: var(--rl-mono); }
 .chip.q { background: transparent; border: 1px dashed var(--rl-border2); color: var(--rl-muted); }

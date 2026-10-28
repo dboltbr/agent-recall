@@ -15,6 +15,7 @@ import {
   type Step,
 } from "../../../core/release-status.ts";
 import { h, icon, ring, spinner, type IconName } from "./dom.ts";
+import type { WatchLink } from "./sessions.ts";
 import {
   elapsedLabel,
   headline,
@@ -37,6 +38,31 @@ import {
 export interface Actions {
   openUrl(url: string | null | undefined): void;
   openCommit(sha: string): void;
+  openSession(sessionId: string): void;
+}
+
+/** Sessions the vigia step links to (already filtered to the ones this server can open). */
+export interface Watch {
+  readonly links: readonly WatchLink[];
+  open(sessionId: string): void;
+}
+
+/** One button per session behind the vigia step: the pusher, then where the incident went. */
+export function watchButtons(watch: Watch | null): HTMLElement | null {
+  if (!watch || watch.links.length === 0) return null;
+  return h(
+    "div",
+    { class: "wl" },
+    ...watch.links.map((link) =>
+      h(
+        "button",
+        { class: "link", title: `abrir sessão ${link.sessionId}`, onClick: () => watch.open(link.sessionId) },
+        icon("bot", 12),
+        h("span", { class: "ellipsis" }, link.label),
+        icon("arrow", 11),
+      ),
+    ),
+  );
 }
 
 const VERDICT_ICON: Record<Tone, IconName | null> = { ok: "check", warn: "undo", bad: "x", mut: "minus", run: null };
@@ -146,7 +172,7 @@ function imageChips(release: Release): HTMLElement | null {
   return box;
 }
 
-export function stepsList(snapshot: ReleaseSnapshot, release: Release, now: Date): HTMLElement {
+export function stepsList(snapshot: ReleaseSnapshot, release: Release, now: Date, watch: Watch | null = null): HTMLElement {
   const list = h("div", { class: "rl-steps" });
   const queue = queueView(snapshot);
   for (const step of release.steps) {
@@ -160,6 +186,8 @@ export function stepsList(snapshot: ReleaseSnapshot, release: Release, now: Date
       if (step.state === "running" && queue.line) detail.append(h("div", { class: "note tx-warn" }, icon("clock", 12), queue.line));
     }
     if (step.failedJob) detail.append(h("div", { class: "note tx-bad" }, icon("x", 12), `${step.failedJob} falhou`));
+    const buttons = step.id === "watch" ? watchButtons(watch) : null;
+    if (buttons) detail.append(buttons);
     const name = h("div", { class: "sn" }, STEP_LABELS[step.id]);
     if (step.total !== null && step.total > 0) name.append(" ", h("span", { class: "n" }, `${step.done ?? 0}/${step.total}`));
     list.append(
@@ -243,7 +271,7 @@ export function verdictRows(releases: readonly Release[], onSelect: (release: Re
       h(
         "div",
         { class: "rq-r clickable", title: release.title, onClick: () => onSelect(release) },
-        h("span", { class: "n", style: "width:86px" }, releaseColumn(release)),
+        h("span", { class: "n", style: "width:116px" }, releaseColumn(release)),
         h("span", { class: `ellipsis ${toneText(release)}`, style: "flex:1" }, headline(release)),
         pill(release),
       ),
@@ -257,7 +285,8 @@ export function toneText(release: Release): string {
   return tone === "warn" ? "tx-warn" : tone === "bad" ? "tx-bad" : "muted";
 }
 
-export function pipeline(release: Release, now: Date): HTMLElement {
+/** Horizontal steps; the vigia sessions go on a row under the pipe (too wide for a column). */
+export function pipeline(release: Release, now: Date, watch: Watch | null = null): HTMLElement {
   const pipe = h("div", { class: "pipe" });
   for (const step of release.steps) {
     const tone = stepTone(step);
@@ -279,7 +308,11 @@ export function pipeline(release: Release, now: Date): HTMLElement {
       ),
     );
   }
-  return pipe;
+  const buttons = watchButtons(watch);
+  if (!buttons) return pipe;
+  buttons.prepend(h("span", { class: "muted" }, "Vigia"));
+  buttons.classList.add("row");
+  return h("div", null, pipe, buttons);
 }
 
 /** Gantt-like lanes of the image builds. */

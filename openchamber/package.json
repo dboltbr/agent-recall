@@ -9,6 +9,7 @@
     "apiVersion": 1,
     "engines": { "openchamber": ">=2.5.0" },
     "contributes": {
+      "capabilities": ["sessions"],
       "panel": {
         "id": "dbolt-release",
         "name": "Release",

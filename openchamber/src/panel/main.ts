@@ -1,11 +1,11 @@
 // Rail panel: the release in focus step by step, the runner queue and recent verdicts.
 import { isGuestAttachItem, type GuestItem } from "@openchamber/sdk";
 import { findRelease, formatAgo, releaseLabel, type Release, type ReleaseSnapshot } from "../../../core/release-status.ts";
-import { SEEN_KEY, hostActions } from "../ui/actions.ts";
+import { SEEN_KEY, hostActions, hostWatch } from "../ui/actions.ts";
 import { boot, serviceCall, type Host } from "../ui/boot.ts";
 import { h, icon, replaceChildren, spinner } from "../ui/dom.ts";
 import { startFeed, type FeedState } from "../ui/feed.ts";
-import { commitLines, outcomeBanner, releaseHead, runnersList, signalsList, stepsList, verdictRows, type Actions } from "../ui/render.ts";
+import { commitLines, outcomeBanner, releaseHead, runnersList, signalsList, stepsList, verdictRows, type Actions, type Watch } from "../ui/render.ts";
 import { badgeState, cancelledCount, otherActive, primaryRelease, queueView, recentVerdicts, snapshotError, statusLabel } from "../ui/view.ts";
 
 function chipNumber(item: GuestItem | null): number | null {
@@ -14,7 +14,7 @@ function chipNumber(item: GuestItem | null): number | null {
   return typeof data?.number === "number" ? data.number : null;
 }
 
-export function releaseView(snapshot: ReleaseSnapshot, release: Release, now: Date, actions: Actions, select: (release: Release | null) => void, pinned: boolean): HTMLElement {
+export function releaseView(snapshot: ReleaseSnapshot, release: Release, now: Date, actions: Actions, select: (release: Release | null) => void, pinned: boolean, watch: Watch | null = null): HTMLElement {
   const queue = queueView(snapshot);
   const history = recentVerdicts(snapshot, release).slice(0, 5);
   const others = otherActive(snapshot, release);
@@ -35,7 +35,7 @@ export function releaseView(snapshot: ReleaseSnapshot, release: Release, now: Da
     ),
     outcomeBanner(release, actions),
     h("div", { class: "rl-sec" }, "Etapas"),
-    stepsList(snapshot, release, now),
+    stepsList(snapshot, release, now, watch),
     release.signals.length > 0 ? h("div", { class: "rl-sec" }, "Sinais do vigia") : null,
     signalsList(release),
     h("div", { class: "rl-sec" }, "Fila de runners", queue.waiting > 0 ? h("span", { class: "sp" }) : null, queue.waiting > 0 ? h("span", { class: "tx-warn", style: "text-transform:none;letter-spacing:0" }, `${queue.waiting} aguardando`) : null),
@@ -63,6 +63,7 @@ function mount(host: Host, root: HTMLElement, initialItem: GuestItem | null): vo
   let refreshing = false;
   const actions = hostActions(host, () => state.envelope?.snapshot?.repository ?? "dboltbr/dbolt");
   const feed = startFeed({ call: serviceCall(host), onState: (next) => ((state = next), render(), markSeen()) });
+  const watchOf = hostWatch(host, actions, () => render());
 
   const markSeen = () => {
     const snapshot = state.envelope?.snapshot;
@@ -141,7 +142,7 @@ function mount(host: Host, root: HTMLElement, initialItem: GuestItem | null): vo
       replaceChildren(root, h("div", { class: "empty" }, "Nenhuma run do workflow release ainda."), fresh);
       return;
     }
-    replaceChildren(root, releaseView(snapshot, release, now, actions, select, pinned !== null && pinned.runId !== primaryRelease(snapshot)?.runId), fresh);
+    replaceChildren(root, releaseView(snapshot, release, now, actions, select, pinned !== null && pinned.runId !== primaryRelease(snapshot)?.runId, watchOf(release)), fresh);
   }
 
   render();

@@ -1,10 +1,10 @@
 // Full page: the release board, the runner queue, watch reversals and the verdict history.
 import { formatAgo, isActive, pillLabel, releaseLabel, stepOf, type Release, type ReleaseSnapshot } from "../../../core/release-status.ts";
-import { hostActions } from "../ui/actions.ts";
+import { hostActions, hostWatch } from "../ui/actions.ts";
 import { boot, serviceCall, type Host } from "../ui/boot.ts";
 import { h, icon, replaceChildren, spinner } from "../ui/dom.ts";
 import { startFeed, type FeedState } from "../ui/feed.ts";
-import { commitLines, lanes, outcomeBanner, pill, pipeline, releaseHead, runnersList, signalsList, toneText, type Actions } from "../ui/render.ts";
+import { commitLines, lanes, outcomeBanner, pill, pipeline, releaseHead, runnersList, signalsList, toneText, type Actions, type Watch } from "../ui/render.ts";
 import {
   cancelledCount,
   elapsedLabel,
@@ -23,7 +23,7 @@ import {
   statusLabel,
 } from "../ui/view.ts";
 
-function boardCard(snapshot: ReleaseSnapshot, release: Release, now: Date, actions: Actions, pinned: boolean, unpin: () => void, select: (release: Release) => void): HTMLElement {
+function boardCard(snapshot: ReleaseSnapshot, release: Release, now: Date, actions: Actions, pinned: boolean, unpin: () => void, select: (release: Release) => void, watch: Watch | null): HTMLElement {
   const images = stepOf(release, "images");
   const queue = isActive(release) ? queueView(snapshot) : null;
   const laneBox = lanes(release, now);
@@ -41,7 +41,7 @@ function boardCard(snapshot: ReleaseSnapshot, release: Release, now: Date, actio
         h("span", { class: "ellipsis" }, `${releaseLabel(other)} ${statusLabel(other)} · ${other.title || "(sem título)"}`),
       ),
     ),
-    pipeline(release, now),
+    pipeline(release, now, watch),
     outcomeBanner(release, actions),
     laneBox && images
       ? h(
@@ -179,6 +179,7 @@ function mount(host: Host, root: HTMLElement): void {
   let showCancelled = false;
   const actions = hostActions(host, () => state.envelope?.snapshot?.repository ?? "dboltbr/dbolt");
   const feed = startFeed({ call: serviceCall(host), onState: (next) => ((state = next), render()) });
+  const watchOf = hostWatch(host, actions, () => render());
 
   const select = (release: Release | null) => {
     pinned = release;
@@ -239,7 +240,7 @@ function mount(host: Host, root: HTMLElement): void {
         h(
           "div",
           { class: "cols" },
-          h("div", { class: "main" }, release ? boardCard(snapshot, release, now, actions, pinned !== null && pinned.runId !== primary?.runId, () => select(null), select) : h("div", { class: "card empty" }, "Nenhuma run do workflow release ainda.")),
+          h("div", { class: "main" }, release ? boardCard(snapshot, release, now, actions, pinned !== null && pinned.runId !== primary?.runId, () => select(null), select, watchOf(release)) : h("div", { class: "card empty" }, "Nenhuma run do workflow release ainda.")),
           h("div", { class: "side" }, runnersCard(snapshot), reversalsCard(snapshot, select)),
         ),
         verdictTable(snapshot, now, actions, select, showCancelled, () => ((showCancelled = !showCancelled), render())),
