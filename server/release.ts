@@ -4,6 +4,7 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
+import { readHandoffs } from "./core/host.ts";
 import { createCardPublisher, type CardAppend, type CardPublisher, type CardStore } from "./core/release-cards.ts";
 import { createReleaseSource, createReleaseTracker, type ReleaseTracker } from "./core/release-fetch.ts";
 import type { ReleaseSnapshot } from "./core/release-status.ts";
@@ -93,23 +94,30 @@ export function createReleaseService(options: ReleaseServiceOptions): ReleaseSer
     }
   }
 
-  const source = createReleaseSource({ fetch: options.fetch, clock, log });
+  const source = createReleaseSource({
+    fetch: options.fetch,
+    clock,
+    log,
+    handoffs: (release) => readHandoffs(options.stateDir, release),
+  });
   const tracker = createReleaseTracker({ source, clock, log, onSnapshot: (next) => publish(next) });
 
   async function view(): Promise<ReleaseView> {
     const snapshot = tracker.current();
     const ids = new Set<string>();
     for (const release of snapshot?.releases ?? []) {
-      for (const session of release.sessions) {
+      for (const session of [...release.sessions, ...release.handoffs.map((handoff) => handoff.session)]) {
         if (session.harness === "paseo" && session.host === host) ids.add(session.id);
       }
     }
-    const agents: AgentInfo[] = await Promise.all(
-      [...ids].map(async (id) => {
+    // Only agents this daemon knows: the client links exactly the ids listed here.
+    const found = await Promise.all(
+      [...ids].map(async (id): Promise<AgentInfo | null> => {
         const entry = await lookup(id);
-        return { id, title: entry?.title ?? null, workspaceId: entry?.workspaceId ?? null };
+        return entry ? { id, title: entry.title, workspaceId: entry.workspaceId } : null;
       }),
     );
+    const agents = found.filter((agent): agent is AgentInfo => agent !== null);
     return { host, snapshot, agents };
   }
 

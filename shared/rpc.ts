@@ -16,7 +16,7 @@ export const ReleaseViewSchema = z.object({
   host: z.string().nullable(),
   /** Null until the first load (no token yet, or still booting). */
   snapshot: ReleaseSnapshotSchema.nullable(),
-  /** Local Paseo agents that appear in the snapshot's sessions. */
+  /** Local Paseo agents of the snapshot (sessions and handoffs) that exist on this daemon. */
   agents: z.array(AgentInfoSchema),
 });
 export type ReleaseView = z.infer<typeof ReleaseViewSchema>;

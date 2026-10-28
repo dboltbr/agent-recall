@@ -3,7 +3,7 @@
 import { createServer } from "node:http";
 import { join } from "node:path";
 import { nodeExec } from "../../../core/exec.ts";
-import { stateDirectory } from "../../../core/host.ts";
+import { readHandoffs, stateDirectory } from "../../../core/host.ts";
 import { fetchNotes } from "../../../core/notes.ts";
 import { createReleaseSource } from "../../../core/release-fetch.ts";
 import { activeReleases, RELEASE_REPOSITORY } from "../../../core/release-status.ts";
@@ -33,8 +33,14 @@ export function startService(env: NodeJS.ProcessEnv = process.env) {
     if (response.status === 401) tokens.forget();
     return response;
   };
-  const source = createReleaseSource({ fetch, clock: { now: () => new Date() }, log });
-  const gitDir = join(stateDirectory(), "openchamber.git");
+  const stateDir = stateDirectory();
+  const source = createReleaseSource({
+    fetch,
+    clock: { now: () => new Date() },
+    log,
+    handoffs: (release) => readHandoffs(stateDir, release),
+  });
+  const gitDir = join(stateDir, "openchamber.git");
   const loader = createLoader({
     source,
     token: () => tokens.token(),
