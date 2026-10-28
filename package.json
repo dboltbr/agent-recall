@@ -8,21 +8,29 @@
     "paseo-plugin.json",
     "OVERVIEW.md",
     "index.server.ts",
+    "index.client.tsx",
+    "client/",
+    "shared/",
     "server/",
     "core/",
     "scripts/",
     "dist/"
   ],
   "scripts": {
-    "test": "node --test core/test/ opencode/test/",
+    "test": "node --test core/test/ opencode/test/ openchamber/test/",
     "sync": "node scripts/sync-core.mjs",
-    "build": "node scripts/sync-core.mjs && node scripts/build-opencode.mjs",
+    "build": "node scripts/sync-core.mjs && node scripts/build-opencode.mjs && node openchamber/scripts/build.mjs",
+    "build:openchamber": "node openchamber/scripts/build.mjs",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
     "@getpaseo/plugin": "0.13.2",
+    "@openchamber/sdk": "2.5.1",
     "@types/node": "^24.0.0",
+    "@types/react": "^19.3.0",
     "esbuild": "^0.25.0",
+    "react": "^19.3.1",
+    "react-native": "^0.88.1",
     "typescript": "^5.9.3",
     "zod": "4.6.7"
   }

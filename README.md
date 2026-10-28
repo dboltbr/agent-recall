@@ -28,6 +28,26 @@ Plugin do Paseo e do OpenCode que chama de volta o agente responsável quando um
   chamando sessões). O heartbeat só é gravado depois que o contexto respondeu. Arquivo do plugin
   trocado com outro SHA assume o poller no mesmo processo.
 
+## Status de release no Paseo
+
+O daemon lê os runs do workflow `release` do `dboltbr/dbolt` (job, runner, fila) com o token do
+`gh`, a cada ~30 s com run em andamento e ~5 min parado, com ETag e prazo de 25 s por chamada.
+O modelo fica em `core/release-status.ts`, a cópia em pt-BR em `core/release-copy.ts`.
+
+- **Pílula do composer** (`release-172 · imagens 3/9`): só nos agentes com commit na release em
+  andamento ou na última. O popover mostra as etapas com duração, as imagens, a fila de runners e
+  os links ver run / ver commit / abrir Releases.
+- **Rodapé da sidebar**: a release em andamento, ou o último veredito por 2 h, com a barra de cinco
+  etapas. Sem nada recente, a linha "Releases" abre a tela.
+- **Card na timeline** do agente que fez o push (`core/release-cards.ts`): reanexado com o mesmo
+  id enquanto o run anda; variantes de falha (job + ver log) e de reversão (sinais do vigia).
+- **Tela Releases** (rodapé, popovers, Command Center "Abrir Releases"): run em andamento com as
+  faixas das imagens, fila de runners, reversões do vigia e tabela de vereditos.
+
+Não há push do daemon para o app: o cliente lê o snapshot em cache do daemon pelas RPCs
+`release.snapshot` / `release.refresh` (`shared/rpc.ts`) a cada 15 s com run em andamento e 60 s
+parado. O GitHub só é chamado pelo daemon.
+
 ## Instalação
 
 O jeito normal é `bash scripts/agent-recall.sh install` no repositório dbolt. Na mão:
@@ -70,10 +90,10 @@ Conferir: `bash scripts/agent-recall.sh check` no dbolt, `paseo plugin logs agen
 npm install
 npm test             # node:test, relógio fixo
 npm run typecheck
-npm run build        # server/core/ (cópia de core/ para o Paseo) + dist/agent-recall.js
+npm run build        # server/core/ e shared/ (cópias de core/ para o Paseo) + dist/agent-recall.js
 ```
 
-`server/core/` e `dist/agent-recall.js` são gerados e vão no commit: o Paseo instala direto do git
+`server/core/`, as cópias em `shared/` e `dist/agent-recall.js` são gerados e vão no commit: o Paseo instala direto do git
 e o OpenCode copia o arquivo pronto.
 
 Copyright DBolt. All rights reserved.

@@ -11,8 +11,9 @@
     "noEmit": true,
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,
-    "esModuleInterop": true
+    "esModuleInterop": true,
+    "jsx": "react-jsx"
   },
-  "include": ["**/*.ts"],
+  "include": ["**/*.ts", "**/*.tsx"],
   "exclude": ["node_modules", "dist"]
 }

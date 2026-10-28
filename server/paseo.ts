@@ -10,6 +10,7 @@ import { loadConfig, stateDirectory } from "./core/host.ts";
 import { describe } from "./core/poll.ts";
 import type { Exec, HostConfig, Logger, SessionRef } from "./core/types.ts";
 import { createWatcher } from "./core/watcher.ts";
+import { createReleaseService, type ReleaseService } from "./release.ts";
 
 const REPO = "dboltbr/agent-recall";
 const CLI_TIMEOUT_MS = 30_000;
@@ -49,6 +50,7 @@ async function installedSha(exec: Exec): Promise<string> {
 }
 
 interface AgentRecord {
+  readonly title?: string | null;
   readonly workspaceId?: string;
   readonly provider?: string;
   readonly cwd?: string;
@@ -116,18 +118,35 @@ function createDelivery(exec: Exec, stateDir: string, config: () => HostConfig):
   };
 }
 
-/** Starts the poller; returns its stop. */
-export function startPaseoRecall(): () => Promise<void> {
+export interface PaseoRecall {
+  readonly release: ReleaseService;
+  stop(): Promise<void>;
+}
+
+/** Starts the poller (which also ticks the release tracker); returns its stop and the release view. */
+export function startPaseoRecall(): PaseoRecall {
   const exec = nodeExec;
   const stateDir = stateDirectory();
+  const clock = { now: () => new Date() };
   let stop: (() => Promise<void>) | null = null;
   let stopped = false;
   let current: HostConfig | null = null;
+  const release = createReleaseService({
+    fetch: (input, init) => fetch(input, init),
+    clock,
+    log,
+    stateDir,
+    agent: async (id) => {
+      const record = await agentRecord(id);
+      return record ? { title: record.title ?? null, workspaceId: record.workspaceId ?? null } : null;
+    },
+  });
   const boot = (async () => {
     const serverId = (await readFile(join(paseoHome(), "server-id"), "utf8")).trim();
     const sha = await installedSha(exec);
     if (stopped) return;
     log.info(`iniciado: host ${serverId}, SHA ${sha.slice(0, 12)}, pid ${process.pid}`);
+    release.setHost(serverId);
     const watcher = createWatcher({
       harness: "paseo",
       host: () => serverId,
@@ -135,17 +154,21 @@ export function startPaseoRecall(): () => Promise<void> {
       stateDir,
       sha,
       pid: process.pid,
-      clock: { now: () => new Date() },
+      clock,
       fetch: (input, init) => fetch(input, init),
       exec,
       delivery: createDelivery(exec, stateDir, () => current!),
       log,
+      release: release.tracker,
     });
     stop = watcher.start();
   })().catch((error) => log.error(`não iniciou: ${describe(error)}`));
-  return async () => {
-    stopped = true;
-    await boot;
-    await stop?.();
+  return {
+    release,
+    async stop() {
+      stopped = true;
+      await boot;
+      await stop?.();
+    },
   };
 }
