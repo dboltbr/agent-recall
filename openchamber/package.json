@@ -1,0 +1,29 @@
+{
+  "name": "@agent-recall/openchamber-release",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Progresso e status do release workflow de dboltbr/dbolt no OpenChamber.",
+  "license": "UNLICENSED",
+  "openchamber": {
+    "apiVersion": 1,
+    "engines": { "openchamber": ">=2.5.0" },
+    "contributes": {
+      "panel": {
+        "id": "dbolt-release",
+        "name": "Release",
+        "icon": "rocket",
+        "entry": "panel/index.html"
+      },
+      "page": { "entry": "page/index.html", "title": "Releases" },
+      "statusSection": { "entry": "status/index.html", "title": "Release", "height": 40 },
+      "background": { "entry": "background/index.html" },
+      "commands": [{ "name": "release", "description": "Anexa o status do release atual (ou /release 172)" }],
+      "service": {
+        "entry": "service/main.js",
+        "runtime": "host",
+        "permissions": { "exec": ["gh", "git"] }
+      }
+    }
+  }
+}
