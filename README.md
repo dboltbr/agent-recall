@@ -90,7 +90,7 @@ Conferir: `bash scripts/agent-recall.sh check` no dbolt, `paseo plugin logs agen
 npm install
 npm test             # node:test, relógio fixo
 npm run typecheck
-npm run build        # server/core/ e shared/ (cópias de core/ para o Paseo) + dist/agent-recall.js
+npm run bundle       # server/core/ e shared/ (cópias de core/ para o Paseo) + dist/agent-recall.js
 ```
 
 `server/core/`, as cópias em `shared/` e `dist/agent-recall.js` são gerados e vão no commit: o Paseo instala direto do git
