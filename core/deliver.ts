@@ -39,6 +39,12 @@ export interface Delivery {
 
 export type Outcome = "prompt" | "fallback" | "created" | "recorded" | "failed";
 
+/** How a call ended, and the session id that received it (null when nobody did). */
+export interface Delivered {
+  readonly outcome: Outcome;
+  readonly session: string | null;
+}
+
 /** What gave up, for the note's `recall` field. */
 export interface Failure {
   readonly role: string;
@@ -57,7 +63,7 @@ export interface DeliverInput {
 }
 
 /** Fallback chain: prompt → fork/new agent → failure in the note. Investigation: create → note. */
-export async function deliver(input: DeliverInput): Promise<Outcome> {
+export async function deliver(input: DeliverInput): Promise<Delivered> {
   const { action, note, delivery, log } = input;
   const text = promptFor(action, note);
   const title = `Incidente ${action.release}${note.drill ? " [ensaio]" : ""}`;
@@ -66,21 +72,21 @@ export async function deliver(input: DeliverInput): Promise<Outcome> {
     try {
       const id = await delivery.create(text, title);
       log.info(`${action.release}: sessão de investigação ${id} criada`);
-      return "created";
+      return { outcome: "created", session: id };
     } catch (error) {
       failures.push(`criar sessão: ${describe(error)}`);
     }
   } else {
     try {
       await delivery.prompt(action.target, text);
-      return "prompt";
+      return { outcome: "prompt", session: action.target.id };
     } catch (error) {
       failures.push(`prompt: ${describe(error)}`);
     }
     try {
       const id = await delivery.fallback(action.target, text, title);
       log.warn(`${action.release}: ${formatSession(action.target)} recusou o prompt; chamado foi para ${id}`);
-      return "fallback";
+      return { outcome: "fallback", session: id };
     } catch (error) {
       failures.push(`fallback: ${describe(error)}`);
     }
@@ -90,10 +96,10 @@ export async function deliver(input: DeliverInput): Promise<Outcome> {
   const reason = failures.join("; ");
   log.error(`${note.drill ? "[ensaio] " : ""}não consegui chamar ${target ?? "nova sessão de investigação"} para ${action.release} (${role}): ${reason}`);
   try {
-    if (await input.recordFailure({ role, target, reason })) return "recorded";
+    if (await input.recordFailure({ role, target, reason })) return { outcome: "recorded", session: null };
     log.error(`${action.release}: a falha do chamado não entrou na nota`);
   } catch (error) {
     log.error(`${action.release}: gravar a falha na nota: ${describe(error)}`);
   }
-  return "failed";
+  return { outcome: "failed", session: null };
 }

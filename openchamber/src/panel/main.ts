@@ -1,6 +1,6 @@
 // Rail panel: the release in focus step by step, the runner queue and recent verdicts.
 import { isGuestAttachItem, type GuestItem } from "@openchamber/sdk";
-import { displayName, findRelease, formatAgo, type Release, type ReleaseSnapshot } from "../../../core/release-status.ts";
+import { findRelease, formatAgo, releaseLabel, type Release, type ReleaseSnapshot } from "../../../core/release-status.ts";
 import { SEEN_KEY, hostActions } from "../ui/actions.ts";
 import { boot, serviceCall, type Host } from "../ui/boot.ts";
 import { h, icon, replaceChildren, spinner } from "../ui/dom.ts";
@@ -30,7 +30,7 @@ export function releaseView(snapshot: ReleaseSnapshot, release: Release, now: Da
         "div",
         { class: "rl-commit clickable", title: other.title, onClick: () => select(other) },
         icon("clock", 13),
-        h("span", { class: "ellipsis" }, `${displayName(other)} ${statusLabel(other)} · ${other.title || "(sem título)"}`),
+        h("span", { class: "ellipsis" }, `${releaseLabel(other)} ${statusLabel(other)} · ${other.title || "(sem título)"}`),
       ),
     ),
     outcomeBanner(release, actions),

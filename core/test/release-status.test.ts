@@ -4,7 +4,6 @@ import {
   buildRelease,
   buildSnapshot,
   classifyJob,
-  displayName,
   footerRelease,
   formatAgo,
   formatDuration,
@@ -13,6 +12,9 @@ import {
   progress,
   queueSummary,
   releaseForSession,
+  releaseHandoffs,
+  releaseLabel,
+  releaseStamp,
   ReleaseSnapshotSchema,
   revertSummary,
   stepJobNames,
@@ -107,8 +109,8 @@ test("release em andamento: verificação feita, imagens 3/9, resto pendente", (
   assert.equal(images.done, 3);
   assert.equal(images.total, 9, "a build pulada fica fora do total");
   assert.equal(images.durationMs, 11.4 * 60_000, "conta até agora");
-  assert.equal(pillLabel(release), "release-172 · imagens 3/9");
-  assert.equal(displayName(release), "release-172");
+  assert.equal(pillLabel(release), "#172 27/10 11:24 · imagens 3/9");
+  assert.equal(releaseLabel(release), "#172 27/10 11:24");
   assert.deepEqual(stepJobNames(release, "verify"), ["qlty", "opengrep", "secrets", "check"]);
   assert.deepEqual(stepJobNames(release, "images").slice(0, 4), ["api", "rtpengine", "fs-bridge", "vms-client-gateway"]);
   assert.ok(Math.abs(progress(release) - (1 + 3 / 9) / 5) < 1e-9);
@@ -123,11 +125,11 @@ test("veredito verde: o watch passou", () => {
     release.steps.map((step) => step.state),
     ["done", "done", "done", "done", "done"],
   );
-  assert.equal(pillLabel(release), "release-171 · verde");
+  assert.equal(pillLabel(release), "#171 27/10 11:24 · verde");
   assert.equal(progress(release), 1);
 });
 
-test("falhou: a etapa que falhou, as seguintes puladas, título `run N`", () => {
+test("falhou: a etapa que falhou, as seguintes puladas, mesmo nome `#N` dos outros", () => {
   const jobs = [
     job("trigger", "success", [24, 23.9]),
     job("verify-production / qlty", "success", [23, 22]),
@@ -141,7 +143,7 @@ test("falhou: a etapa que falhou, as seguintes puladas, título `run N`", () => 
     release.steps.map((step) => step.state),
     ["failed", "skipped", "skipped", "skipped", "skipped"],
   );
-  assert.equal(displayName(release), "run 4818");
+  assert.equal(releaseLabel(release), "#4818 27/10 11:24");
   assert.equal(verdictDetail(release), "verify-production / check falhou");
 });
 
@@ -194,7 +196,7 @@ test("inconclusivo, cancelado e sem publicação", () => {
     conclusion: "cancelled",
   });
   assert.equal(cancelled.verdict, "cancelled");
-  assert.equal(displayName(cancelled), "run 188");
+  assert.equal(releaseLabel(cancelled), "#188 27/10 11:24");
   const paused = completed(189, [job("trigger", "success", [3, 2.8]), job("flags", "skipped", [2.8, 2.8])]);
   assert.equal(paused.verdict, "none");
   assert.deepEqual(new Set(paused.steps.map((step) => step.state)), new Set(["skipped"]));
@@ -290,4 +292,63 @@ test("formatação pt-BR de durações e tempo relativo", () => {
   assert.equal(formatAgo(minutesAgo(36), NOW), "há 36 min");
   assert.equal(formatAgo(minutesAgo(150), NOW), "há 2 h");
   assert.equal(VERIFY_DONE.length, 6);
+});
+
+test("releaseStamp e releaseLabel: hora de São Paulo, virada do dia, sem hora", () => {
+  assert.equal(releaseStamp("2026-10-28T17:49:30Z"), "28/10 14:49");
+  assert.equal(releaseStamp("2026-10-28T02:05:00Z"), "27/10 23:05", "antes das 3 h UTC ainda é o dia anterior");
+  assert.equal(releaseStamp("2026-10-28T03:00:00Z"), "28/10 00:00", "meia-noite em h23, não 24:00");
+  assert.equal(releaseStamp(null), "");
+  assert.equal(releaseStamp("não é data"), "");
+  assert.equal(releaseLabel({ number: 190, startedAt: "2026-10-28T17:49:00Z", createdAt: "2026-10-28T17:48:00Z" }), "#190 28/10 14:49");
+  assert.equal(releaseLabel({ number: 190, startedAt: null, createdAt: "2026-10-28T17:48:00Z" }), "#190 28/10 14:48", "sem início usa a criação");
+  assert.equal(releaseLabel({ number: 190, startedAt: null, createdAt: "" }), "#190");
+});
+
+test("releaseStamp sem fuso no runtime: deslocamento fixo UTC−3", async () => {
+  const original = Intl.DateTimeFormat;
+  // A runtime that ignores `timeZone` (Hermes): resolvedOptions reports UTC.
+  const ignoring = function (locale?: string, options?: Intl.DateTimeFormatOptions) {
+    const format = new original(locale, { ...options, timeZone: "UTC" });
+    return format;
+  } as unknown as typeof Intl.DateTimeFormat;
+  Intl.DateTimeFormat = ignoring;
+  try {
+    const fresh = (await import(`../release-status.ts?fallback=${Date.now()}`)) as typeof import("../release-status.ts");
+    assert.equal(fresh.releaseStamp("2026-10-28T17:49:30Z"), "28/10 14:49");
+    assert.equal(fresh.releaseStamp("2026-10-28T02:05:00Z"), "27/10 23:05");
+  } finally {
+    Intl.DateTimeFormat = original;
+  }
+});
+
+test("releaseHandoffs: chamados entregues primeiro, depois owner e sessão do fix, sem repetir", () => {
+  const at = (minutes: number) => minutesAgo(minutes);
+  const note = redNote({ owner: "paseo/srv_X/agent-owner", fix: { session: "opencode/archdev/ses_fix" } });
+  const handoffs = releaseHandoffs(note, [
+    { role: "remind", session: { harness: "paseo", host: "srv_X", id: "agent-owner" }, at: at(1) },
+    { role: "investigate", session: { harness: "opencode", host: "archdev", id: "ses_culprit" }, at: at(5) },
+  ]);
+  assert.deepEqual(
+    handoffs.map((handoff) => [handoff.role, handoff.session.id]),
+    [
+      ["investigate", "ses_culprit"],
+      ["remind", "agent-owner"],
+      ["fix", "ses_fix"],
+    ],
+  );
+  assert.deepEqual(releaseHandoffs(null, [{ role: "investigate", session: { harness: "paseo", host: "h", id: "a" }, at: at(1) }]), []);
+  const release = completed(172, finished("failure"), note);
+  assert.deepEqual(
+    release.handoffs.map((handoff) => handoff.role),
+    ["owner", "fix"],
+  );
+  assert.equal(release.sessions.some((session) => session.id === "ses_fix"), false, "handoff não vira sessão do range");
+});
+
+test("cartão salvo antes de `handoffs` ainda passa no schema", () => {
+  const release = completed(171);
+  const { handoffs: _drop, ...old } = release;
+  const snapshot = ReleaseSnapshotSchema.parse(JSON.parse(JSON.stringify(snapshotOf(old as Release))));
+  assert.deepEqual(snapshot.releases[0]!.handoffs, []);
 });

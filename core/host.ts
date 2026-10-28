@@ -1,6 +1,7 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { HandoffSchema, type Handoff } from "./release-status.ts";
 import type { Harness, HostConfig } from "./types.ts";
 
 export function stateDirectory(home = homedir()): string {
@@ -71,6 +72,41 @@ export async function acquireLock(stateDir: string, release: string, leaf: strin
     if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
     throw error;
   }
+}
+
+const HANDOFF_FILE = "handoff.json";
+
+/**
+ * Records where a delivered call went, inside the lock directory that guarded it
+ * (`<stateDir>/<release>/<lock>/handoff.json`): one writer per directory, so no race between the
+ * Paseo and OpenCode pollers of the host. The release surfaces read it back with `readHandoffs`.
+ */
+export async function writeHandoff(stateDir: string, release: string, lock: string, handoff: Handoff): Promise<void> {
+  const dir = join(stateDir, release.replace(SAFE, "_"), lock.replace(SAFE, "_"));
+  await mkdir(dir, { recursive: true });
+  const path = join(dir, HANDOFF_FILE);
+  const tmp = `${path}.${process.pid}.tmp`;
+  await writeFile(tmp, `${JSON.stringify(handoff)}\n`, "utf8");
+  await rename(tmp, path);
+}
+
+/** The calls this host delivered for `release`; unreadable or malformed records are skipped. */
+export async function readHandoffs(stateDir: string, release: string): Promise<Handoff[]> {
+  const parent = join(stateDir, release.replace(SAFE, "_"));
+  const locks = await readdir(parent, { withFileTypes: true }).catch(() => []);
+  const out: Handoff[] = [];
+  for (const lock of locks) {
+    if (!lock.isDirectory()) continue;
+    const raw = await readFile(join(parent, lock.name, HANDOFF_FILE), "utf8").catch(() => null);
+    if (!raw) continue;
+    try {
+      const parsed = HandoffSchema.safeParse(JSON.parse(raw));
+      if (parsed.success) out.push(parsed.data);
+    } catch {
+      // A torn or foreign file: the lock still stands, only the link is lost.
+    }
+  }
+  return out;
 }
 
 export function isAlive(pid: number): boolean {

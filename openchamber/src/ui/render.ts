@@ -1,11 +1,11 @@
 // DOM pieces shared by the panel, the page and the status strip.
 import {
-  displayName,
   formatAgo,
   formatDuration,
   imageJobs,
   isActive,
   progress,
+  releaseLabel,
   STEP_LABELS,
   stepLabel,
   trippedSignals,
@@ -73,7 +73,7 @@ export function releaseHead(release: Release, now: Date): HTMLElement {
     "div",
     { class: "rl-head" },
     releaseRing(release, 18),
-    h("span", { class: "t" }, displayName(release)),
+    h("span", { class: "t" }, releaseLabel(release)),
     pill(release),
     h("span", { class: "sp" }),
     h("span", { class: "s" }, elapsedLabel(release, now)),

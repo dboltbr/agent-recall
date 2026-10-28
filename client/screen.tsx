@@ -23,13 +23,13 @@ import {
 } from "../shared/release-copy.ts";
 import {
   activeReleases,
-  displayName,
   formatShortDuration,
   isActive,
   lastFinished,
   queueSummary,
   RELEASE_REPOSITORY,
   releaseDurationMs,
+  releaseLabel,
   trippedSignals,
   type Release,
   type ReleaseSnapshot,
@@ -229,7 +229,7 @@ function RevertsPanel({ theme, view }: { theme: PluginTheme; view: ReleaseView }
           const detail = [...tripped, release.pusher ? `sessão ${agentLabel(view, release)}` : null].filter(Boolean).join(" · ");
           return (
             <View key={release.number} style={{ flexDirection: "row", gap: 9, paddingVertical: 5, alignItems: "flex-start" }}>
-              <Text style={{ width: 84, fontFamily: MONO, fontSize: 11.5, color: theme.colors.foreground }}>{displayName(release)}</Text>
+              <Text style={{ width: 84, fontFamily: MONO, fontSize: 11.5, color: theme.colors.foreground }}>{releaseLabel(release)}</Text>
               <View style={{ flex: 1 }}>
                 <Text style={{ color: theme.colors.statusWarning, fontSize: 12 }}>{verdictSignals(release).text}</Text>
                 {detail ? <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11.5 }}>{detail}</Text> : null}

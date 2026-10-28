@@ -3,7 +3,8 @@
 // the badge rule, the chip, the strip copy). No DOM, so it is tested with plain `node --test`.
 import {
   activeReleases,
-  displayName,
+  releaseLabel,
+  releaseStamp,
   findRelease,
   formatDuration,
   formatShortDuration,
@@ -187,9 +188,9 @@ export function sessionLabel(session: Session): string {
   return `${session.harness === "opencode" ? "OpenCode" : "Paseo"} · ${session.host}`;
 }
 
-/** Release column of tables: the tag, else the display name (`run 169` for a run without tag). */
+/** Release column of tables: `#171 27/10 11:24`, the same name as every other surface. */
 export function releaseColumn(release: Release): string {
-  return release.tag ?? displayName(release);
+  return releaseLabel(release);
 }
 
 /** Runs the watch judged (published or tried to): cancelled and no-op runs are noise here. */
@@ -257,14 +258,16 @@ export interface Chip {
 }
 
 /**
- * Composer chip for `/release`: the host draws `id` then `title`, so the id is the release name
- * (`release-182`) and the title the headline; the full status goes to the model as `text`.
+ * Composer chip for `/release`: the host draws `id` then `title`, so together they read as the
+ * release name plus the headline (`#182` + `28/10 14:49 · imagens 3/9`); the full status goes to
+ * the model as `text`.
  */
 export function releaseChip(snapshot: ReleaseSnapshot | null, release: Release, now: Date): Chip {
   const queue = snapshot && isActive(release) ? queueView(snapshot) : null;
-  const title = headline(release).slice(0, 200);
+  const stamp = releaseStamp(release.startedAt ?? release.createdAt);
+  const title = (stamp ? `${stamp} · ${headline(release)}` : headline(release)).slice(0, 200);
   const lines: string[] = [
-    `Release ${displayName(release)} do repositório ${snapshot?.repository ?? "dboltbr/dbolt"} (workflow release, run ${release.runId}, tentativa ${release.attempt}).`,
+    `Release ${releaseLabel(release)} do repositório ${snapshot?.repository ?? "dboltbr/dbolt"} (workflow release, run ${release.runId}, tentativa ${release.attempt}).`,
     `Commit ${shortSha(release.headSha)}: ${release.title || "(sem título)"}.`,
     `Status: ${statusLabel(release)}${release.conclusion ? ` (conclusão ${release.conclusion})` : ""}; duração ${elapsedLabel(release, now) || "?"}.`,
   ];
@@ -289,7 +292,7 @@ export function releaseChip(snapshot: ReleaseSnapshot | null, release: Release, 
   lines.push(`Run: ${release.url}`);
   return {
     providerId: PANEL_ID,
-    id: displayName(release).replace(/\s+/g, "-"),
+    id: `#${release.number}`,
     title,
     url: release.url,
     text: lines.join("\n").slice(0, 16_000),

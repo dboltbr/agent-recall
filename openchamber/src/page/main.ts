@@ -1,5 +1,5 @@
 // Full page: the release board, the runner queue, watch reversals and the verdict history.
-import { displayName, formatAgo, isActive, pillLabel, stepOf, type Release, type ReleaseSnapshot } from "../../../core/release-status.ts";
+import { formatAgo, isActive, pillLabel, releaseLabel, stepOf, type Release, type ReleaseSnapshot } from "../../../core/release-status.ts";
 import { hostActions } from "../ui/actions.ts";
 import { boot, serviceCall, type Host } from "../ui/boot.ts";
 import { h, icon, replaceChildren, spinner } from "../ui/dom.ts";
@@ -38,7 +38,7 @@ function boardCard(snapshot: ReleaseSnapshot, release: Release, now: Date, actio
         "div",
         { class: "rl-commit clickable", title: other.title, onClick: () => select(other) },
         icon("clock", 13),
-        h("span", { class: "ellipsis" }, `${displayName(other)} ${statusLabel(other)} · ${other.title || "(sem título)"}`),
+        h("span", { class: "ellipsis" }, `${releaseLabel(other)} ${statusLabel(other)} · ${other.title || "(sem título)"}`),
       ),
     ),
     pipeline(release, now),

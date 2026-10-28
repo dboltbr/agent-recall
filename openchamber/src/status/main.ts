@@ -5,7 +5,7 @@ import { startFeed, type FeedState } from "../ui/feed.ts";
 import { readSeen } from "../ui/actions.ts";
 import { releaseRing, segBar } from "../ui/render.ts";
 import { PANEL_SURFACE, badgeState, elapsedLabel, headline, primaryRelease, revertParts, snapshotError, visibleBadge } from "../ui/view.ts";
-import { displayName, formatAgo, isActive, trippedSignals, type Release } from "../../../core/release-status.ts";
+import { formatAgo, isActive, releaseLabel, trippedSignals, type Release } from "../../../core/release-status.ts";
 
 function strip(release: Release, now: Date, onOpen: () => void, onLink: (url: string) => void): HTMLElement {
   const open = { class: "ws", onClick: onOpen, title: "abrir o painel Release" };
@@ -19,7 +19,7 @@ function strip(release: Release, now: Date, onOpen: () => void, onLink: (url: st
       h(
         "div",
         { style: "min-width:0" },
-        h("div", { class: "tx-warn ellipsis", style: "font-weight:600" }, `${displayName(release)} · ${parts?.what ?? headline(release)}`),
+        h("div", { class: "tx-warn ellipsis", style: "font-weight:600" }, `${releaseLabel(release)} · ${parts?.what ?? headline(release)}`),
         h(
           "div",
           { class: "muted ellipsis", style: "font-size:12px" },
@@ -63,7 +63,7 @@ function strip(release: Release, now: Date, onOpen: () => void, onLink: (url: st
       h(
         "div",
         { class: "ws-row" },
-        h("span", { class: "t" }, displayName(release)),
+        h("span", { class: "t" }, releaseLabel(release)),
         h("span", { class: "dim ellipsis hl" }, `· ${headline(release)}`),
         h("span", { class: "dim" }, running ? elapsedLabel(release, now) : formatAgo(release.completedAt ?? release.updatedAt, now)),
       ),

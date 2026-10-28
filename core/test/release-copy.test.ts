@@ -16,6 +16,8 @@ import {
   verdictRows,
   verdictSignals,
   waitingLabel,
+  watchSessionLabel,
+  watchSessions,
 } from "../release-copy.ts";
 import { buildRelease, buildSnapshot, stepOf, type Release } from "../release-status.ts";
 import type { Note } from "../types.ts";
@@ -185,4 +187,30 @@ test("verdictSignals: a célula de sinais da tabela de vereditos", () => {
   assert.deepEqual(verdictSignals(failed), { text: "verify-production / check falhou", tone: "bad" });
   assert.deepEqual(verdictSignals({ ...reverted(170), verdict: "red" }), { text: "5xx · errors5xx-ratio", tone: "bad" });
   assert.deepEqual(verdictSignals({ ...reverted(170), verdict: "green" }), { text: "1/2 sinais ok", tone: "muted" });
+});
+
+test("watchSessions: quem fez o push e para onde o incidente foi, uma entrada por sessão", () => {
+  const red = { release: "release-172", state: "investigating", updatedAt: minutesAgo(1), owner: "opencode/archdev/ses_pusher" } as Note;
+  const release = buildRelease({
+    run: run({ run_number: 172, status: "completed", conclusion: "failure" }),
+    jobs: finished("failure"),
+    note: red,
+    commits: null,
+    handoffs: [{ role: "investigate", session: { harness: "paseo", host: "srv_X", id: "agent-investigator-1" }, at: minutesAgo(3) }],
+    now: NOW,
+  });
+  const entries = watchSessions(release);
+  assert.deepEqual(
+    entries.map((entry) => [entry.session.id, entry.kinds]),
+    [
+      ["ses_pusher", ["push", "owner"]],
+      ["agent-investigator-1", ["investigate"]],
+    ],
+  );
+  assert.equal(watchSessionLabel(entries[0]!, "Aviso ao morador"), "push + responsável · “Aviso ao morador”");
+  assert.equal(watchSessionLabel(entries[1]!, null), "investigação · agente agent-in");
+  assert.deepEqual(
+    watchSessions(active()).map((entry) => entry.kinds),
+    [["push"]],
+  );
 });

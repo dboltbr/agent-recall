@@ -5,7 +5,7 @@ import type { PluginPopoverProps, PluginSidebarItemProps } from "@getpaseo/plugi
 import { Icon, SidebarRow } from "@getpaseo/plugin/client/ui";
 import { View } from "react-native";
 import { watchTone } from "../shared/release-copy.ts";
-import { displayName, footerRelease, isActive, type Release } from "../shared/release-status.ts";
+import { footerRelease, isActive, releaseLabel, type Release } from "../shared/release-status.ts";
 import type { ReleaseView } from "../shared/rpc.ts";
 import { useNow, useReleaseState } from "./data.ts";
 import { SegBar } from "./kit.tsx";
@@ -40,7 +40,7 @@ export function ReleaseFooterItem({ theme, currentScreen, openScreen, openPopove
   }
   return (
     <SidebarRow
-      label={displayName(release)}
+      label={releaseLabel(release)}
       active={onScreen}
       onPress={() => openPopover(FooterPopover)}
       trailing={

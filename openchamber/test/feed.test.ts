@@ -100,7 +100,7 @@ test("resolveChip: sem argumento usa o release atual; com número busca no snaps
     now: () => FIXTURE_NOW,
   };
   const current = await resolveChip("", deps);
-  assert.equal(current.id, "release-172");
+  assert.equal(current.id, "#172");
   assert.deepEqual(current.data, { number: 172, runId: running.runId });
   assert.equal((await resolveChip("release-171", deps)).data.number, 171);
   assert.equal((await resolveChip("140", deps)).data.number, 140);

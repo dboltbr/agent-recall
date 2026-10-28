@@ -91,6 +91,31 @@ test("nota da release vira veredito sem esperar a run", async () => {
   assert.equal(snapshot.releases[0]!.verdict, "reverted");
 });
 
+test("handoffs do host entram só na release com incidente; leitor que falha não derruba", async () => {
+  const { state } = fixture();
+  const asked: string[] = [];
+  const source = createReleaseSource({
+    fetch: api(state).fetch,
+    clock: fixedClock(),
+    log: quietLog,
+    handoffs: async (release) => {
+      asked.push(release);
+      if (release !== "release-172") throw new Error("disco");
+      return [{ role: "investigate", session: { harness: "paseo", host: "srv_X", id: "agent-inv" }, at: NOW.toISOString() }];
+    },
+  });
+  const notes = new Map<string, Note>([
+    ["tagcommit", { release: 172, state: "red", updatedAt: NOW.toISOString() } as Note],
+  ]);
+  const snapshot = await source.load({ token: "t", notes });
+  assert.deepEqual(asked, ["release-172"], "sem nota não há o que ler");
+  assert.deepEqual(
+    snapshot.releases[0]!.handoffs.map((handoff) => [handoff.role, handoff.session.id]),
+    [["investigate", "agent-inv"]],
+  );
+  assert.deepEqual(snapshot.releases[1]!.handoffs, []);
+});
+
 test("falha do GitHub mantém o último snapshot com o erro", async () => {
   const { state } = fixture();
   const github = api(state);

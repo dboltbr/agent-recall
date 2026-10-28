@@ -3,7 +3,7 @@
 // release-watch notes. The Paseo UI (via `shared/release-status.ts`, a sync copy) and the
 // OpenChamber extension import it; `core/release-fetch.ts` is the fetcher that feeds it.
 import { z } from "zod";
-import { parseAgentSession, sameSession, toSessionRef } from "./trailer.ts";
+import { parseAgentSession, parseSessionValue, sameSession, toSessionRef } from "./trailer.ts";
 import type { Note, SessionRef } from "./types.ts";
 
 export const RELEASE_REPOSITORY = "dboltbr/dbolt";
@@ -75,6 +75,19 @@ export const SignalSchema = z.object({
 });
 export type Signal = z.infer<typeof SignalSchema>;
 
+export const HANDOFF_ROLES = ["investigate", "fix", "remind", "owner"] as const;
+export const HandoffRoleSchema = z.enum(HANDOFF_ROLES);
+export type HandoffRole = z.infer<typeof HandoffRoleSchema>;
+
+/** A session the incident of a red release went to. */
+export const HandoffSchema = z.object({
+  role: HandoffRoleSchema,
+  session: SessionSchema,
+  /** When this host delivered the call; null for what only the note says (owner, fix session). */
+  at: z.string().nullable(),
+});
+export type Handoff = z.infer<typeof HandoffSchema>;
+
 export const ReleaseSchema = z.object({
   number: z.number(),
   /** `release-<run number>`: the tag the run creates. */
@@ -109,6 +122,12 @@ export const ReleaseSchema = z.object({
   pusher: SessionSchema.nullable(),
   /** Every `Agent-Session` trailer of the range since the previous release tag. */
   sessions: z.array(SessionSchema),
+  /**
+   * Where the incident went: the calls this host's harnesses delivered (local record), then the
+   * note's owner and fix session. Empty without an incident. Defaults so timeline cards written
+   * before the field still render.
+   */
+  handoffs: z.array(HandoffSchema).default([]),
   jobs: z.array(JobSchema),
 });
 export type Release = z.infer<typeof ReleaseSchema>;
@@ -207,6 +226,13 @@ export const VERDICT_LABELS: Record<Verdict, string> = {
   failed: "falhou",
   cancelled: "cancelado",
   none: "sem publicação",
+};
+
+export const HANDOFF_LABELS: Record<HandoffRole, string> = {
+  investigate: "investigação",
+  fix: "correção",
+  remind: "lembrete",
+  owner: "responsável",
 };
 
 export const SOURCE_LABELS: Readonly<Record<string, string>> = {
@@ -407,7 +433,26 @@ export interface ReleaseInput {
   readonly commits: readonly GitHubCommit[] | null;
   /** Tag `release-<run number>` exists (the jobs may be older than the tag listing). */
   readonly tagged?: boolean;
+  /** Calls this host delivered for the release's incident (`readHandoffs`), any order. */
+  readonly handoffs?: readonly Handoff[];
   readonly now: Date;
+}
+
+/**
+ * Delivered calls oldest first, then the note's owner and fix session; one entry per session.
+ * Without an incident note there is no incident, so nothing (a drill's calls stay out too).
+ */
+export function releaseHandoffs(note: Note | null, delivered: readonly Handoff[]): Handoff[] {
+  if (!note) return [];
+  const out: Handoff[] = [];
+  const add = (role: HandoffRole, ref: SessionRef | null, at: string | null) => {
+    if (ref && !out.some((known) => sameSession(known.session, ref))) out.push({ role, session: toSession(ref), at });
+  };
+  const ordered = [...delivered].sort((a, b) => (time(a.at) ?? 0) - (time(b.at) ?? 0));
+  for (const handoff of ordered) add(handoff.role, handoff.session, handoff.at);
+  add("owner", parseSessionValue(note.owner), null);
+  add("fix", parseSessionValue(note.fix?.session), null);
+  return out;
 }
 
 export function buildRelease(input: ReleaseInput): Release {
@@ -456,6 +501,7 @@ export function buildRelease(input: ReleaseInput): Release {
     recallFailed: note ? record(note.recall) !== null : false,
     pusher: pusher ? toSession(pusher) : null,
     sessions,
+    handoffs: releaseHandoffs(note, input.handoffs ?? []),
     jobs,
   };
 }
@@ -551,10 +597,56 @@ export function findRelease(snapshot: ReleaseSnapshot, number: number): Release 
   return snapshot.releases.find((release) => release.number === number) ?? null;
 }
 
-/** Title: the release name, or `run N` for a run that died before any tag. */
-export function displayName(release: Release): string {
-  if (release.tag || isActive(release)) return release.name;
-  return release.verdict === "failed" || release.verdict === "cancelled" ? `run ${release.number}` : release.name;
+/** Time zone of the release labels: the team's (Brazil has kept UTC−3 all year since 2019). */
+export const RELEASE_TIME_ZONE = "America/Sao_Paulo";
+const RELEASE_TIME_ZONE_OFFSET_MS = -3 * 60 * 60 * 1000;
+
+let zoned: Intl.DateTimeFormat | null | undefined;
+
+/** The zone formatter, or null where the runtime ignores `timeZone` (some mobile engines). */
+function zonedFormat(): Intl.DateTimeFormat | null {
+  if (zoned !== undefined) return zoned;
+  try {
+    const format = new Intl.DateTimeFormat("en-GB", {
+      timeZone: RELEASE_TIME_ZONE,
+      day: "2-digit",
+      month: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    });
+    zoned = format.resolvedOptions().timeZone === RELEASE_TIME_ZONE && typeof format.formatToParts === "function" ? format : null;
+  } catch {
+    zoned = null;
+  }
+  return zoned;
+}
+
+const pad = (value: number) => String(value).padStart(2, "0");
+
+/** `28/10 14:49` in America/Sao_Paulo, or "" for a missing or bad timestamp. */
+export function releaseStamp(at: string | null): string {
+  const ms = time(at);
+  if (ms === null) return "";
+  const format = zonedFormat();
+  if (format) {
+    const parts = Object.fromEntries(format.formatToParts(new Date(ms)).map((part) => [part.type, part.value]));
+    if (parts["day"] && parts["month"] && parts["hour"] && parts["minute"]) {
+      return `${parts["day"]}/${parts["month"]} ${parts["hour"]}:${parts["minute"]}`;
+    }
+  }
+  const local = new Date(ms + RELEASE_TIME_ZONE_OFFSET_MS);
+  return `${pad(local.getUTCDate())}/${pad(local.getUTCMonth() + 1)} ${pad(local.getUTCHours())}:${pad(local.getUTCMinutes())}`;
+}
+
+/**
+ * The one name every surface shows: `#190 28/10 14:49`, the run number (the N of tag
+ * `release-N`) and when the run started. `#190` alone when the time is unknown. The tag step keeps
+ * showing the tag itself (`release-190`).
+ */
+export function releaseLabel(release: Pick<Release, "number" | "startedAt" | "createdAt">): string {
+  const stamp = releaseStamp(release.startedAt ?? release.createdAt);
+  return stamp ? `#${release.number} ${stamp}` : `#${release.number}`;
 }
 
 /** 0..1 for the progress ring: finished steps plus the images fraction. */
@@ -578,13 +670,13 @@ export function stepLabel(step: Step): string {
   return step.total !== null && step.total > 0 ? `${label} ${step.done ?? 0}/${step.total}` : label;
 }
 
-/** Composer pill text: `release-172 · imagens 3/9` while active, `release-172 · verde` after. */
+/** Composer pill text: `#172 27/10 11:24 · imagens 3/9` while active, `#172 27/10 11:24 · verde` after. */
 export function pillLabel(release: Release): string {
   if (isActive(release)) {
     const step = release.current ? stepOf(release, release.current) : null;
-    return step ? `${displayName(release)} · ${stepLabel(step)}` : displayName(release);
+    return step ? `${releaseLabel(release)} · ${stepLabel(step)}` : releaseLabel(release);
   }
-  return release.verdict ? `${displayName(release)} · ${VERDICT_LABELS[release.verdict]}` : displayName(release);
+  return release.verdict ? `${releaseLabel(release)} · ${VERDICT_LABELS[release.verdict]}` : releaseLabel(release);
 }
 
 /** Total run time: start → end, or → now while active. */

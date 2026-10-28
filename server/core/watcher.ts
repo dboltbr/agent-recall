@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { deliver, type Delivery, type Outcome } from "./deliver.ts";
-import { acquireLock, writeHeartbeat } from "./host.ts";
+import { acquireLock, writeHandoff, writeHeartbeat } from "./host.ts";
 import { fetchNotes, recordRecallFailure, type FetchedNote } from "./notes.ts";
 import { describe, POLL_INTERVAL_MS, pollRef, type PollResult } from "./poll.ts";
 import type { ReleaseTracker } from "./release-fetch.ts";
@@ -29,6 +29,8 @@ export interface WatcherOptions {
 export interface Handled {
   readonly action: Action;
   readonly outcome: Outcome;
+  /** Session id that received the call; null when it was only recorded or failed. */
+  readonly session: string | null;
 }
 
 export interface TickReport {
@@ -66,7 +68,7 @@ export function createWatcher(options: WatcherOptions): Watcher {
   async function act(action: Action, key: string, note: Note, config: HostConfig, me: Me, auth: string): Promise<Handled | null> {
     if (!(await acquireLock(options.stateDir, action.release, action.lock))) return null;
     log.info(`chamando: ${describeAction(action)}`);
-    const outcome = await deliver({
+    const { outcome, session } = await deliver({
       action,
       note,
       delivery: options.delivery,
@@ -84,7 +86,15 @@ export function createWatcher(options: WatcherOptions): Watcher {
       log,
     });
     log.info(`${describeAction(action)}: ${outcome}`);
-    return { action, outcome };
+    if (session && !note.drill) {
+      const role = action.kind === "recall" ? action.role : action.kind === "remind" ? "remind" : "investigate";
+      await writeHandoff(options.stateDir, action.release, action.lock, {
+        role,
+        session: { harness: me.harness, host: me.host, id: session },
+        at: clock.now().toISOString(),
+      }).catch((error) => log.warn(`${action.release}: registrar o chamado: ${describe(error)}`));
+    }
+    return { action, outcome, session };
   }
 
   async function tick(): Promise<TickReport> {

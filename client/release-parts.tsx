@@ -22,11 +22,11 @@ import {
   type Tone,
 } from "../shared/release-copy.ts";
 import {
-  displayName,
   formatDuration,
   formatShortDuration,
   isActive,
   releaseDurationMs,
+  releaseLabel,
   type Release,
   type ReleaseSnapshot,
   type Step,
@@ -61,7 +61,7 @@ export function ReleaseHeader({ theme, release, now, icon }: { theme: PluginThem
   return (
     <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
       {headIcon ? <Icon name={headIcon} size={15} color={toneColor(theme, badge.tone)} /> : null}
-      <Text style={{ color: theme.colors.foreground, fontWeight: "600", fontSize: 13.5 }}>{displayName(release)}</Text>
+      <Text style={{ color: theme.colors.foreground, fontWeight: "600", fontSize: 13.5 }}>{releaseLabel(release)}</Text>
       <Badge theme={theme} tone={badge.tone} label={badge.label} icon={BADGE_ICONS[badge.tone]} />
       <View style={{ flex: 1 }} />
       <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>

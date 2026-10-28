@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
-import { loadConfig } from "../host.ts";
+import { loadConfig, readHandoffs, writeHandoff } from "../host.ts";
 import type { ReleaseTracker, TrackerTickInput } from "../release-fetch.ts";
 import type { HostConfig, Note } from "../types.ts";
 import { createWatcher } from "../watcher.ts";
@@ -116,6 +116,40 @@ test("recuperação na partida: incidente de 3 h é tratado uma vez, o de 9 h é
   assert.ok(call!.text.startsWith("Incidente release-90: carregue a skill dbolt-release-incident. Papel: investigate. Nota: {"));
   await watcher.tick();
   assert.equal(delivery.recorded.prompts.length, 1, "ref mudou mas a nota é a mesma: sem segundo chamado");
+});
+
+test("chamado entregue fica registrado no diretório da trava; ensaio não", async () => {
+  const { watcher, stateDir } = await setup({ notes: { tag90: mineRed }, refs: [{ status: 200, etag: '"e1"' }] });
+  const report = await watcher.tick();
+  assert.equal(report.handled[0]!.session, "ses_culprit");
+  assert.deepEqual(await readHandoffs(stateDir, "release-90"), [
+    { role: "investigate", session: { harness: "opencode", host: "archdev", id: "ses_culprit" }, at: NOW.toISOString() },
+  ]);
+  const forked = await setup({
+    notes: { tag90: mineRed },
+    refs: [{ status: 200, etag: '"e1"' }],
+    delivery: fakeDelivery({ prompt: "refuse" }),
+  });
+  const fallback = await forked.watcher.tick();
+  const [record] = await readHandoffs(forked.stateDir, "release-90");
+  assert.equal(record?.session.id, fallback.handled[0]!.session, "o fallback registra a sessão nova");
+  const drill = await setup({
+    notes: { tag90: { ...mineRed, drill: true } as Note },
+    refs: [{ status: 200, etag: '"e1"' }],
+  });
+  await drill.watcher.tick();
+  assert.equal(drill.delivery.recorded.prompts.length, 1);
+  assert.deepEqual(await readHandoffs(drill.stateDir, "release-90"), []);
+});
+
+test("readHandoffs ignora registro corrompido ou estranho", async () => {
+  const stateDir = await tempState();
+  const good = { role: "fix", session: { harness: "paseo", host: "srv", id: "agent-1" }, at: NOW.toISOString() } as const;
+  await writeHandoff(stateDir, "release-7", "agent-1.fix", good);
+  await writeHandoff(stateDir, "release-7", "other", { ...good, role: "nope" } as never);
+  await writeFile(join(stateDir, "release-7", "loose-file"), "x");
+  assert.deepEqual(await readHandoffs(stateDir, "release-7"), [good]);
+  assert.deepEqual(await readHandoffs(stateDir, "release-404"), []);
 });
 
 test("trava: dois processos no mesmo host chamam a sessão uma vez só", async () => {

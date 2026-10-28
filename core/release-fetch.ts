@@ -16,6 +16,7 @@ import {
   type GitHubJob,
   type GitHubRun,
   type GitHubRunner,
+  type Handoff,
   type Release,
   type ReleaseSnapshot,
 } from "./release-status.ts";
@@ -119,6 +120,8 @@ export interface ReleaseSourceOptions {
   readonly repository?: string;
   readonly workflow?: string;
   readonly org?: string;
+  /** Calls this host delivered for a release's incident (`readHandoffs` on the state dir). */
+  readonly handoffs?: (release: string) => Promise<readonly Handoff[]>;
 }
 
 export interface ReleaseLoadInput {
@@ -202,12 +205,15 @@ export function createReleaseSource(options: ReleaseSourceOptions): ReleaseSourc
       }),
     ]);
     const name = releaseNameOf(run.run_number);
+    const note = notes.get(name) ?? null;
+    const handoffs = note && options.handoffs ? await options.handoffs(name).catch(() => []) : [];
     return buildRelease({
       run,
       jobs,
-      note: notes.get(name) ?? null,
+      note,
       commits,
       tagged: tags.includes(run.run_number),
+      handoffs,
       now: options.clock.now(),
     });
   }

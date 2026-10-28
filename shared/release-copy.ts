@@ -5,6 +5,7 @@ import {
   formatAgo,
   formatDuration,
   formatShortDuration,
+  HANDOFF_LABELS,
   imageJobs,
   isActive,
   queueGroups,
@@ -12,10 +13,12 @@ import {
   STEP_LABELS,
   stepJobNames,
   VERDICT_LABELS,
+  type HandoffRole,
   type Job,
   type Release,
   type ReleaseSnapshot,
   type Runner,
+  type Session,
   type Signal,
   type Step,
 } from "./release-status.ts";
@@ -73,6 +76,40 @@ export function pusherLine(release: Release, title: string | null, now: Date): s
         : `push da sessão OpenCode · ${pusher.host}`;
   const ago = formatAgo(release.createdAt, now);
   return ago ? `${who} · ${ago}` : who;
+}
+
+export type WatchKind = "push" | HandoffRole;
+
+/** A session the vigia step links to, with every reason it is there. */
+export interface WatchSession {
+  readonly session: Session;
+  readonly kinds: readonly WatchKind[];
+}
+
+/**
+ * Sessions behind the vigia step: the pusher first, then where the incident went (handoffs, in
+ * snapshot order). One entry per session; the host decides which ones it can open.
+ */
+export function watchSessions(release: Release): WatchSession[] {
+  const out: { session: Session; kinds: WatchKind[] }[] = [];
+  const add = (session: Session, kind: WatchKind) => {
+    const known = out.find(
+      (entry) => entry.session.harness === session.harness && entry.session.host === session.host && entry.session.id === session.id,
+    );
+    if (!known) out.push({ session, kinds: [kind] });
+    else if (!known.kinds.includes(kind)) known.kinds.push(kind);
+  };
+  if (release.pusher) add(release.pusher, "push");
+  for (const handoff of release.handoffs) add(handoff.session, handoff.role);
+  return out;
+}
+
+/** `push · “Aviso ao morador”`, `investigação + correção · agente 1a2b3c4d`. */
+export function watchSessionLabel(entry: WatchSession, title: string | null): string {
+  const kinds = entry.kinds.map((kind) => (kind === "push" ? "push" : HANDOFF_LABELS[kind])).join(" + ");
+  const { session } = entry;
+  const who = title ? `“${title}”` : session.harness === "paseo" ? `agente ${session.id.slice(0, 8)}` : `sessão ${session.id.slice(0, 12)}`;
+  return `${kinds} · ${who}`;
 }
 
 /** Step duration: frozen once finished, ticking from `startedAt` while running. */
