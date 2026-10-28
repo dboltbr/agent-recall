@@ -8,6 +8,7 @@ import type { Delivery } from "./core/deliver.ts";
 import { nodeExec } from "./core/exec.ts";
 import { loadConfig, stateDirectory } from "./core/host.ts";
 import { describe } from "./core/poll.ts";
+import { firstIn, updatePaseo } from "./core/self-update.ts";
 import type { Exec, HostConfig, Logger, SessionRef } from "./core/types.ts";
 import { createWatcher } from "./core/watcher.ts";
 import { createReleaseService, type ReleaseService } from "./release.ts";
@@ -162,6 +163,17 @@ export function startPaseoRecall(): PaseoRecall {
       release: release.tracker,
     });
     stop = watcher.start();
+    // In the background and never awaited by stop(): applying an update stops this plugin.
+    if (firstIn(globalThis as Record<symbol, unknown>, Symbol.for("dbolt.agent-recall.paseo.update"))) {
+      void updatePaseo({
+        exec,
+        log,
+        clock,
+        sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms).unref()),
+        home: paseoHome(),
+        stateDir,
+      });
+    }
   })().catch((error) => log.error(`não iniciou: ${describe(error)}`));
   return {
     release,

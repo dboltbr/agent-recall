@@ -20028,14 +20028,80 @@ function describe3(error62) {
   }
 }
 
+// core/self-update.ts
+import { mkdir as mkdir2, readFile as readFile2, rename as rename2, writeFile as writeFile2 } from "node:fs/promises";
+import { basename, dirname as dirname2, join as join2, sep } from "node:path";
+import { fileURLToPath } from "node:url";
+var PACKAGE = "agent-recall";
+var UPDATE_DEADLINE_MS = 6e4;
+var PASEO_RETRY_MS = 30 * 6e4;
+var PINNED = /#[0-9a-f]{40}$/i;
+function firstIn(scope, key) {
+  if (scope[key]) return false;
+  scope[key] = true;
+  return true;
+}
+function lastLine(text) {
+  return text.trim().split("\n").filter(Boolean).pop()?.trim().slice(0, 400) ?? "";
+}
+async function openCodeTarget(moduleUrl) {
+  let path;
+  try {
+    path = fileURLToPath(moduleUrl);
+  } catch {
+    return null;
+  }
+  const at = path.lastIndexOf(`${sep}node_modules${sep}${PACKAGE}${sep}`);
+  if (at < 0) return null;
+  const raw = await readFile2(join2(path.slice(0, at), "package.json"), "utf8").catch(() => null);
+  if (raw === null) return null;
+  try {
+    const spec = JSON.parse(raw).dependencies?.[PACKAGE];
+    return typeof spec === "string" && spec.trim() !== "" ? spec.trim() : null;
+  } catch {
+    return null;
+  }
+}
+function openCodeCommand(execPath) {
+  return /^opencode(\.exe)?$/i.test(basename(execPath)) ? execPath : "opencode";
+}
+async function updateOpenCode(deps) {
+  const { exec, log: log2 } = deps;
+  try {
+    const target = await openCodeTarget(deps.moduleUrl);
+    if (!target) {
+      log2.info("autoatualiza\xE7\xE3o: carregado de um caminho local, nada a atualizar");
+      return "local";
+    }
+    if (PINNED.test(target)) {
+      log2.info(`autoatualiza\xE7\xE3o: ${target} fixado num commit, nada a atualizar`);
+      return "pinned";
+    }
+    const result = await exec(deps.command, ["plugin", "update", target], { timeoutMs: UPDATE_DEADLINE_MS });
+    if (result.code !== 0) {
+      log2.warn(`autoatualiza\xE7\xE3o: opencode plugin update ${target} saiu ${result.code}: ${lastLine(result.stderr || result.stdout)}`);
+      return "failed";
+    }
+    if (/^Updated\b/m.test(result.stdout)) {
+      log2.info(`autoatualiza\xE7\xE3o: ${target} atualizado, vale no pr\xF3ximo rein\xEDcio do OpenCode`);
+      return "updated";
+    }
+    log2.info(`autoatualiza\xE7\xE3o: ${target} em dia (${lastLine(result.stdout)})`);
+    return "current";
+  } catch (error62) {
+    log2.warn(`autoatualiza\xE7\xE3o: ${describe3(error62)}`);
+    return "failed";
+  }
+}
+
 // opencode/poller.ts
 import { existsSync as existsSync2 } from "node:fs";
-import { mkdir as mkdir2, readFile as readFile2, rename as rename2, writeFile as writeFile2 } from "node:fs/promises";
+import { mkdir as mkdir3, readFile as readFile3, rename as rename3, writeFile as writeFile3 } from "node:fs/promises";
 import { homedir as homedir2 } from "node:os";
-import { join as join3 } from "node:path";
+import { join as join4 } from "node:path";
 
 // core/watcher.ts
-import { join as join2 } from "node:path";
+import { join as join3 } from "node:path";
 
 // core/deliver.ts
 function recallPrompt(release, role, note) {
@@ -20314,7 +20380,7 @@ function createWatcher(options) {
       delivery: options.delivery,
       recordFailure: (failure2) => recordRecallFailure({
         exec,
-        gitDir: join2(options.stateDir, `${options.harness}.git`),
+        gitDir: join3(options.stateDir, `${options.harness}.git`),
         repository: config2.repository,
         notesRef: config2.notesRef,
         token: auth,
@@ -20378,7 +20444,7 @@ function createWatcher(options) {
       try {
         fetchedNotes = await fetchNotes({
           exec,
-          gitDir: join2(options.stateDir, `${options.harness}.git`),
+          gitDir: join3(options.stateDir, `${options.harness}.git`),
           repository: config2.repository,
           notesRef: config2.notesRef,
           token: auth
@@ -20447,24 +20513,24 @@ function attach(registry3, ctx, deps) {
   registry3.poller = startPoller(registry3, deps, previous ? previous.stop() : Promise.resolve());
 }
 function pollerPath(stateDir) {
-  return join3(stateDir, "opencode.poller");
+  return join4(stateDir, "opencode.poller");
 }
 async function readHolder(path) {
-  const raw = await readFile2(path, "utf8").catch(() => null);
+  const raw = await readFile3(path, "utf8").catch(() => null);
   if (raw === null) return null;
   const pid = Number(JSON.parse(raw.trim() || "{}").pid);
   return Number.isInteger(pid) ? pid : 0;
 }
 async function claimPoller(stateDir, pid) {
   const path = pollerPath(stateDir);
-  await mkdir2(stateDir, { recursive: true });
+  await mkdir3(stateDir, { recursive: true });
   const body = `${JSON.stringify({ pid })}
 `;
   const holder = await readHolder(path).catch(() => 0);
   if (holder === pid) return true;
   if (holder === null) {
     try {
-      await writeFile2(path, body, { flag: "wx" });
+      await writeFile3(path, body, { flag: "wx" });
       return true;
     } catch {
       return false;
@@ -20472,8 +20538,8 @@ async function claimPoller(stateDir, pid) {
   }
   if (isAlive(holder)) return false;
   const tmp = `${path}.${pid}.tmp`;
-  await writeFile2(tmp, body);
-  await rename2(tmp, path);
+  await writeFile3(tmp, body);
+  await rename3(tmp, path);
   return await readHolder(path).catch(() => 0) === pid;
 }
 async function originMatches(exec, cwd, repository) {
@@ -20519,7 +20585,7 @@ function createDelivery(registry3, exec, config2) {
     async create(text, title) {
       const { repository } = config2();
       const ctx = context();
-      const candidates = [join3(homedir2(), "dev", "dbolt")];
+      const candidates = [join4(homedir2(), "dev", "dbolt")];
       const listed = await ctx.session.list({ limit: 50, order: "desc" }).catch(() => []);
       const sessions = Array.isArray(listed) ? listed : listed.data ?? [];
       for (const session of sessions) if (session.location?.directory) candidates.push(session.location.directory);
@@ -20605,12 +20671,13 @@ var timer = {
   clear: (handle) => clearTimeout(handle)
 };
 var registry2 = registryIn(globalThis, Symbol.for("dbolt.agent-recall.opencode.poller"));
+var updateKey = Symbol.for("dbolt.agent-recall.opencode.update");
 var index_default = {
   id: "agent-recall",
   // No dispose: the poller and the newest context outlive location eviction (see ./poller.ts).
   setup(ctx) {
     attach(registry2, ctx, {
-      sha: true ? "1fd3c2771368b4d4eaa0e82941a0de59b2924beb" : "unknown",
+      sha: true ? "e1675ab94a572fe2c308c1b6baf92cd51708be7a" : "unknown",
       stateDir: stateDirectory(),
       pid: process.pid,
       clock: { now: () => /* @__PURE__ */ new Date() },
@@ -20622,6 +20689,9 @@ var index_default = {
       timer,
       probeTimeoutMs: 1e4
     });
+    if (firstIn(globalThis, updateKey)) {
+      void updateOpenCode({ exec: nodeExec, log, moduleUrl: import.meta.url, command: openCodeCommand(process.execPath) });
+    }
   }
 };
 export {

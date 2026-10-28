@@ -3,6 +3,7 @@
 import { nodeExec } from "../core/exec.ts";
 import { loadConfig, stateDirectory } from "../core/host.ts";
 import { POLL_INTERVAL_MS } from "../core/poll.ts";
+import { firstIn, openCodeCommand, updateOpenCode } from "../core/self-update.ts";
 import type { Logger } from "../core/types.ts";
 import { attach, registryIn, type Context, type Timer } from "./poller.ts";
 
@@ -22,6 +23,7 @@ const timer: Timer = {
 };
 
 const registry = registryIn(globalThis as Record<symbol, unknown>, Symbol.for("dbolt.agent-recall.opencode.poller"));
+const updateKey = Symbol.for("dbolt.agent-recall.opencode.update");
 
 export default {
   id: "agent-recall",
@@ -40,5 +42,9 @@ export default {
       timer,
       probeTimeoutMs: 10_000,
     });
+    // Once per process, in the background: OpenCode loads the new revision on its next restart.
+    if (firstIn(globalThis as Record<symbol, unknown>, updateKey)) {
+      void updateOpenCode({ exec: nodeExec, log, moduleUrl: import.meta.url, command: openCodeCommand(process.execPath) });
+    }
   },
 };
