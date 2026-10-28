@@ -46,115 +46,9 @@ ${command}: prazo de ${options.timeoutMs} ms estourou` });
 });
 
 // core/host.ts
+import { mkdir, readdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-function stateDirectory(home = homedir()) {
-  return join(home, ".local", "state", "agent-recall");
-}
-
-// core/notes.ts
-import { existsSync } from "node:fs";
-var FETCH_TIMEOUT_MS = 25e3;
-function gitEnv(token) {
-  const basic = Buffer.from(`x-access-token:${token}`).toString("base64");
-  return {
-    GIT_TERMINAL_PROMPT: "0",
-    GIT_CONFIG_COUNT: "2",
-    GIT_CONFIG_KEY_0: "credential.helper",
-    GIT_CONFIG_VALUE_0: "",
-    GIT_CONFIG_KEY_1: "http.https://github.com/.extraHeader",
-    GIT_CONFIG_VALUE_1: `Authorization: Basic ${basic}`
-  };
-}
-var remoteUrl = (repository) => `https://github.com/${repository}.git`;
-async function fetchRef(input) {
-  const { exec, gitDir, notesRef } = input;
-  if (!existsSync(gitDir)) {
-    const init = await exec("git", ["init", "--bare", "--quiet", gitDir], { timeoutMs: 1e4 });
-    if (init.code !== 0) throw new Error(`git init falhou: ${init.stderr.trim()}`);
-  }
-  const fetched = await exec(
-    "git",
-    ["--git-dir", gitDir, "fetch", "--quiet", "--no-tags", remoteUrl(input.repository), `+${notesRef}:${notesRef}`],
-    { timeoutMs: FETCH_TIMEOUT_MS, env: gitEnv(input.token) }
-  );
-  if (fetched.code !== 0) throw new Error(`git fetch ${notesRef} falhou: ${fetched.stderr.trim()}`);
-}
-async function fetchNotes(input) {
-  const { exec, gitDir, notesRef } = input;
-  await fetchRef(input);
-  const list = await exec("git", ["--git-dir", gitDir, "notes", "--ref", notesRef, "list"], {
-    timeoutMs: 1e4
-  });
-  if (list.code !== 0) throw new Error(`git notes list falhou: ${list.stderr.trim()}`);
-  const pairs = parseNotesList(list.stdout);
-  if (pairs.length === 0) return [];
-  const batch = await exec("git", ["--git-dir", gitDir, "cat-file", "--batch"], {
-    timeoutMs: 1e4,
-    input: `${pairs.map((pair) => pair.blob).join("\n")}
-`
-  });
-  if (batch.code !== 0) throw new Error(`git cat-file falhou: ${batch.stderr.trim()}`);
-  const bodies = parseCatFileBatch(batch.stdout);
-  return pairs.map(({ blob, key }) => {
-    const raw = bodies.get(blob) ?? "";
-    return { key, raw, note: parseNote(raw) };
-  });
-}
-function parseNotesList(stdout) {
-  return stdout.split("\n").map((line) => line.trim().split(/\s+/)).filter((parts) => parts.length === 2 && parts[0] !== "").map(([blob, key]) => ({ blob, key }));
-}
-function parseCatFileBatch(stdout) {
-  const bytes = Buffer.from(stdout, "utf8");
-  const bodies = /* @__PURE__ */ new Map();
-  let offset = 0;
-  while (offset < bytes.length) {
-    const newline = bytes.indexOf(10, offset);
-    if (newline < 0) break;
-    const header = bytes.subarray(offset, newline).toString("utf8").split(" ");
-    offset = newline + 1;
-    if (header[1] === "missing" || header.length < 3) continue;
-    const size = Number(header[2]);
-    bodies.set(header[0], bytes.subarray(offset, offset + size).toString("utf8"));
-    offset += size + 1;
-  }
-  return bodies;
-}
-function parseNote(raw) {
-  let value;
-  try {
-    value = JSON.parse(raw);
-  } catch {
-    return null;
-  }
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const note = value;
-  const release = note["release"];
-  if (typeof release !== "string" && typeof release !== "number" || typeof note["state"] !== "string") {
-    return null;
-  }
-  if (typeof note["updatedAt"] !== "string") return null;
-  return value;
-}
-function releaseName(note) {
-  const value = String(note.release);
-  return value.startsWith("release-") ? value : `release-${value}`;
-}
-
-// core/poll.ts
-function describe(error2) {
-  if (error2 === null || typeof error2 !== "object") return String(error2);
-  const fields = error2;
-  const message = typeof fields.message === "string" ? fields.message.trim() : "";
-  const tag = typeof fields._tag === "string" ? fields._tag : typeof fields.name === "string" ? fields.name : "";
-  if (message) return tag && tag !== "Error" && !message.includes(tag) ? `${tag}: ${message}` : message;
-  if (tag && tag !== "Error") return tag;
-  try {
-    return JSON.stringify(error2).slice(0, 300);
-  } catch {
-    return String(error2);
-  }
-}
 
 // node_modules/zod/v4/core/util.js
 var util_exports = {};
@@ -6147,6 +6041,14 @@ var SignalSchema = z.object({
   outcome: z.string(),
   reason: z.string().nullable()
 });
+var HANDOFF_ROLES = ["investigate", "fix", "remind", "owner"];
+var HandoffRoleSchema = z.enum(HANDOFF_ROLES);
+var HandoffSchema = z.object({
+  role: HandoffRoleSchema,
+  session: SessionSchema,
+  /** When this host delivered the call; null for what only the note says (owner, fix session). */
+  at: z.string().nullable()
+});
 var ReleaseSchema = z.object({
   number: z.number(),
   /** `release-<run number>`: the tag the run creates. */
@@ -6181,6 +6083,12 @@ var ReleaseSchema = z.object({
   pusher: SessionSchema.nullable(),
   /** Every `Agent-Session` trailer of the range since the previous release tag. */
   sessions: z.array(SessionSchema),
+  /**
+   * Where the incident went: the calls this host's harnesses delivered (local record), then the
+   * note's owner and fix session. Empty without an incident. Defaults so timeline cards written
+   * before the field still render.
+   */
+  handoffs: z.array(HandoffSchema).default([]),
   jobs: z.array(JobSchema)
 });
 var RunnerSchema = z.object({
@@ -6347,6 +6255,18 @@ function firstLine(message) {
 function toSession(ref) {
   return { harness: ref.harness, host: ref.host, id: ref.id };
 }
+function releaseHandoffs(note, delivered) {
+  if (!note) return [];
+  const out = [];
+  const add = (role, ref, at) => {
+    if (ref && !out.some((known) => sameSession(known.session, ref))) out.push({ role, session: toSession(ref), at });
+  };
+  const ordered = [...delivered].sort((a, b) => (time2(a.at) ?? 0) - (time2(b.at) ?? 0));
+  for (const handoff2 of ordered) add(handoff2.role, handoff2.session, handoff2.at);
+  add("owner", parseSessionValue(note.owner), null);
+  add("fix", parseSessionValue(note.fix?.session), null);
+  return out;
+}
 function buildRelease(input) {
   const { run, note, now } = input;
   const jobs = input.jobs.map(toJob);
@@ -6392,6 +6312,7 @@ function buildRelease(input) {
     recallFailed: note ? record(note.recall) !== null : false,
     pusher: pusher ? toSession(pusher) : null,
     sessions,
+    handoffs: releaseHandoffs(note, input.handoffs ?? []),
     jobs
   };
 }
@@ -6429,6 +6350,134 @@ function activeReleases(snapshot) {
   const active = snapshot.releases.filter(isActive);
   return [...active.filter((release) => release.status === "running"), ...active.filter((release) => release.status !== "running")];
 }
+var RELEASE_TIME_ZONE_OFFSET_MS = -3 * 60 * 60 * 1e3;
+
+// core/host.ts
+function stateDirectory(home = homedir()) {
+  return join(home, ".local", "state", "agent-recall");
+}
+var SAFE = /[^A-Za-z0-9._-]/g;
+var HANDOFF_FILE = "handoff.json";
+async function readHandoffs(stateDir, release) {
+  const parent = join(stateDir, release.replace(SAFE, "_"));
+  const locks = await readdir(parent, { withFileTypes: true }).catch(() => []);
+  const out = [];
+  for (const lock of locks) {
+    if (!lock.isDirectory()) continue;
+    const raw = await readFile(join(parent, lock.name, HANDOFF_FILE), "utf8").catch(() => null);
+    if (!raw) continue;
+    try {
+      const parsed = HandoffSchema.safeParse(JSON.parse(raw));
+      if (parsed.success) out.push(parsed.data);
+    } catch {
+    }
+  }
+  return out;
+}
+
+// core/notes.ts
+import { existsSync } from "node:fs";
+var FETCH_TIMEOUT_MS = 25e3;
+function gitEnv(token) {
+  const basic = Buffer.from(`x-access-token:${token}`).toString("base64");
+  return {
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_CONFIG_COUNT: "2",
+    GIT_CONFIG_KEY_0: "credential.helper",
+    GIT_CONFIG_VALUE_0: "",
+    GIT_CONFIG_KEY_1: "http.https://github.com/.extraHeader",
+    GIT_CONFIG_VALUE_1: `Authorization: Basic ${basic}`
+  };
+}
+var remoteUrl = (repository) => `https://github.com/${repository}.git`;
+async function fetchRef(input) {
+  const { exec, gitDir, notesRef } = input;
+  if (!existsSync(gitDir)) {
+    const init = await exec("git", ["init", "--bare", "--quiet", gitDir], { timeoutMs: 1e4 });
+    if (init.code !== 0) throw new Error(`git init falhou: ${init.stderr.trim()}`);
+  }
+  const fetched = await exec(
+    "git",
+    ["--git-dir", gitDir, "fetch", "--quiet", "--no-tags", remoteUrl(input.repository), `+${notesRef}:${notesRef}`],
+    { timeoutMs: FETCH_TIMEOUT_MS, env: gitEnv(input.token) }
+  );
+  if (fetched.code !== 0) throw new Error(`git fetch ${notesRef} falhou: ${fetched.stderr.trim()}`);
+}
+async function fetchNotes(input) {
+  const { exec, gitDir, notesRef } = input;
+  await fetchRef(input);
+  const list = await exec("git", ["--git-dir", gitDir, "notes", "--ref", notesRef, "list"], {
+    timeoutMs: 1e4
+  });
+  if (list.code !== 0) throw new Error(`git notes list falhou: ${list.stderr.trim()}`);
+  const pairs = parseNotesList(list.stdout);
+  if (pairs.length === 0) return [];
+  const batch = await exec("git", ["--git-dir", gitDir, "cat-file", "--batch"], {
+    timeoutMs: 1e4,
+    input: `${pairs.map((pair) => pair.blob).join("\n")}
+`
+  });
+  if (batch.code !== 0) throw new Error(`git cat-file falhou: ${batch.stderr.trim()}`);
+  const bodies = parseCatFileBatch(batch.stdout);
+  return pairs.map(({ blob, key }) => {
+    const raw = bodies.get(blob) ?? "";
+    return { key, raw, note: parseNote(raw) };
+  });
+}
+function parseNotesList(stdout) {
+  return stdout.split("\n").map((line) => line.trim().split(/\s+/)).filter((parts) => parts.length === 2 && parts[0] !== "").map(([blob, key]) => ({ blob, key }));
+}
+function parseCatFileBatch(stdout) {
+  const bytes = Buffer.from(stdout, "utf8");
+  const bodies = /* @__PURE__ */ new Map();
+  let offset = 0;
+  while (offset < bytes.length) {
+    const newline = bytes.indexOf(10, offset);
+    if (newline < 0) break;
+    const header = bytes.subarray(offset, newline).toString("utf8").split(" ");
+    offset = newline + 1;
+    if (header[1] === "missing" || header.length < 3) continue;
+    const size = Number(header[2]);
+    bodies.set(header[0], bytes.subarray(offset, offset + size).toString("utf8"));
+    offset += size + 1;
+  }
+  return bodies;
+}
+function parseNote(raw) {
+  let value;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const note = value;
+  const release = note["release"];
+  if (typeof release !== "string" && typeof release !== "number" || typeof note["state"] !== "string") {
+    return null;
+  }
+  if (typeof note["updatedAt"] !== "string") return null;
+  return value;
+}
+function releaseName(note) {
+  const value = String(note.release);
+  return value.startsWith("release-") ? value : `release-${value}`;
+}
+
+// core/poll.ts
+function describe2(error2) {
+  if (error2 === null || typeof error2 !== "object") return String(error2);
+  const fields = error2;
+  const message = typeof fields.message === "string" ? fields.message.trim() : "";
+  const tag = typeof fields._tag === "string" ? fields._tag : typeof fields.name === "string" ? fields.name : "";
+  if (message) return tag && tag !== "Error" && !message.includes(tag) ? `${tag}: ${message}` : message;
+  if (tag && tag !== "Error") return tag;
+  try {
+    return JSON.stringify(error2).slice(0, 300);
+  } catch {
+    return String(error2);
+  }
+}
 
 // core/release-fetch.ts
 var GITHUB_TIMEOUT_MS = 25e3;
@@ -6457,7 +6506,7 @@ function createGitHubClient(fetch) {
     try {
       response = await fetch(url, { headers, signal: AbortSignal.timeout(GITHUB_TIMEOUT_MS) });
     } catch (error2) {
-      throw new GitHubError(null, `GitHub ${path.split("?")[0]}: ${describe(error2)}`);
+      throw new GitHubError(null, `GitHub ${path.split("?")[0]}: ${describe2(error2)}`);
     }
     if (response.status === 304 && cached2) return cached2.body;
     if (response.status !== 200) throw new GitHubError(response.status, `GitHub respondeu ${response.status} em ${path.split("?")[0]}`);
@@ -6535,17 +6584,20 @@ function createReleaseSource(options) {
     const [jobs, commits] = await Promise.all([
       jobsOf(run, token),
       commitsOf(run, tags, token).catch((error2) => {
-        options.log.warn(`faixa de ${releaseNameOf(run.run_number)}: ${describe(error2)}`);
+        options.log.warn(`faixa de ${releaseNameOf(run.run_number)}: ${describe2(error2)}`);
         return null;
       })
     ]);
     const name = releaseNameOf(run.run_number);
+    const note = notes.get(name) ?? null;
+    const handoffs = note && options.handoffs ? await options.handoffs(name).catch(() => []) : [];
     return buildRelease({
       run,
       jobs,
-      note: notes.get(name) ?? null,
+      note,
       commits,
       tagged: tags.includes(run.run_number),
+      handoffs,
       now: options.clock.now()
     });
   }
@@ -6561,7 +6613,7 @@ function createReleaseSource(options) {
         (run) => build(run, tags, notes, input.token).catch((error2) => {
           const kept = previous.get(run.id);
           if (!kept) throw error2;
-          options.log.warn(`${releaseNameOf(run.run_number)}: ${describe(error2)}`);
+          options.log.warn(`${releaseNameOf(run.run_number)}: ${describe2(error2)}`);
           return kept;
         })
       );
@@ -6569,12 +6621,12 @@ function createReleaseSource(options) {
         `orgs/${org}/actions/runner-groups/${DEFAULT_RUNNER_GROUP}/runners?per_page=100`,
         input.token
       ).then((body) => body.runners).catch((error2) => {
-        options.log.warn(`runners: ${describe(error2)}`);
+        options.log.warn(`runners: ${describe2(error2)}`);
         return runners;
       });
       snapshot = buildSnapshot({ repository, workflow, releases, runners, now });
     } catch (error2) {
-      const message = describe(error2);
+      const message = describe2(error2);
       snapshot = snapshot ? { ...snapshot, error: message } : buildSnapshot({ repository, workflow, releases: [], runners: [], now, error: message });
     }
     return snapshot;
@@ -6824,8 +6876,14 @@ function startService(env = process.env) {
     if (response.status === 401) tokens.forget();
     return response;
   };
-  const source = createReleaseSource({ fetch, clock: { now: () => /* @__PURE__ */ new Date() }, log });
-  const gitDir = join2(stateDirectory(), "openchamber.git");
+  const stateDir = stateDirectory();
+  const source = createReleaseSource({
+    fetch,
+    clock: { now: () => /* @__PURE__ */ new Date() },
+    log,
+    handoffs: (release) => readHandoffs(stateDir, release)
+  });
+  const gitDir = join2(stateDir, "openchamber.git");
   const loader = createLoader({
     source,
     token: () => tokens.token(),
