@@ -10,6 +10,7 @@ import {
   PASEO_RETRY_MS,
   updateOpenCode,
   updatePaseo,
+  type OpenCodeUpdateDeps,
   type PaseoUpdateDeps,
 } from "../self-update.ts";
 import type { Exec, ExecResult } from "../types.ts";
@@ -60,10 +61,27 @@ test("openCodeTarget: o spec configurado da instalação de pacote; nulo fora de
   assert.equal(await openCodeTarget(pathToFileURL("/home/me/.config/opencode/plugins/agent-recall.js").href), null);
 });
 
+function openCodeDeps(exec: Exec, moduleUrl: string, command = "opencode") {
+  const clock = fixedClock();
+  const slept: number[] = [];
+  const deps: OpenCodeUpdateDeps = {
+    exec,
+    log: quietLog,
+    clock,
+    sleep: async (ms) => {
+      slept.push(ms);
+      clock.set(new Date(clock.now().getTime() + ms));
+    },
+    moduleUrl,
+    command,
+  };
+  return { deps, slept };
+}
+
 test("OpenCode: instalação git roda opencode plugin update <spec> com prazo", async () => {
   const moduleUrl = await openCodeInstall("github:dboltbr/agent-recall");
   const { exec, calls } = recordingExec(() => ok('Updated Server plugin "agent-recall"\n'));
-  const result = await updateOpenCode({ exec, log: quietLog, moduleUrl, command: "/bin/opencode" });
+  const result = await updateOpenCode(openCodeDeps(exec, moduleUrl, "/bin/opencode").deps);
   assert.equal(result, "updated");
   assert.deepEqual(calls, [{ command: "/bin/opencode", args: ["plugin", "update", "github:dboltbr/agent-recall"], timeoutMs: 60_000 }]);
 });
@@ -71,21 +89,47 @@ test("OpenCode: instalação git roda opencode plugin update <spec> com prazo", 
 test("OpenCode: em dia, falha do CLI e checkout local", async () => {
   const moduleUrl = await openCodeInstall("github:dboltbr/agent-recall");
   const current = recordingExec(() => ok("No plugin updates available\n"));
-  assert.equal(await updateOpenCode({ exec: current.exec, log: quietLog, moduleUrl, command: "opencode" }), "current");
+  assert.equal(await updateOpenCode(openCodeDeps(current.exec, moduleUrl).deps), "current");
+  assert.equal(current.calls.length, 1);
 
   const failing = recordingExec(() => ({ code: 124, stdout: "", stderr: "prazo estourou" }));
-  assert.equal(await updateOpenCode({ exec: failing.exec, log: quietLog, moduleUrl, command: "opencode" }), "failed");
+  const failed = openCodeDeps(failing.exec, moduleUrl);
+  assert.equal(await updateOpenCode(failed.deps), "failed");
+  assert.deepEqual(failed.slept, [5_000, 10_000]);
+  assert.equal(failing.calls.length, 3);
 
   const local = recordingExec(() => ok(""));
   const dev = pathToFileURL("/home/me/dev/agent-recall/dist/agent-recall.js").href;
-  assert.equal(await updateOpenCode({ exec: local.exec, log: quietLog, moduleUrl: dev, command: "opencode" }), "local");
+  assert.equal(await updateOpenCode(openCodeDeps(local.exec, dev).deps), "local");
   assert.equal(local.calls.length, 0);
+});
+
+test("OpenCode: serviço recém-iniciado responde 'not configured' e a nova tentativa atualiza", async () => {
+  const moduleUrl = await openCodeInstall("github:dboltbr/agent-recall");
+  const replies: ExecResult[] = [
+    { code: 1, stdout: "", stderr: "Error: Plugin is not configured\n    at cli.plugin.inspect" },
+    ok("No package plugins found\n"),
+    ok('Updated Server plugin "agent-recall"\n'),
+  ];
+  const { exec, calls } = recordingExec(() => replies.shift() ?? ok(""));
+  const { deps, slept } = openCodeDeps(exec, moduleUrl);
+  assert.equal(await updateOpenCode(deps), "updated");
+  assert.deepEqual(slept, [5_000, 10_000]);
+  // Every attempt shares the 60 s budget.
+  assert.deepEqual(calls.map((call) => call.timeoutMs), [60_000, 55_000, 45_000]);
+});
+
+test("OpenCode: serviço que nunca esquenta termina como falha, não como em dia", async () => {
+  const moduleUrl = await openCodeInstall("github:dboltbr/agent-recall");
+  const { exec, calls } = recordingExec(() => ok("No package plugins found\n"));
+  assert.equal(await updateOpenCode(openCodeDeps(exec, moduleUrl).deps), "failed");
+  assert.equal(calls.length, 3);
 });
 
 test("OpenCode: spec fixado num commit não chama o CLI", async () => {
   const moduleUrl = await openCodeInstall(`github:dboltbr/agent-recall#${OLD}`);
   const { exec, calls } = recordingExec(() => ok(""));
-  assert.equal(await updateOpenCode({ exec, log: quietLog, moduleUrl, command: "opencode" }), "pinned");
+  assert.equal(await updateOpenCode(openCodeDeps(exec, moduleUrl).deps), "pinned");
   assert.equal(calls.length, 0);
 });
 

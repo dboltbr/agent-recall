@@ -44,7 +44,14 @@ export default {
     });
     // Once per process, in the background: OpenCode loads the new revision on its next restart.
     if (firstIn(globalThis as Record<symbol, unknown>, updateKey)) {
-      void updateOpenCode({ exec: nodeExec, log, moduleUrl: import.meta.url, command: openCodeCommand(process.execPath) });
+      void updateOpenCode({
+        exec: nodeExec,
+        log,
+        clock: { now: () => new Date() },
+        sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms).unref()),
+        moduleUrl: import.meta.url,
+        command: openCodeCommand(process.execPath),
+      });
     }
   },
 };

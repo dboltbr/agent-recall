@@ -20036,6 +20036,9 @@ var PACKAGE = "agent-recall";
 var UPDATE_DEADLINE_MS = 6e4;
 var PASEO_RETRY_MS = 30 * 6e4;
 var PINNED = /#[0-9a-f]{40}$/i;
+var OPENCODE_RETRY_DELAYS_MS = [5e3, 1e4];
+var OPENCODE_ATTEMPT_MIN_MS = 1e4;
+var OPENCODE_COLD = /not configured|No package plugins found/i;
 function firstIn(scope, key) {
   if (scope[key]) return false;
   scope[key] = true;
@@ -20066,7 +20069,9 @@ function openCodeCommand(execPath) {
   return /^opencode(\.exe)?$/i.test(basename(execPath)) ? execPath : "opencode";
 }
 async function updateOpenCode(deps) {
-  const { exec, log: log2 } = deps;
+  const { exec, log: log2, clock } = deps;
+  const started = clock.now().getTime();
+  const remaining = () => UPDATE_DEADLINE_MS - (clock.now().getTime() - started);
   try {
     const target = await openCodeTarget(deps.moduleUrl);
     if (!target) {
@@ -20077,8 +20082,20 @@ async function updateOpenCode(deps) {
       log2.info(`autoatualiza\xE7\xE3o: ${target} fixado num commit, nada a atualizar`);
       return "pinned";
     }
-    const result = await exec(deps.command, ["plugin", "update", target], { timeoutMs: UPDATE_DEADLINE_MS });
-    if (result.code !== 0) {
+    const run = () => exec(deps.command, ["plugin", "update", target], { timeoutMs: remaining() });
+    let result = await run();
+    for (const delay of OPENCODE_RETRY_DELAYS_MS) {
+      const output3 = `${result.stdout}
+${result.stderr}`;
+      if (result.code === 0 && !OPENCODE_COLD.test(output3)) break;
+      if (remaining() - delay < OPENCODE_ATTEMPT_MIN_MS) break;
+      log2.info(`autoatualiza\xE7\xE3o: servi\xE7o do OpenCode ainda subindo (${lastLine(output3)}); nova tentativa em ${delay / 1e3}s`);
+      await deps.sleep(delay);
+      result = await run();
+    }
+    const output2 = `${result.stdout}
+${result.stderr}`;
+    if (result.code !== 0 || OPENCODE_COLD.test(output2)) {
       log2.warn(`autoatualiza\xE7\xE3o: opencode plugin update ${target} saiu ${result.code}: ${lastLine(result.stderr || result.stdout)}`);
       return "failed";
     }
@@ -20677,7 +20694,7 @@ var index_default = {
   // No dispose: the poller and the newest context outlive location eviction (see ./poller.ts).
   setup(ctx) {
     attach(registry2, ctx, {
-      sha: true ? "a07a0f45912d12af1f1afe9a190c04133ef88851" : "unknown",
+      sha: true ? "1dcde72adb7ce83a2e4e029144c75bb2da13d0f3" : "unknown",
       stateDir: stateDirectory(),
       pid: process.pid,
       clock: { now: () => /* @__PURE__ */ new Date() },
@@ -20690,7 +20707,14 @@ var index_default = {
       probeTimeoutMs: 1e4
     });
     if (firstIn(globalThis, updateKey)) {
-      void updateOpenCode({ exec: nodeExec, log, moduleUrl: import.meta.url, command: openCodeCommand(process.execPath) });
+      void updateOpenCode({
+        exec: nodeExec,
+        log,
+        clock: { now: () => /* @__PURE__ */ new Date() },
+        sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms).unref()),
+        moduleUrl: import.meta.url,
+        command: openCodeCommand(process.execPath)
+      });
     }
   }
 };

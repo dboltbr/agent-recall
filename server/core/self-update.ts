@@ -17,6 +17,11 @@ const PASEO_CHECK_MS = 15_000;
 const PASEO_CHECK_RETRY_DELAY_MS = 10_000;
 const PASEO_APPLY_MIN_MS = 15_000;
 const PINNED = /#[0-9a-f]{40}$/i;
+/** Waits between OpenCode attempts while its background service is still starting. */
+export const OPENCODE_RETRY_DELAYS_MS = [5_000, 10_000] as const;
+const OPENCODE_ATTEMPT_MIN_MS = 10_000;
+// A freshly started `opencode serve --service` answers before it has read the config.
+const OPENCODE_COLD = /not configured|No package plugins found/i;
 
 export type UpdateResult = "local" | "pinned" | "current" | "updated" | "throttled" | "failed";
 
@@ -63,14 +68,23 @@ export function openCodeCommand(execPath: string): string {
 export interface OpenCodeUpdateDeps {
   readonly exec: Exec;
   readonly log: Logger;
+  readonly clock: Clock;
+  readonly sleep: (ms: number) => Promise<void>;
   /** `import.meta.url` of the loaded bundle. */
   readonly moduleUrl: string;
   readonly command: string;
 }
 
-/** `opencode plugin update <target>`: installs the newest revision for the next restart. */
+/**
+ * `opencode plugin update <target>`: installs the newest revision for the next restart. The CLI goes
+ * through OpenCode's background service; right after that service starts it answers "not
+ * configured" or "No package plugins found", so those answers and failed exits are retried within
+ * the deadline.
+ */
 export async function updateOpenCode(deps: OpenCodeUpdateDeps): Promise<UpdateResult> {
-  const { exec, log } = deps;
+  const { exec, log, clock } = deps;
+  const started = clock.now().getTime();
+  const remaining = (): number => UPDATE_DEADLINE_MS - (clock.now().getTime() - started);
   try {
     const target = await openCodeTarget(deps.moduleUrl);
     if (!target) {
@@ -81,8 +95,18 @@ export async function updateOpenCode(deps: OpenCodeUpdateDeps): Promise<UpdateRe
       log.info(`autoatualização: ${target} fixado num commit, nada a atualizar`);
       return "pinned";
     }
-    const result = await exec(deps.command, ["plugin", "update", target], { timeoutMs: UPDATE_DEADLINE_MS });
-    if (result.code !== 0) {
+    const run = () => exec(deps.command, ["plugin", "update", target], { timeoutMs: remaining() });
+    let result = await run();
+    for (const delay of OPENCODE_RETRY_DELAYS_MS) {
+      const output = `${result.stdout}\n${result.stderr}`;
+      if (result.code === 0 && !OPENCODE_COLD.test(output)) break;
+      if (remaining() - delay < OPENCODE_ATTEMPT_MIN_MS) break;
+      log.info(`autoatualização: serviço do OpenCode ainda subindo (${lastLine(output)}); nova tentativa em ${delay / 1000}s`);
+      await deps.sleep(delay);
+      result = await run();
+    }
+    const output = `${result.stdout}\n${result.stderr}`;
+    if (result.code !== 0 || OPENCODE_COLD.test(output)) {
       log.warn(`autoatualização: opencode plugin update ${target} saiu ${result.code}: ${lastLine(result.stderr || result.stdout)}`);
       return "failed";
     }
