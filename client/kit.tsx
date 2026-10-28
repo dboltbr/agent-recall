@@ -185,7 +185,7 @@ export function LinkText({
     <ExternalLink href={href} accessibilityLabel={label}>
       <View style={{ flexDirection: "row", alignItems: "center", gap: 5 }}>
         {icon ? <Icon name={icon} size={12} color={color} /> : null}
-        <Text style={{ color, fontSize: 12 }}>{label}</Text>
+        <Text numberOfLines={1} style={{ color, fontSize: 12 }}>{label}</Text>
       </View>
     </ExternalLink>
   );

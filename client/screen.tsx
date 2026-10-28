@@ -269,7 +269,7 @@ const COLUMNS = [
   { label: "duração", width: 82 },
   { label: "veredito do vigia", width: 156 },
   { label: "sinais", flex: 1.6 },
-  { label: "", width: 78 },
+  { label: "", width: 92 },
 ] as const;
 
 function cell(index: number) {
