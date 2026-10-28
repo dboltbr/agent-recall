@@ -53,19 +53,29 @@ parado. O GitHub só é chamado pelo daemon.
 O jeito normal é `bash scripts/agent-recall.sh install` no repositório dbolt. Na mão:
 
 ```bash
-# Paseo
-paseo plugin install git:dboltbr/agent-recall --ref main
-paseo reload            # com "pluginsEnabled": true no config.json do Paseo
+# Paseo (com "pluginsEnabled": true no config.json do Paseo)
+paseo plugin add git:dboltbr/agent-recall
 
 # OpenCode (carrega quando o servidor reinicia)
-mkdir -p ~/.config/opencode/plugins
-gh api -H 'Accept: application/vnd.github.raw' \
-  repos/dboltbr/agent-recall/contents/dist/agent-recall.js?ref=main \
-  > ~/.config/opencode/plugins/agent-recall.js
+opencode plugin add github:dboltbr/agent-recall
 ```
 
 Conferir: `bash scripts/agent-recall.sh check` no dbolt, `paseo plugin logs agent-recall`, ou
 `cat ~/.local/state/agent-recall/*.alive`.
+
+## Autoatualização
+
+Na partida, uma vez por processo, em segundo plano e com prazo de 60 s, o plugin pede ao próprio
+harness a revisão mais nova (`core/self-update.ts`). Falha só vai para o log.
+
+- **OpenCode**: `opencode plugin update <spec>`, com o spec lido do `package.json` da instalação
+  em `…/opencode/npm/…/node_modules/agent-recall/`. O OpenCode só confere atualização ao reiniciar
+  e não instala; a revisão nova carrega no reinício seguinte. Arquivo copiado, caminho local e
+  spec fixado num commit são ignorados.
+- **Paseo**: `paseo plugin update agent-recall --check --json`; só numa instalação `git` com
+  revisão nova aplica `--yes`, e o Paseo recarrega o plugin na hora. Instalação `directory`
+  (checkout de dev) é ignorada. O commit tentado fica em `~/.local/state/agent-recall/paseo.update`
+  e não é reaplicado em 30 min, então um Paseo que siga propondo a mesma revisão não entra em laço.
 
 ## Configuração do host
 
@@ -93,7 +103,8 @@ npm run typecheck
 npm run bundle       # server/core/ e shared/ (cópias de core/ para o Paseo) + dist/agent-recall.js
 ```
 
-`server/core/`, as cópias em `shared/` e `dist/agent-recall.js` são gerados e vão no commit: o Paseo instala direto do git
-e o OpenCode copia o arquivo pronto.
+`server/core/`, as cópias em `shared/` e `dist/agent-recall.js` são gerados e vão no commit: o Paseo e
+o OpenCode instalam direto do git (`main`/`exports` do `package.json` apontam para o bundle). O script
+se chama `bundle`, não `build`: o npm do OpenCode roda `build` ao preparar dependência git e falha.
 
 Copyright DBolt. All rights reserved.

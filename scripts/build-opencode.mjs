@@ -1,5 +1,5 @@
-// Bundles opencode/index.ts (with core/) into dist/agent-recall.js, the single file the installer
-// copies to ~/.config/opencode/plugins/. AGENT_RECALL_BUILD_SHA is the source commit it was built
+// Bundles opencode/index.ts (with core/) into dist/agent-recall.js, the single file OpenCode loads
+// from the git install (`main`/`exports` in package.json). AGENT_RECALL_BUILD_SHA is the source commit it was built
 // from: the commit that adds the bundle cannot contain its own SHA.
 import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
