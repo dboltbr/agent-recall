@@ -6426,7 +6426,8 @@ function isActive(release) {
   return release.status !== "completed";
 }
 function activeReleases(snapshot) {
-  return snapshot.releases.filter(isActive);
+  const active = snapshot.releases.filter(isActive);
+  return [...active.filter((release) => release.status === "running"), ...active.filter((release) => release.status !== "running")];
 }
 
 // core/release-fetch.ts

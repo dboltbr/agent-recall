@@ -546,6 +546,9 @@ function createWatcher(options) {
       const done = await act(reminder, key, note, config, me, auth);
       if (done) handled.push(done);
     }
+    if (options.release) {
+      await options.release.tick({ token: auth, notes, notesChanged: fetched }).catch((error) => log2.warn(`release: ${describe(error)}`));
+    }
     return { poll: poll.kind, fetched, handled };
   }
   function start(intervalMs = POLL_INTERVAL_MS) {
@@ -743,7 +746,7 @@ var index_default = {
   // No dispose: the poller and the newest context outlive location eviction (see ./poller.ts).
   setup(ctx) {
     attach(registry, ctx, {
-      sha: true ? "2a60bbc3359a5b69d37863b735f03f5f20586c15" : "unknown",
+      sha: true ? "6093476b4436657fd3bd917b8b4d4d09bf75166a" : "unknown",
       stateDir: stateDirectory(),
       pid: process.pid,
       clock: { now: () => /* @__PURE__ */ new Date() },
