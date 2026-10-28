@@ -266,10 +266,10 @@ const COLUMNS = [
   { label: "release", width: 140 },
   { label: "commit", flex: 2.4 },
   { label: "agente", flex: 1.2 },
-  { label: "duração", width: 64 },
-  { label: "veredito do vigia", width: 130 },
+  { label: "duração", width: 82 },
+  { label: "veredito do vigia", width: 156 },
   { label: "sinais", flex: 1.6 },
-  { label: "", width: 60 },
+  { label: "", width: 78 },
 ] as const;
 
 function cell(index: number) {
@@ -316,6 +316,7 @@ function VerdictsPanel({ theme, view, compact, now }: { theme: PluginTheme; view
             {COLUMNS.map((column, index) => (
               <Text
                 key={column.label || index}
+                numberOfLines={1}
                 style={[cell(index), { color: theme.colors.foregroundMuted, opacity: 0.75, fontSize: 11, fontWeight: "500", letterSpacing: 0.5, textTransform: "uppercase" }]}
               >
                 {column.label}
