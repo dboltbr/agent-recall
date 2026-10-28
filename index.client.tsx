@@ -1,6 +1,7 @@
 import type { PluginClientContext } from "@getpaseo/plugin/client";
 import { startReleaseStore } from "./client/data.ts";
-import { RELEASES_SCREEN, ReleaseFooterItem } from "./client/footer.tsx";
+import { ReleaseFooterItem } from "./client/footer.tsx";
+import { RELEASES_SCREEN, setClientOpenScreen } from "./client/navigate.ts";
 import { startReleasePills } from "./client/pills.tsx";
 import { ReleasesScreen } from "./client/screen.tsx";
 import { ReleaseTimelineCard } from "./client/timeline-card.tsx";
@@ -9,6 +10,7 @@ import { RELEASE_CARD_KIND, RELEASE_CARD_VERSION, ReleaseCardSchema } from "./sh
 export default function contribute(client: PluginClientContext) {
   const stopStore = startReleaseStore((contract, input) => client.rpc(contract, input));
   const cleanups = [
+    setClientOpenScreen((input) => client.openScreen(input)),
     client.addScreen({ id: RELEASES_SCREEN, title: "Releases", Component: ReleasesScreen }),
     client.addSidebarFooterItem({ id: "release-status", title: "Release", Component: ReleaseFooterItem }),
     client.addCommandCenterItem({

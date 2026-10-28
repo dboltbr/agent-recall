@@ -1,5 +1,5 @@
 // Composer pills (mock p1b): one per local Paseo agent with a commit in the release in flight or
-// the most recent one, labelled `release-172 · imagens 3/9`, opening the step popover. Driven by
+// the most recent one, labelled `#172 27/10 11:24 · imagens 3/9`, opening the step popover. Driven by
 // the client store; a label change only updates label/title (changing `behavior` would close an
 // open popover).
 import type { PluginButtonContentProps, PluginButtonIconProps, PluginButtonRegistration, PluginClientContext } from "@getpaseo/plugin/client";
@@ -9,8 +9,8 @@ import { releaseBadge } from "../shared/release-copy.ts";
 import { pillLabel, releaseForSession, type Release } from "../shared/release-status.ts";
 import type { ReleaseView } from "../shared/rpc.ts";
 import { releaseState, subscribeReleases, useReleaseState } from "./data.ts";
-import { RELEASES_SCREEN } from "./footer.tsx";
 import { toneColor } from "./kit.tsx";
+import { hopToAgent, RELEASES_SCREEN } from "./navigate.ts";
 import { ReleasePopover } from "./release-popover.tsx";
 
 const PILL_ID = "release";
@@ -70,6 +70,10 @@ export function startReleasePills(client: PluginClientContext): () => void {
         openReleases={() => {
           close();
           client.openScreen({ screenId: RELEASES_SCREEN });
+        }}
+        openAgent={(target) => {
+          close();
+          hopToAgent((input) => client.openScreen(input), target);
         }}
       />
     );

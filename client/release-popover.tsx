@@ -1,14 +1,16 @@
 // The popover of the composer pill and of the sidebar footer row (mocks p1b and p3): header,
 // commit, pusher, the step list, the runner queue while a run is in flight, the verdict banner
 // once it ended, and the links. Both read the client store; neither calls the daemon itself.
+// Paseo's popover owns scrolling and padding: the content sizes itself, no inner ScrollView.
 import type { PluginTheme } from "@getpaseo/plugin";
 import { Loading } from "@getpaseo/plugin/client/ui";
-import { ScrollView, Text, View } from "react-native";
+import { Text, View } from "react-native";
 import { commitUrl, verdictBanner, waitingLabel, watchUrl } from "../shared/release-copy.ts";
 import { isActive, queueSummary, type Release } from "../shared/release-status.ts";
 import type { ReleaseView } from "../shared/rpc.ts";
 import { agentTitle, retryReleases, useNow, useReleaseState } from "./data.ts";
 import { Banner, LinkText, PressText } from "./kit.tsx";
+import { watchLinks, type OpenAgent } from "./navigate.ts";
 import { CommitLine, PusherLine, ReleaseHeader, RunnerQueue, SectionLabel, Signals, StepList } from "./release-parts.tsx";
 
 const BANNER_ICONS = { ok: "ShieldCheck", bad: "CircleX", warn: "Undo2", run: "Info", muted: "Info" } as const;
@@ -41,23 +43,26 @@ export function ReleaseBody({
   view,
   release,
   openReleases,
+  openAgent,
 }: {
   theme: PluginTheme;
   view: ReleaseView;
   release: Release;
   openReleases: (() => void) | null;
+  openAgent: OpenAgent | null;
 }) {
   const now = useNow();
   const snapshot = view.snapshot!;
   const active = isActive(release);
   const waiting = waitingLabel(snapshot);
+  const watch = openAgent ? { links: watchLinks(view, release), open: openAgent } : null;
   return (
     <View>
       <ReleaseHeader theme={theme} release={release} now={now} />
       <CommitLine theme={theme} release={release} />
       <PusherLine theme={theme} release={release} title={pusherTitle(view, release)} now={now} />
       <SectionLabel theme={theme}>Etapas</SectionLabel>
-      <StepList theme={theme} release={release} queue={active ? queueSummary(snapshot) : null} now={now} />
+      <StepList theme={theme} release={release} queue={active ? queueSummary(snapshot) : null} now={now} watch={watch} />
       {active && snapshot.runners.length ? (
         <>
           <SectionLabel theme={theme} trailing={waiting ? <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11.5 }}>{waiting}</Text> : null}>
@@ -68,7 +73,7 @@ export function ReleaseBody({
       ) : null}
       <VerdictBanner theme={theme} release={release} />
       {release.verdict === "reverted" || release.verdict === "red" ? <Signals theme={theme} release={release} /> : null}
-      <View style={{ flexDirection: "row", alignItems: "center", gap: 14, marginTop: 12, paddingTop: 10, borderTopWidth: 1, borderTopColor: theme.colors.border }}>
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 14, marginTop: 10, paddingTop: 8, borderTopWidth: 1, borderTopColor: theme.colors.border }}>
         <LinkText theme={theme} href={release.url} icon="ExternalLink" label="ver run" />
         <LinkText theme={theme} href={commitUrl(snapshot.repository, release.headSha)} icon="GitCommitHorizontal" label="ver commit" muted />
         <View style={{ flex: 1 }} />
@@ -83,15 +88,17 @@ export function ReleasePopover({
   theme,
   pick,
   openReleases,
+  openAgent,
 }: {
   theme: PluginTheme;
   pick: (view: ReleaseView) => Release | null;
   openReleases: (() => void) | null;
+  openAgent: OpenAgent | null;
 }) {
   const { view, error, loading } = useReleaseState();
   const release = view?.snapshot ? pick(view) : null;
   return (
-    <ScrollView style={{ maxHeight: 560 }} contentContainerStyle={{ padding: 14, width: 410, maxWidth: "100%" }}>
+    <View style={{ padding: 12, width: 410, maxWidth: "100%" }}>
       {loading && !view ? (
         <Loading />
       ) : !view || !view.snapshot ? (
@@ -108,10 +115,10 @@ export function ReleasePopover({
         </View>
       ) : (
         <>
-          <ReleaseBody theme={theme} view={view} release={release} openReleases={openReleases} />
+          <ReleaseBody theme={theme} view={view} release={release} openReleases={openReleases} openAgent={openAgent} />
           {error ? <Text style={{ color: theme.colors.statusWarning, fontSize: 11.5, marginTop: 8 }}>{error}</Text> : null}
         </>
       )}
-    </ScrollView>
+    </View>
   );
 }

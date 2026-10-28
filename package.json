@@ -17,7 +17,7 @@
     "dist/"
   ],
   "scripts": {
-    "test": "node --test core/test/ opencode/test/ openchamber/test/",
+    "test": "node --test core/test/ opencode/test/ openchamber/test/ client/test/",
     "sync": "node scripts/sync-core.mjs",
     "build": "node scripts/sync-core.mjs && node scripts/build-opencode.mjs && node openchamber/scripts/build.mjs",
     "build:openchamber": "node openchamber/scripts/build.mjs",

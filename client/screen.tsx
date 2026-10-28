@@ -1,11 +1,12 @@
 // The Releases screen (mock p5): the run in flight with its image lanes, the runner queue, the
 // vigia's reverts and the verdict table. Opened from the footer row, the popovers and the
 // Command Center. Reads the client store; "Atualizar" asks the daemon to re-read GitHub.
+// Also the hop target of the popovers and cards: `?open=<agent>&nonce=<ms>` opens that agent.
 import type { PluginTheme } from "@getpaseo/plugin";
 import type { PluginScreenProps } from "@getpaseo/plugin/client";
-import { Icon, Loading, ScrollView, useToast } from "@getpaseo/plugin/client/ui";
+import { copyText, Icon, Loading, ScrollView, useToast } from "@getpaseo/plugin/client/ui";
 import { openExternalUrl } from "@getpaseo/plugin/client";
-import type { ReactNode } from "react";
+import { useEffect, type ReactNode } from "react";
 import { Pressable, Text, View } from "react-native";
 import {
   commitUrl,
@@ -37,6 +38,7 @@ import {
 import type { ReleaseView } from "../shared/rpc.ts";
 import { refreshReleases, retryReleases, useNow, useReleaseState } from "./data.ts";
 import { Badge, LinkText, MONO, PressText, Sha, Tint, toneColor } from "./kit.tsx";
+import { takeHop, watchLinks, type OpenAgent } from "./navigate.ts";
 import { CommitLine, Pipe, PusherLine, QueueLine, ReleaseHeader, RunnerQueue, SectionLabel, Signals, Spin } from "./release-parts.tsx";
 import { pusherTitle, VerdictBanner } from "./release-popover.tsx";
 
@@ -156,7 +158,21 @@ function LaneRow({ theme, lane, compact }: { theme: PluginTheme; lane: Lane; com
 }
 
 /** The run in flight (or the last one), with the image lanes. */
-function RunPanel({ theme, view, release, compact, now }: { theme: PluginTheme; view: ReleaseView; release: Release; compact: boolean; now: Date }) {
+function RunPanel({
+  theme,
+  view,
+  release,
+  compact,
+  now,
+  openAgent,
+}: {
+  theme: PluginTheme;
+  view: ReleaseView;
+  release: Release;
+  compact: boolean;
+  now: Date;
+  openAgent: OpenAgent;
+}) {
   const snapshot = view.snapshot!;
   const active = isActive(release);
   const images = release.steps.find((step) => step.id === "images")!;
@@ -168,7 +184,7 @@ function RunPanel({ theme, view, release, compact, now }: { theme: PluginTheme; 
       <CommitLine theme={theme} release={release} />
       <PusherLine theme={theme} release={release} title={pusherTitle(view, release)} now={now} />
       <View style={{ marginTop: 18, marginBottom: 6 }}>
-        <Pipe theme={theme} release={release} now={now} compact={compact} />
+        <Pipe theme={theme} release={release} now={now} compact={compact} watch={{ links: watchLinks(view, release), open: openAgent }} />
       </View>
       {lanes.length ? (
         <>
@@ -229,7 +245,9 @@ function RevertsPanel({ theme, view }: { theme: PluginTheme; view: ReleaseView }
           const detail = [...tripped, release.pusher ? `sessão ${agentLabel(view, release)}` : null].filter(Boolean).join(" · ");
           return (
             <View key={release.number} style={{ flexDirection: "row", gap: 9, paddingVertical: 5, alignItems: "flex-start" }}>
-              <Text style={{ width: 84, fontFamily: MONO, fontSize: 11.5, color: theme.colors.foreground }}>{releaseLabel(release)}</Text>
+              <Text numberOfLines={1} style={{ width: 118, fontFamily: MONO, fontSize: 11.5, color: theme.colors.foreground }}>
+                {releaseLabel(release)}
+              </Text>
               <View style={{ flex: 1 }}>
                 <Text style={{ color: theme.colors.statusWarning, fontSize: 12 }}>{verdictSignals(release).text}</Text>
                 {detail ? <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11.5 }}>{detail}</Text> : null}
@@ -245,7 +263,7 @@ function RevertsPanel({ theme, view }: { theme: PluginTheme; view: ReleaseView }
 }
 
 const COLUMNS = [
-  { label: "release", width: 104 },
+  { label: "release", width: 140 },
   { label: "commit", flex: 2.4 },
   { label: "agente", flex: 1.2 },
   { label: "duração", width: 64 },
@@ -279,7 +297,7 @@ function VerdictsPanel({ theme, view, compact, now }: { theme: PluginTheme; view
           return (
             <View key={release.number} style={[{ paddingVertical: 9, gap: 4 }, index < rows.length - 1 ? border : null]}>
               <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-                <Text style={{ fontFamily: MONO, fontSize: 12, color: theme.colors.foreground }}>{release.tag ?? "—"}</Text>
+                <Text style={{ fontFamily: MONO, fontSize: 12, color: theme.colors.foreground }}>{releaseLabel(release)}</Text>
                 <Badge theme={theme} tone={badge.tone} label={badge.label} icon={BADGE_ICONS[badge.tone]} />
                 <View style={{ flex: 1 }} />
                 <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>{formatShortDuration(releaseDurationMs(release, now))}</Text>
@@ -310,7 +328,9 @@ function VerdictsPanel({ theme, view, compact, now }: { theme: PluginTheme; view
             const link = linkOf(release);
             return (
               <View key={release.number} style={[{ flexDirection: "row", alignItems: "center", paddingVertical: 9 }, index < rows.length - 1 ? border : null]}>
-                <Text style={[cell(0), { fontFamily: MONO, fontSize: 12, color: theme.colors.foreground }]}>{release.tag ?? "—"}</Text>
+                <Text numberOfLines={1} style={[cell(0), { fontFamily: MONO, fontSize: 12, color: theme.colors.foreground }]}>
+                  {releaseLabel(release)}
+                </Text>
                 <View style={[cell(1), { flexDirection: "row", alignItems: "center", gap: 6 }]}>
                   <Sha theme={theme} sha={shortSha(release.headSha)} />
                   <Text numberOfLines={1} style={{ color: theme.colors.foregroundMuted, fontSize: 12.5, flexShrink: 1 }}>
@@ -339,9 +359,23 @@ function VerdictsPanel({ theme, view, compact, now }: { theme: PluginTheme; view
   );
 }
 
-export function ReleasesScreen({ theme, layout }: PluginScreenProps) {
+export function ReleasesScreen({ theme, layout, params, navigation }: PluginScreenProps) {
   const { view, error, loading, refreshing } = useReleaseState();
   const toast = useToast();
+  // Hosts without `navigation` (older clients) get the agent id on the clipboard instead.
+  const openAgent: OpenAgent = navigation
+    ? (agentId) => navigation.openAgent({ agentId })
+    : (agentId) => {
+        void copyText(agentId).then(
+          () => toast.show(`Este app não abre agentes por plugin; id ${agentId} copiado.`),
+          () => toast.error(`Não consegui copiar o id ${agentId}.`),
+        );
+      };
+  // A hop is consumed once per nonce (`takeHop`), so a re-run or a history entry opens nothing.
+  useEffect(() => {
+    const agentId = takeHop(params);
+    if (agentId) openAgent(agentId);
+  }, [params["open"], params["nonce"]]);
   const now = useNow();
   const compact = layout.compact;
   const snapshot = view?.snapshot ?? null;
@@ -403,7 +437,7 @@ export function ReleasesScreen({ theme, layout }: PluginScreenProps) {
             <View style={{ flexDirection: compact ? "column" : "row", gap: 16, alignItems: "flex-start" }}>
               <View style={{ flex: compact ? undefined : 1, alignSelf: "stretch", minWidth: 0 }}>
                 {featured ? (
-                  <RunPanel theme={theme} view={view!} release={featured} compact={compact} now={now} />
+                  <RunPanel theme={theme} view={view!} release={featured} compact={compact} now={now} openAgent={openAgent} />
                 ) : (
                   <Panel theme={theme}>
                     <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12.5 }}>Nenhum run do release workflow carregado.</Text>

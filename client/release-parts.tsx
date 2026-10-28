@@ -4,7 +4,7 @@
 import type { PluginTheme } from "@getpaseo/plugin";
 import { Icon } from "@getpaseo/plugin/client/ui";
 import { useEffect, useRef, type ReactNode } from "react";
-import { Animated, Easing, Platform, Text, View } from "react-native";
+import { Animated, Easing, Platform, Pressable, Text, View } from "react-native";
 import {
   imageChips,
   pipeMeta,
@@ -32,6 +32,7 @@ import {
   type Step,
 } from "../shared/release-status.ts";
 import { Badge, MONO, Sha, StepMark, Tint, toneColor } from "./kit.tsx";
+import type { OpenAgent, WatchLink } from "./navigate.ts";
 
 const BADGE_ICONS: Partial<Record<Tone, string>> = { ok: "Check", bad: "X", warn: "Undo2" };
 const HEAD_ICONS: Partial<Record<Tone, string>> = { ok: "CircleCheck", bad: "CircleX", warn: "Undo2" };
@@ -108,7 +109,7 @@ export function PusherLine({ theme, release, title, now }: { theme: PluginTheme;
 
 export function SectionLabel({ theme, children, trailing }: { theme: PluginTheme; children: ReactNode; trailing?: ReactNode }) {
   return (
-    <View style={{ flexDirection: "row", alignItems: "center", gap: 8, marginTop: 14, marginBottom: 6 }}>
+    <View style={{ flexDirection: "row", alignItems: "center", gap: 8, marginTop: 12, marginBottom: 4 }}>
       <Text style={{ color: theme.colors.foregroundMuted, opacity: 0.75, fontSize: 11, fontWeight: "500", letterSpacing: 0.6, textTransform: "uppercase" }}>
         {children}
       </Text>
@@ -181,6 +182,37 @@ export function ImageChips({ theme, release, limit }: { theme: PluginTheme; rele
   );
 }
 
+/** Sessions behind the vigia step and how to open one. */
+export interface WatchTargets {
+  readonly links: readonly WatchLink[];
+  readonly open: OpenAgent;
+}
+
+/** `push · “title”` / `investigação · “title”` rows under the vigia step. */
+export function WatchLinks({ theme, watch, style }: { theme: PluginTheme; watch: WatchTargets; style?: object }) {
+  if (!watch.links.length) return null;
+  return (
+    <View style={[{ gap: 2, marginTop: 3 }, style]}>
+      {watch.links.map((link) => (
+        <Pressable
+          key={link.agentId}
+          accessibilityRole="link"
+          accessibilityLabel={`Abrir ${link.label}`}
+          onPress={() => watch.open(link.agentId)}
+          hitSlop={4}
+          style={({ pressed }) => ({ flexDirection: "row", alignItems: "center", gap: 5, opacity: pressed ? 0.6 : 1, minWidth: 0 })}
+        >
+          <Icon name="Bot" size={12} color={theme.colors.accent} />
+          <Text numberOfLines={1} style={{ color: theme.colors.accent, fontSize: 11.5, flexShrink: 1 }}>
+            {link.label}
+          </Text>
+          <Icon name="ArrowUpRight" size={11} color={theme.colors.accent} />
+        </Pressable>
+      ))}
+    </View>
+  );
+}
+
 function stepMarkTone(release: Release, step: Step): Tone | undefined {
   return step.id === "watch" && !isActive(release) ? (watchTone(release) ?? undefined) : undefined;
 }
@@ -191,11 +223,13 @@ export function StepList({
   release,
   queue,
   now,
+  watch,
 }: {
   theme: PluginTheme;
   release: Release;
   queue: string | null;
   now: Date;
+  watch?: WatchTargets | null;
 }) {
   return (
     <View>
@@ -205,9 +239,9 @@ export function StepList({
         const detail = stepDetail(release, step);
         const markTone = stepMarkTone(release, step);
         return (
-          <View key={step.id} style={{ flexDirection: "row", gap: 10, paddingVertical: 6, alignItems: "flex-start" }}>
+          <View key={step.id} style={{ flexDirection: "row", gap: 10, paddingVertical: 4, alignItems: "flex-start" }}>
             {index < release.steps.length - 1 ? (
-              <View style={{ position: "absolute", left: 8.5, top: 25, bottom: -5, width: 1, backgroundColor: theme.colors.border }} />
+              <View style={{ position: "absolute", left: 8.5, top: 23, bottom: -3, width: 1, backgroundColor: theme.colors.border }} />
             ) : null}
             {step.state === "running" ? (
               <View style={{ width: 18, height: 18, alignItems: "center", justifyContent: "center" }}>
@@ -240,6 +274,7 @@ export function StepList({
                   {detail}
                 </Text>
               ) : null}
+              {step.id === "watch" && watch ? <WatchLinks theme={theme} watch={watch} /> : null}
             </View>
             <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11.5, fontVariant: ["tabular-nums"] }}>
               {pending ? "" : formatDuration(duration)}
@@ -252,8 +287,22 @@ export function StepList({
 }
 
 /** The compact horizontal pipe of the timeline card and the screen (mock p4a). */
-export function Pipe({ theme, release, now, compact }: { theme: PluginTheme; release: Release; now: Date; compact: boolean }) {
-  return (
+export function Pipe({
+  theme,
+  release,
+  now,
+  compact,
+  watch,
+}: {
+  theme: PluginTheme;
+  release: Release;
+  now: Date;
+  compact: boolean;
+  watch?: WatchTargets | null;
+}) {
+  // One session: the vigia node itself opens it. More: the links go under the pipe.
+  const single = watch && watch.links.length === 1 ? watch.links[0]! : null;
+  const pipe = (
     <View style={{ flexDirection: "row", alignItems: "flex-start" }}>
       {release.steps.map((step, index) => {
         const markTone = stepMarkTone(release, step);
@@ -261,7 +310,8 @@ export function Pipe({ theme, release, now, compact }: { theme: PluginTheme; rel
         const color = toneColor(theme, tone);
         const last = index === release.steps.length - 1;
         const muted = tone === "muted";
-        return (
+        const link = step.id === "watch" ? single : null;
+        const node = (
           <View key={step.id} style={{ flex: 1, minWidth: 0, paddingTop: 22 }}>
             {!last ? (
               <Tint
@@ -298,9 +348,36 @@ export function Pipe({ theme, release, now, compact }: { theme: PluginTheme; rel
             <Text numberOfLines={1} style={{ color: theme.colors.foregroundMuted, fontSize: compact ? 10.5 : 11.5, marginTop: 1 }}>
               {pipeMeta(release, step, now)}
             </Text>
+            {link ? (
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 3, marginTop: 1, minWidth: 0 }}>
+                <Icon name="Bot" size={11} color={theme.colors.accent} />
+                <Text numberOfLines={1} style={{ color: theme.colors.accent, fontSize: compact ? 10.5 : 11.5, flexShrink: 1 }}>
+                  {link.label.split(" · ")[0]}
+                </Text>
+              </View>
+            ) : null}
           </View>
         );
+        if (!link || !watch) return node;
+        return (
+          <Pressable
+            key={step.id}
+            accessibilityRole="link"
+            accessibilityLabel={`Abrir ${link.label}`}
+            onPress={() => watch.open(link.agentId)}
+            style={({ pressed }) => ({ flex: 1, minWidth: 0, opacity: pressed ? 0.6 : 1 })}
+          >
+            {node}
+          </Pressable>
+        );
       })}
+    </View>
+  );
+  if (!watch || watch.links.length < 2) return pipe;
+  return (
+    <View>
+      {pipe}
+      <WatchLinks theme={theme} watch={watch} style={{ marginTop: 8 }} />
     </View>
   );
 }
@@ -325,17 +402,17 @@ export function RunnerQueue({ theme, snapshot }: { theme: PluginTheme; snapshot:
   );
 }
 
-/** "Sinais do blast radius · janela de 10 min" (mock p4b revert card). */
+/** "Sinais do blast radius" (mock p4b revert card). */
 export function Signals({ theme, release }: { theme: PluginTheme; release: Release }) {
   if (!release.signals.length) return null;
   return (
     <View>
-      <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11.5, marginTop: 12, marginBottom: 4 }}>Sinais do blast radius · janela de 10 min</Text>
+      <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11.5, marginTop: 10, marginBottom: 2 }}>Sinais do blast radius</Text>
       {release.signals.map((signal) => {
         const outcome = signalOutcome(signal);
         const color = toneColor(theme, outcome.tone);
         return (
-          <View key={signal.source} style={{ flexDirection: "row", alignItems: "center", gap: 8, paddingVertical: 4 }}>
+          <View key={signal.source} style={{ flexDirection: "row", alignItems: "center", gap: 8, paddingVertical: 3 }}>
             <Icon name={outcome.tone === "bad" ? "CircleX" : outcome.tone === "ok" ? "CircleCheck" : "CircleDashed"} size={13} color={color} />
             <Text numberOfLines={2} style={{ color: theme.colors.foreground, fontSize: 12, flex: 1 }}>
               {signalText(signal)}
