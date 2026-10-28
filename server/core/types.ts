@@ -17,7 +17,8 @@ export interface NoteSession extends SessionRef {
 /** Body of a `refs/notes/release-watch` note, keyed by the commit of tag `release-<n>`. */
 export interface Note {
   readonly release: string | number;
-  readonly verdict?: string;
+  /** The watch verdict object (`{verdict, sources, missing, at}`); read through release-status. */
+  readonly verdict?: unknown;
   readonly range?: { readonly from?: string; readonly to?: string };
   readonly sessions?: readonly NoteSession[];
   readonly state: string;
@@ -30,6 +31,10 @@ export interface Note {
   };
   readonly decision?: { readonly action?: string; readonly commits?: readonly string[] };
   readonly fix?: { readonly session?: string; readonly readyAt?: string };
+  /** `{commit, commits, reason, at, dispatched}` once a revert is under way. */
+  readonly revert?: unknown;
+  /** Written by this plugin when a call failed on every rung. */
+  readonly recall?: unknown;
 }
 
 /** `~/.config/agent-recall/config.json`. */

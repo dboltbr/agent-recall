@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 import { loadConfig } from "../host.ts";
+import type { ReleaseTracker, TrackerTickInput } from "../release-fetch.ts";
 import type { HostConfig, Note } from "../types.ts";
 import { createWatcher } from "../watcher.ts";
 import {
@@ -28,6 +29,7 @@ async function setup(options: {
   delivery?: ReturnType<typeof fakeDelivery>;
   harness?: "paseo" | "opencode";
   push?: "ok" | "reject";
+  release?: ReleaseTracker;
 }) {
   const stateDir = options.stateDir ?? (await tempState());
   const configFile = await writeConfig(await tempState(), options.config ?? config);
@@ -47,6 +49,7 @@ async function setup(options: {
     exec: git.exec,
     delivery: delivery.delivery,
     log: quietLog,
+    release: options.release,
   });
   return { watcher, github, git, delivery, clock, stateDir };
 }
@@ -230,4 +233,31 @@ test("credencial recusada (401) não grava heartbeat", async () => {
   const report = await watcher.tick();
   assert.equal(report.poll, "error");
   await assert.rejects(readFile(join(stateDir, "opencode.alive"), "utf8"));
+});
+
+test("release: o rastreador anda com o token, as notas e o sinal de mudança do poller", async () => {
+  const ticks: TrackerTickInput[] = [];
+  const release: ReleaseTracker = {
+    async tick(input) {
+      ticks.push(input);
+      throw new Error("GitHub fora");
+    },
+    refresh: async () => false,
+    current: () => null,
+  };
+  const { watcher } = await setup({
+    notes: { tagcommit: mineRed },
+    refs: [{ status: 200, etag: 'W/"e1"', sha: "n1" }, { status: 304 }],
+    release,
+  });
+  await watcher.tick();
+  const report = await watcher.tick();
+  assert.equal(report.poll, "unchanged", "falha do rastreador não derruba o tick");
+  assert.deepEqual(
+    ticks.map((tick) => [tick.token, tick.notesChanged, [...tick.notes.keys()]]),
+    [
+      ["gho_test", true, ["tagcommit"]],
+      ["gho_test", false, ["tagcommit"]],
+    ],
+  );
 });

@@ -136,3 +136,30 @@ export async function writeConfig(dir: string, value: HostConfig = config): Prom
   await writeFile(path, JSON.stringify(value));
   return path;
 }
+
+export interface ApiReply {
+  readonly status?: number;
+  readonly body?: unknown;
+  readonly etag?: string;
+}
+
+/**
+ * GitHub REST fake keyed by path (no host, query kept). A route answering with an `etag` replies
+ * 304 when the request carries that ETag. Unknown paths are 404.
+ */
+export function fakeApi(routes: Record<string, ApiReply | (() => ApiReply)>) {
+  const calls: Array<{ path: string; ifNoneMatch: string | null; status: number }> = [];
+  const fetch: Fetch = async (url, init) => {
+    const path = url.replace("https://api.github.com/", "");
+    const headers = (init?.headers ?? {}) as Record<string, string>;
+    const ifNoneMatch = headers["If-None-Match"] ?? null;
+    const route = routes[path];
+    const reply = typeof route === "function" ? route() : route;
+    let status = reply ? (reply.status ?? 200) : 404;
+    if (reply?.etag && ifNoneMatch === reply.etag && status === 200) status = 304;
+    calls.push({ path, ifNoneMatch, status });
+    if (status !== 200) return new Response(null, { status });
+    return new Response(JSON.stringify(reply!.body), { status, headers: reply!.etag ? { etag: reply!.etag } : {} });
+  };
+  return { fetch, calls, paths: () => calls.map((call) => call.path), fresh: () => calls.filter((call) => call.status === 200) };
+}

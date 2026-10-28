@@ -3,6 +3,7 @@ import { deliver, type Delivery, type Outcome } from "./deliver.ts";
 import { acquireLock, writeHeartbeat } from "./host.ts";
 import { fetchNotes, recordRecallFailure, type FetchedNote } from "./notes.ts";
 import { describe, POLL_INTERVAL_MS, pollRef, type PollResult } from "./poll.ts";
+import type { ReleaseTracker } from "./release-fetch.ts";
 import { describeAction, dueReminder, isRecent, route, type Action } from "./route.ts";
 import type { Clock, Exec, Fetch, Harness, HostConfig, Logger, Me, Note } from "./types.ts";
 
@@ -21,6 +22,8 @@ export interface WatcherOptions {
   readonly exec: Exec;
   readonly delivery: Delivery;
   readonly log: Logger;
+  /** Release status (Paseo UI): rides this poller's token, notes and cadence. */
+  readonly release?: ReleaseTracker;
 }
 
 export interface Handled {
@@ -159,6 +162,11 @@ export function createWatcher(options: WatcherOptions): Watcher {
       if (!reminder) continue;
       const done = await act(reminder, key, note, config, me, auth);
       if (done) handled.push(done);
+    }
+    if (options.release) {
+      await options.release
+        .tick({ token: auth, notes, notesChanged: fetched })
+        .catch((error) => log.warn(`release: ${describe(error)}`));
     }
     return { poll: poll.kind, fetched, handled };
   }
