@@ -8,10 +8,13 @@ import {
   pusherLine,
   queueHint,
   releaseBadge,
+  releaseLineIcon,
+  releaseRange,
   revertRows,
   runnerRows,
   stepDetail,
   stepDurationMs,
+  supersededGroup,
   verdictBanner,
   verdictRows,
   verdictSignals,
@@ -213,4 +216,31 @@ test("watchSessions: quem fez o push e para onde o incidente foi, uma entrada po
     watchSessions(active()).map((entry) => entry.kinds),
     [["push"]],
   );
+});
+
+test("linha recolhida: ícone pelo veredito, falha e revert inconfundíveis", () => {
+  assert.equal(releaseLineIcon(active()), "LoaderCircle");
+  assert.equal(releaseLineIcon(done(180)), "CircleCheck");
+  assert.equal(releaseLineIcon(done(181, [...VERIFY_DONE, job("images-command / build-push-api", "failure", [5, 4])], null, "failure")), "CircleX");
+  assert.equal(releaseLineIcon(done(184, finished("failure"), null, "failure")), "CircleDashed", "vigia sem veredito");
+  assert.equal(releaseLineIcon(done(182, finished("cancelled"), null, "cancelled")), "CircleSlash");
+  assert.equal(releaseLineIcon(done(183, [job("trigger", "success", [3, 2.9])])), "CircleMinus");
+});
+
+test("releaseRange: contíguo vira faixa, poucos espalhados viram lista", () => {
+  assert.equal(releaseRange([249, 247, 248]), "#247–#249");
+  assert.equal(releaseRange([246, 248]), "#246, #248");
+  assert.equal(releaseRange([240, 242, 244, 246, 248]), "#240–#248");
+  assert.equal(releaseRange([250]), "#250");
+});
+
+test("supersededGroup: conta e diz o que foi descartado", () => {
+  const cancelled = (number: number) => done(number, finished("cancelled"), null, "cancelled");
+  const noop = (number: number) => done(number, [job("trigger", "success", [3, 2.9])]);
+  assert.deepEqual(supersededGroup([cancelled(246), cancelled(247), cancelled(248), cancelled(249)]), {
+    title: "4 lançamentos cancelados",
+    range: "#246–#249",
+  });
+  assert.equal(supersededGroup([noop(250), noop(251)]).title, "2 lançamentos sem publicação");
+  assert.equal(supersededGroup([cancelled(250), noop(251)]).title, "2 lançamentos cancelados ou sem publicação");
 });

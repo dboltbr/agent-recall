@@ -10,10 +10,12 @@ import {
   pipeMeta,
   pusherLine,
   releaseBadge,
+  releaseLineIcon,
   runnerRows,
   signalOutcome,
   signalText,
   stepDetail,
+  supersededGroup,
   stepDurationMs,
   stepLabelOf,
   stepTone,
@@ -69,6 +71,82 @@ export function ReleaseHeader({ theme, release, now, icon }: { theme: PluginThem
         {formatShortDuration(duration)}
       </Text>
     </View>
+  );
+}
+
+/**
+ * A finished release on one line (number and time, verdict, commit, duration); pressing it opens
+ * the full card. Failures and reverts keep their color on the icon and the badge.
+ */
+export function ReleaseLine({
+  theme,
+  release,
+  now,
+  open,
+  onPress,
+}: {
+  theme: PluginTheme;
+  release: Release;
+  now: Date;
+  open: boolean;
+  onPress(): void;
+}) {
+  const badge = releaseBadge(release);
+  const color = toneColor(theme, badge.tone);
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityState={{ expanded: open }}
+      accessibilityLabel={`${releaseLabel(release)}, ${badge.label}. ${open ? "Recolher" : "Mostrar detalhes"}`}
+      onPress={onPress}
+      hitSlop={4}
+      style={({ pressed }) => ({ flexDirection: "row", alignItems: "center", gap: 8, minWidth: 0, opacity: pressed ? 0.6 : 1 })}
+    >
+      {isActive(release) ? <Spin color={color} size={14} /> : <Icon name={releaseLineIcon(release)} size={14} color={color} />}
+      <Text style={{ color: theme.colors.foreground, fontWeight: "600", fontSize: 12.5 }}>{releaseLabel(release)}</Text>
+      <Badge theme={theme} tone={badge.tone} label={badge.label} />
+      <Sha theme={theme} sha={shortSha(release.headSha)} />
+      <Text numberOfLines={1} style={{ color: theme.colors.foregroundMuted, fontSize: 12, flex: 1, minWidth: 0 }}>
+        {release.title}
+      </Text>
+      <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11.5, fontVariant: ["tabular-nums"] }}>
+        {formatShortDuration(releaseDurationMs(release, now))}
+      </Text>
+      <Icon name={open ? "ChevronDown" : "ChevronRight"} size={14} color={theme.colors.foregroundMuted} />
+    </Pressable>
+  );
+}
+
+/** `4 lançamentos cancelados  #246–#249`: the line that stands for a streak of superseded runs. */
+export function SupersededLine({
+  theme,
+  releases,
+  open,
+  onPress,
+}: {
+  theme: PluginTheme;
+  releases: readonly Release[];
+  open: boolean;
+  onPress(): void;
+}) {
+  const { title, range } = supersededGroup(releases);
+  const icon = releases.every((release) => release.verdict === "none") ? "CircleMinus" : "CircleSlash";
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityState={{ expanded: open }}
+      accessibilityLabel={`${title} (${range}). ${open ? "Recolher" : "Mostrar"}`}
+      onPress={onPress}
+      hitSlop={4}
+      style={({ pressed }) => ({ flexDirection: "row", alignItems: "center", gap: 8, minWidth: 0, opacity: pressed ? 0.6 : 1 })}
+    >
+      <Icon name={icon} size={14} color={theme.colors.foregroundMuted} />
+      <Text style={{ color: theme.colors.foreground, fontWeight: "600", fontSize: 12.5 }}>{title}</Text>
+      <Text numberOfLines={1} style={{ color: theme.colors.foregroundMuted, fontSize: 12, flex: 1, minWidth: 0 }}>
+        {range}
+      </Text>
+      <Icon name={open ? "ChevronDown" : "ChevronRight"} size={14} color={theme.colors.foregroundMuted} />
+    </Pressable>
   );
 }
 

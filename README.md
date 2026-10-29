@@ -41,6 +41,9 @@ O modelo fica em `core/release-status.ts`, a cópia em pt-BR em `core/release-co
   etapas. Sem nada recente, a linha "Releases" abre a tela.
 - **Card na timeline** do agente que fez o push (`core/release-cards.ts`): reanexado com o mesmo
   id enquanto o run anda; variantes de falha (job + ver log) e de reversão (sinais do vigia).
+  Terminado, recolhe numa linha (falha em vermelho, reversão em amarelo) que abre o card ao
+  tocar. Cancelados e sem publicação seguidos do mesmo agente viram uma linha só no card mais
+  novo ("4 lançamentos cancelados #246–#249"); os cards mais velhos da sequência somem.
 - **Tela Releases** (rodapé, popovers, Command Center "Abrir Releases"): run em andamento com as
   faixas das imagens, fila de runners, reversões do vigia e tabela de vereditos.
 

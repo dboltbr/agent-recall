@@ -567,13 +567,14 @@ export function activeReleases(snapshot: ReleaseSnapshot): Release[] {
   return [...active.filter((release) => release.status === "running"), ...active.filter((release) => release.status !== "running")];
 }
 
+/** A finished run that published nothing: cancelled by a newer push, or a no-op (flux-only push). */
+export function isSuperseded(release: Release): boolean {
+  return !isActive(release) && (release.verdict === "cancelled" || release.verdict === "none");
+}
+
 /** Newest finished release that published or tried to (not cancelled, not a no-op). */
 export function lastFinished(snapshot: ReleaseSnapshot): Release | null {
-  return (
-    snapshot.releases.find(
-      (release) => !isActive(release) && release.verdict !== "cancelled" && release.verdict !== "none",
-    ) ?? null
-  );
+  return snapshot.releases.find((release) => !isActive(release) && !isSuperseded(release)) ?? null;
 }
 
 /** What the sidebar row shows: the newest active run, else the last verdict while still recent. */

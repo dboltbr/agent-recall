@@ -1,10 +1,13 @@
 // Release timeline card: the row the daemon appends to the timeline of the agent that pushed the
-// head commit of a release, re-appended with the same id as the run moves. Pure: the append and
-// the fingerprint store are injected. Shared with the client (`shared/release-cards.ts`) for the
-// card schema the renderer validates.
+// head commit of a release, re-appended with the same id as the run moves (the app replaces a
+// plugin row of the same id in place). Consecutive superseded releases of one agent fold into the
+// newest card: the older ones are re-appended as `foldedInto` and render nothing. Pure: the append
+// and the fingerprint store are injected. Shared with the client (`shared/release-cards.ts`) for
+// the card schema the renderer validates.
 import { z } from "zod";
 import {
   isActive,
+  isSuperseded,
   queueSummary,
   RECENT_VERDICT_MS,
   ReleaseSchema,
@@ -25,6 +28,10 @@ export const ReleaseCardSchema = z.object({
   pusherTitle: z.string().nullable(),
   /** `6 na fila — runner solid-srv ocupado` while jobs wait. */
   queue: z.string().nullable(),
+  /** Older superseded releases of the same agent, oldest first, listed in this card's group line. */
+  folded: z.array(ReleaseSchema).optional(),
+  /** Number of the newer card whose group line lists this release: this one renders nothing. */
+  foldedInto: z.number().int().optional(),
 });
 export type ReleaseCard = z.infer<typeof ReleaseCardSchema>;
 
@@ -40,13 +47,51 @@ export function cardId(release: Pick<Release, "number">): string {
   return `release-${release.number}`;
 }
 
-/** The card data: skipped jobs and those outside the five steps (`trigger`, `summary`) dropped. */
-export function cardFor(release: Release, snapshot: ReleaseSnapshot, pusherTitle: string | null): ReleaseCard {
-  return {
+/** Where a card sits in a fold of superseded releases (none: a card of its own). */
+export interface CardFold {
+  readonly folded?: readonly Release[];
+  readonly foldedInto?: number;
+}
+
+/**
+ * Folds each streak of consecutive superseded releases (cancelled by a newer push, or no-op) of
+ * one agent into its newest one, by release number. Anything else (active, published, failed)
+ * breaks the streak. Pass the releases of a single agent.
+ */
+export function foldSuperseded(releases: readonly Release[]): Map<number, CardFold> {
+  const folds = new Map<number, CardFold>();
+  let streak: Release[] = [];
+  const close = () => {
+    const head = streak.at(-1);
+    if (head && streak.length > 1) {
+      const older = streak.slice(0, -1);
+      folds.set(head.number, { folded: older });
+      for (const release of older) folds.set(release.number, { foldedInto: head.number });
+    }
+    streak = [];
+  };
+  for (const release of [...releases].sort((a, b) => a.number - b.number)) {
+    if (isSuperseded(release)) streak.push(release);
+    else close();
+  }
+  close();
+  return folds;
+}
+
+/**
+ * The card data: skipped jobs and those outside the five steps (`trigger`, `summary`) dropped.
+ * Folded releases go without jobs (a superseded run has no image chips to show; keeps the row
+ * small with a long streak).
+ */
+export function cardFor(release: Release, snapshot: ReleaseSnapshot, pusherTitle: string | null, fold: CardFold = {}): ReleaseCard {
+  const card: ReleaseCard = {
     release: { ...release, jobs: release.jobs.filter((job) => job.step !== null && job.state !== "skipped") },
     pusherTitle,
     queue: isActive(release) ? queueSummary(snapshot) : null,
   };
+  if (fold.folded?.length) card.folded = fold.folded.map((older) => ({ ...older, jobs: [] }));
+  if (fold.foldedInto !== undefined) card.foldedInto = fold.foldedInto;
+  return card;
 }
 
 /**
@@ -131,13 +176,34 @@ export function createCardPublisher(options: CardPublisherOptions): CardPublishe
     });
     let appended = 0;
     let dirty = false;
-    for (const release of cardTargets(snapshot, options.now())) {
-      const agentId = await pusherAgent(release.pusher!, options.harness, options.host, options.resolve);
+    // Folds run over every release of the agent in the snapshot, not only the recent ones: a
+    // streak must not shrink (and orphan a hidden card) when its oldest member leaves the window.
+    const owners = new Map<number, string>();
+    for (const release of snapshot.releases) {
+      if (!release.pusher) continue;
+      const agentId = await pusherAgent(release.pusher, options.harness, options.host, options.resolve);
+      if (agentId) owners.set(release.number, agentId);
+    }
+    const folds = new Map<number, CardFold>();
+    for (const agentId of new Set(owners.values())) {
+      const mine = snapshot.releases.filter((release) => owners.get(release.number) === agentId);
+      for (const [number, fold] of foldSuperseded(mine)) folds.set(number, fold);
+    }
+    // Recent cards, plus older superseded ones already appended: those only change to fold away.
+    const targets = new Set(cardTargets(snapshot, options.now()));
+    const due = snapshot.releases.filter(
+      (release) => targets.has(release) || (isSuperseded(release) && known![cardId(release)] !== undefined),
+    );
+    for (const release of due) {
+      const agentId = owners.get(release.number);
       if (!agentId) continue;
-      const title = (await options.title?.(agentId).catch(() => null)) ?? null;
-      const card = cardFor(release, snapshot, title);
-      const fingerprint = cardFingerprint(card);
       const id = cardId(release);
+      const fold = folds.get(release.number);
+      // A card that would only render nothing is not worth a new row.
+      if (fold?.foldedInto !== undefined && known[id] === undefined) continue;
+      const title = (await options.title?.(agentId).catch(() => null)) ?? null;
+      const card = cardFor(release, snapshot, title, fold);
+      const fingerprint = cardFingerprint(card);
       if (known[id] === fingerprint) continue;
       // Recorded either way: a failed append (archived agent, older daemon) waits for the next change.
       known[id] = fingerprint;

@@ -333,6 +333,45 @@ export function verdictBanner(release: Release): { tone: Tone; text: string; lin
   }
 }
 
+/** Icon of the collapsed one-line release: the verdict at a glance (failures red, reverts yellow). */
+export function releaseLineIcon(release: Release): string {
+  if (isActive(release)) return "LoaderCircle";
+  switch (release.verdict) {
+    case "green":
+      return "CircleCheck";
+    case "red":
+    case "failed":
+      return "CircleX";
+    case "reverted":
+      return "Undo2";
+    case "cancelled":
+      return "CircleSlash";
+    case "none":
+      return "CircleMinus";
+    default:
+      return "CircleDashed";
+  }
+}
+
+/** `#246–#249` for a contiguous run of numbers, `#246, #248` for a few scattered, else the span. */
+export function releaseRange(numbers: readonly number[]): string {
+  const sorted = [...new Set(numbers)].sort((a, b) => a - b);
+  if (!sorted.length) return "";
+  const first = sorted[0]!;
+  const last = sorted.at(-1)!;
+  if (sorted.length === 1) return `#${first}`;
+  if (last - first + 1 === sorted.length || sorted.length > 4) return `#${first}–#${last}`;
+  return sorted.map((number) => `#${number}`).join(", ");
+}
+
+/** Group line of two or more superseded releases: `4 lançamentos cancelados` and `#246–#249`. */
+export function supersededGroup(releases: readonly Release[]): { title: string; range: string } {
+  const cancelled = releases.filter((release) => release.verdict === "cancelled").length;
+  const what =
+    cancelled === releases.length ? "cancelados" : cancelled === 0 ? "sem publicação" : "cancelados ou sem publicação";
+  return { title: `${releases.length} lançamentos ${what}`, range: releaseRange(releases.map((release) => release.number)) };
+}
+
 /** The watch job's page: where its signals are logged. */
 export function watchUrl(release: Release): string | null {
   return release.jobs.find((job) => job.step === "watch" && job.url)?.url ?? null;
