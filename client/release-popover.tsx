@@ -10,16 +10,15 @@ import { isActive, queueSummary, type Release } from "../shared/release-status.t
 import type { ReleaseView } from "../shared/rpc.ts";
 import { agentTitle, retryReleases, useNow, useReleaseState } from "./data.ts";
 import { Banner, LinkText, PressText } from "./kit.tsx";
-import { watchLinks, type OpenAgent } from "./navigate.ts";
+import { localAgent, watchLinks, type OpenAgent } from "./navigate.ts";
 import { CommitLine, PusherLine, ReleaseHeader, RunnerQueue, SectionLabel, Signals, StepList } from "./release-parts.tsx";
 
 const BANNER_ICONS = { ok: "ShieldCheck", bad: "CircleX", warn: "Undo2", run: "Info", muted: "Info" } as const;
 
 /** Title of the pusher when it is an agent of this daemon. */
 export function pusherTitle(view: ReleaseView, release: Release): string | null {
-  const pusher = release.pusher;
-  if (!pusher || pusher.harness !== "paseo" || pusher.host !== view.host) return null;
-  return agentTitle(view, pusher.id);
+  const agentId = release.pusher ? localAgent(view, release.pusher) : null;
+  return agentId ? agentTitle(view, agentId) : null;
 }
 
 /** The finished release's banner with its link (ver log / ver sinais). */

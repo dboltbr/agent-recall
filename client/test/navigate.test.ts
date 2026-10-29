@@ -5,7 +5,7 @@ import type { ReleaseView } from "../../shared/rpc.ts";
 import { NOW } from "../../core/test/fakes.ts";
 import { finished, minutesAgo, run } from "../../core/test/releases.ts";
 import type { Note } from "../../shared/types.ts";
-import { hopToAgent, RELEASES_SCREEN, takeHop, watchLinks } from "../navigate.ts";
+import { hopToAgent, localAgent, RELEASES_SCREEN, sessionsOfAgent, takeHop, watchLinks } from "../navigate.ts";
 
 const HOST = "srv_X";
 
@@ -29,8 +29,12 @@ function redRelease() {
   });
 }
 
-function viewOf(agents: string[]): ReleaseView {
-  return { host: HOST, snapshot: null, agents: agents.map((id) => ({ id, title: id === "agent-pusher" ? "Aviso" : null, workspaceId: "w" })) };
+function viewOf(agents: string[], openCode: Record<string, string> = {}): ReleaseView {
+  return {
+    host: HOST,
+    snapshot: null,
+    agents: agents.map((id) => ({ id, title: id === "agent-pusher" ? "Aviso" : null, workspaceId: "w", openCodeSession: openCode[id] ?? null })),
+  };
 }
 
 test("watchLinks: só agentes Paseo deste host que existem; o agente do cartão conta como existente", () => {
@@ -44,6 +48,34 @@ test("watchLinks: só agentes Paseo deste host que existem; o agente do cartão 
     ["agent-pusher"],
     "sem view: só o agente conhecido",
   );
+});
+
+test("watchLinks: sessão OpenCode que um agente Paseo deste daemon roda vira link para o agente", () => {
+  const release = redRelease();
+  const view = viewOf(["agent-pusher", "agent-oc"], { "agent-oc": "ses_fix" });
+  assert.deepEqual(
+    watchLinks(view, release).map((link) => link.agentId),
+    ["agent-pusher", "agent-oc"],
+  );
+  assert.equal(localAgent(view, { harness: "opencode", host: "archdev", id: "ses_fix" }), "agent-oc");
+  assert.equal(localAgent(viewOf(["agent-oc"]), { harness: "opencode", host: "archdev", id: "ses_fix" }), null, "sem agente que rode a sessão, sem link");
+});
+
+test("sessionsOfAgent: o agente vale pelo ref paseo e pela sessão OpenCode que roda", () => {
+  const release = buildRelease({
+    run: run({ run_number: 191, head_commit: { message: "fix: y\n\nAgent-Session: opencode/felipe-win/ses_oc\n" } }),
+    jobs: finished("success"),
+    note: null,
+    commits: null,
+    handoffs: [],
+    now: NOW,
+  });
+  const view = { ...viewOf(["agent-oc"], { "agent-oc": "ses_oc" }), snapshot: { releases: [release] } as unknown as ReleaseView["snapshot"] };
+  assert.deepEqual(sessionsOfAgent(view, "agent-oc"), [
+    { harness: "paseo", host: HOST, id: "agent-oc" },
+    { harness: "opencode", host: "felipe-win", id: "ses_oc" },
+  ]);
+  assert.equal(watchLinks(view, release)[0]?.agentId, "agent-oc");
 });
 
 test("salto pela tela: abre uma vez por nonce e ignora salto velho", () => {

@@ -3,7 +3,7 @@
 // `?open=<agent>&nonce=<ms>`, and the screen opens the agent once per nonce.
 import type { PluginOpenScreenInput } from "@getpaseo/plugin/client";
 import { watchSessionLabel, watchSessions } from "../shared/release-copy.ts";
-import type { Release } from "../shared/release-status.ts";
+import type { Release, Session } from "../shared/release-status.ts";
 import type { ReleaseView } from "../shared/rpc.ts";
 import { agentTitle } from "./data.ts";
 
@@ -21,21 +21,41 @@ export interface WatchLink {
 
 /**
  * Vigia links this daemon can open: the pusher and the incident's handoffs that are Paseo agents
- * of this host and exist (`view.agents` only lists agents with a record). `known` adds agents that
- * exist for sure, such as the agent a timeline card lives in.
+ * of this host, or OpenCode sessions a Paseo agent of this host runs, and exist (`view.agents` only
+ * lists agents with a record). `known` adds agents that exist for sure, such as the agent a
+ * timeline card lives in.
  */
 export function watchLinks(view: ReleaseView | null, release: Release, known: readonly string[] = []): WatchLink[] {
-  const host = view?.host ?? null;
   const links: WatchLink[] = [];
   for (const entry of watchSessions(release)) {
-    const { session } = entry;
-    if (session.harness !== "paseo") continue;
-    const local = host !== null && session.host === host;
-    const exists = (local && view!.agents.some((agent) => agent.id === session.id)) || known.includes(session.id);
-    if (!exists) continue;
-    links.push({ agentId: session.id, label: watchSessionLabel(entry, agentTitle(view, session.id)) });
+    const agentId = localAgent(view, entry.session, known);
+    if (!agentId || links.some((link) => link.agentId === agentId)) continue;
+    links.push({ agentId, label: watchSessionLabel(entry, agentTitle(view, agentId)) });
   }
   return links;
+}
+
+/**
+ * The Paseo agent of this daemon behind `session`, or null: a `paseo/<host>/…` agent of this host,
+ * or the agent on the OpenCode provider running the `opencode/…/<ses_…>` session.
+ */
+export function localAgent(view: ReleaseView | null, session: Session, known: readonly string[] = []): string | null {
+  if (session.harness === "opencode") return view?.agents.find((agent) => agent.openCodeSession === session.id)?.id ?? null;
+  if (session.harness !== "paseo") return null;
+  const local = !!view?.host && session.host === view.host && view.agents.some((agent) => agent.id === session.id);
+  return local || known.includes(session.id) ? session.id : null;
+}
+
+/** Sessions that mean `agentId` in the snapshot: its `paseo/<host>/…` ref and the OpenCode session it runs. */
+export function sessionsOfAgent(view: ReleaseView, agentId: string): Session[] {
+  const refs: Session[] = view.host ? [{ harness: "paseo", host: view.host, id: agentId }] : [];
+  const openCode = view.agents.find((agent) => agent.id === agentId)?.openCodeSession;
+  if (!openCode) return refs;
+  for (const release of view.snapshot?.releases ?? []) {
+    const session = release.sessions.find((known) => known.harness === "opencode" && known.id === openCode);
+    if (session && !refs.some((known) => known.harness === session.harness && known.host === session.host)) refs.push(session);
+  }
+  return refs;
 }
 
 /** Opens `agentId` through the Releases screen (for surfaces without `navigation`). */

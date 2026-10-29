@@ -10,14 +10,19 @@ import { pillLabel, releaseForSession, type Release } from "../shared/release-st
 import type { ReleaseView } from "../shared/rpc.ts";
 import { releaseState, subscribeReleases, useReleaseState } from "./data.ts";
 import { toneColor } from "./kit.tsx";
-import { hopToAgent, RELEASES_SCREEN } from "./navigate.ts";
+import { hopToAgent, RELEASES_SCREEN, sessionsOfAgent } from "./navigate.ts";
 import { ReleasePopover } from "./release-popover.tsx";
 
 const PILL_ID = "release";
 
 function releaseOfAgent(view: ReleaseView | null, agentId: string): Release | null {
-  if (!view?.snapshot || !view.host) return null;
-  return releaseForSession(view.snapshot, { harness: "paseo", host: view.host, id: agentId });
+  const snapshot = view?.snapshot;
+  if (!snapshot) return null;
+  for (const session of sessionsOfAgent(view, agentId)) {
+    const release = releaseForSession(snapshot, session);
+    if (release) return release;
+  }
+  return null;
 }
 
 /** Rocket with a status dot in the release's tone (reads the store, so it follows the run). */

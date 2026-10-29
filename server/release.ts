@@ -121,17 +121,23 @@ export function createReleaseService(options: ReleaseServiceOptions): ReleaseSer
 
   async function view(): Promise<ReleaseView> {
     const snapshot = tracker.current();
-    const ids = new Set<string>();
+    const ids = new Map<string, string | null>();
+    const openCode = new Map<string, Session>();
     for (const release of snapshot?.releases ?? []) {
       for (const session of [...release.sessions, ...release.handoffs.map((handoff) => handoff.session)]) {
-        if (session.harness === "paseo" && session.host === host) ids.add(session.id);
+        if (session.harness === "paseo" && session.host === host) ids.set(session.id, ids.get(session.id) ?? null);
+        if (session.harness === "opencode") openCode.set(session.id, session);
       }
+    }
+    for (const session of openCode.values()) {
+      const agentId = await resolve(session);
+      if (agentId) ids.set(agentId, session.id);
     }
     // Only agents this daemon knows: the client links exactly the ids listed here.
     const found = await Promise.all(
-      [...ids].map(async (id): Promise<AgentInfo | null> => {
+      [...ids].map(async ([id, openCodeSession]): Promise<AgentInfo | null> => {
         const entry = await lookup(id);
-        return entry ? { id, title: entry.title, workspaceId: entry.workspaceId } : null;
+        return entry ? { id, title: entry.title, workspaceId: entry.workspaceId, openCodeSession } : null;
       }),
     );
     const agents = found.filter((agent): agent is AgentInfo => agent !== null);

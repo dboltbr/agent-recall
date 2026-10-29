@@ -8,6 +8,8 @@ export const AgentInfoSchema = z.object({
   id: z.string(),
   title: z.string().nullable(),
   workspaceId: z.string().nullable(),
+  /** The OpenCode session this agent runs (provider opencode): its `opencode/…/<ses_…>` trailers link here. */
+  openCodeSession: z.string().nullable().default(null),
 });
 export type AgentInfo = z.infer<typeof AgentInfoSchema>;
 
@@ -16,7 +18,8 @@ export const ReleaseViewSchema = z.object({
   host: z.string().nullable(),
   /** Null until the first load (no token yet, or still booting). */
   snapshot: ReleaseSnapshotSchema.nullable(),
-  /** Local Paseo agents of the snapshot (sessions and handoffs) that exist on this daemon. */
+  /** Agents of this daemon behind the snapshot's sessions and handoffs: `paseo/<host>/…` ones and
+   * Paseo agents on the OpenCode provider running an `opencode/…/<ses_…>` session. */
   agents: z.array(AgentInfoSchema),
 });
 export type ReleaseView = z.infer<typeof ReleaseViewSchema>;

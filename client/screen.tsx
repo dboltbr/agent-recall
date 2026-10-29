@@ -230,8 +230,9 @@ function RunnersPanel({ theme, snapshot }: { theme: PluginTheme; snapshot: Relea
 function agentLabel(view: ReleaseView, release: Release): string {
   const pusher = release.pusher;
   if (!pusher) return "—";
-  if (pusher.harness === "paseo") return pusherTitle(view, release) ?? `Paseo ${pusher.id.slice(0, 8)}`;
-  return `OpenCode · ${pusher.host}`;
+  const title = pusherTitle(view, release);
+  if (title) return title;
+  return pusher.harness === "paseo" ? `Paseo ${pusher.id.slice(0, 8)}` : `OpenCode · ${pusher.host}`;
 }
 
 function RevertsPanel({ theme, view }: { theme: PluginTheme; view: ReleaseView }) {
