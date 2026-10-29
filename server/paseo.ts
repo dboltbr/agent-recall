@@ -51,11 +51,13 @@ async function installedSha(exec: Exec): Promise<string> {
 }
 
 interface AgentRecord {
+  readonly id?: string;
   readonly title?: string | null;
   readonly workspaceId?: string;
   readonly provider?: string;
   readonly cwd?: string;
   readonly config?: { readonly model?: string; readonly modeId?: string; readonly thinkingOptionId?: string };
+  readonly persistence?: { readonly sessionId?: string | null } | null;
 }
 
 /** The daemon's agent record (`$PASEO_HOME/agents/<project>/<id>.json`): workspace and model. */
@@ -64,6 +66,21 @@ async function agentRecord(id: string): Promise<AgentRecord | null> {
   for (const project of await readdir(root).catch(() => [] as string[])) {
     const raw = await readFile(join(root, project, `${id}.json`), "utf8").catch(() => null);
     if (raw) return JSON.parse(raw) as AgentRecord;
+  }
+  return null;
+}
+
+/** The agent whose OpenCode session is `sessionId` (record `persistence.sessionId`), or null. */
+async function agentOfSession(sessionId: string): Promise<string | null> {
+  const root = join(paseoHome(), "agents");
+  for (const project of await readdir(root).catch(() => [] as string[])) {
+    for (const file of await readdir(join(root, project)).catch(() => [] as string[])) {
+      if (!file.endsWith(".json")) continue;
+      const raw = await readFile(join(root, project, file), "utf8").catch(() => null);
+      if (!raw?.includes(sessionId)) continue;
+      const record = JSON.parse(raw) as AgentRecord;
+      if (record.provider === "opencode" && record.persistence?.sessionId === sessionId) return record.id ?? file.slice(0, -5);
+    }
   }
   return null;
 }
@@ -141,6 +158,7 @@ export function startPaseoRecall(): PaseoRecall {
       const record = await agentRecord(id);
       return record ? { title: record.title ?? null, workspaceId: record.workspaceId ?? null } : null;
     },
+    agentOfSession,
   });
   const boot = (async () => {
     const serverId = (await readFile(join(paseoHome(), "server-id"), "utf8")).trim();

@@ -10,6 +10,7 @@ import {
   ReleaseSchema,
   type Release,
   type ReleaseSnapshot,
+  type Session,
 } from "./release-status.ts";
 import type { Harness, Logger } from "./types.ts";
 
@@ -64,15 +65,29 @@ function time(value: string | null): number | null {
   return Number.isNaN(ms) ? null : ms;
 }
 
-/** Releases that still get a card: active, or finished within the sidebar's recent window. */
-export function cardTargets(snapshot: ReleaseSnapshot, harness: Harness, host: string, now: Date): Release[] {
+/** Releases with a pusher that still get a card: active, or finished within the sidebar's recent window. */
+export function cardTargets(snapshot: ReleaseSnapshot, now: Date): Release[] {
   return snapshot.releases.filter((release) => {
-    const pusher = release.pusher;
-    if (!pusher || pusher.harness !== harness || pusher.host !== host) return false;
+    if (!release.pusher) return false;
     if (isActive(release)) return true;
     const ended = time(release.completedAt);
     return ended !== null && now.getTime() - ended <= RECENT_VERDICT_MS;
   });
+}
+
+/**
+ * The agent of this harness and host whose timeline gets the card, or null. A pusher of another
+ * harness goes through `resolve`: a Paseo agent on the OpenCode provider commits as
+ * `opencode/<instance>/<ses_…>` when its shell has no `PASEO_AGENT_ID`.
+ */
+export async function pusherAgent(
+  pusher: Session,
+  harness: Harness,
+  host: string,
+  resolve?: (session: Session) => Promise<string | null>,
+): Promise<string | null> {
+  if (pusher.harness === harness) return pusher.host === host ? pusher.id : null;
+  return (await resolve?.(pusher).catch(() => null)) ?? null;
 }
 
 /** Fingerprint per card id, persisted so a plugin reload does not re-append (and reorder) rows. */
@@ -91,6 +106,8 @@ export interface CardPublisherOptions {
   readonly now: () => Date;
   /** Title of an agent of this host, or null. */
   readonly title?: (agentId: string) => Promise<string | null>;
+  /** The local agent behind a pusher of another harness, or null. */
+  readonly resolve?: (session: Session) => Promise<string | null>;
 }
 
 export interface CardPublisher {
@@ -114,8 +131,9 @@ export function createCardPublisher(options: CardPublisherOptions): CardPublishe
     });
     let appended = 0;
     let dirty = false;
-    for (const release of cardTargets(snapshot, options.harness, options.host, options.now())) {
-      const agentId = release.pusher!.id;
+    for (const release of cardTargets(snapshot, options.now())) {
+      const agentId = await pusherAgent(release.pusher!, options.harness, options.host, options.resolve);
+      if (!agentId) continue;
       const title = (await options.title?.(agentId).catch(() => null)) ?? null;
       const card = cardFor(release, snapshot, title);
       const fingerprint = cardFingerprint(card);

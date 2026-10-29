@@ -7,7 +7,7 @@ import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import { readHandoffs } from "./core/host.ts";
 import { createCardPublisher, type CardAppend, type CardPublisher, type CardStore } from "./core/release-cards.ts";
 import { createReleaseSource, createReleaseTracker, type ReleaseTracker } from "./core/release-fetch.ts";
-import type { ReleaseSnapshot } from "./core/release-status.ts";
+import type { ReleaseSnapshot, Session } from "./core/release-status.ts";
 import { describe } from "./core/poll.ts";
 import type { Clock, Fetch, Logger } from "./core/types.ts";
 import type { AgentInfo, ReleaseView } from "../shared/rpc.ts";
@@ -29,6 +29,8 @@ export interface ReleaseServiceOptions {
   readonly stateDir: string;
   /** The daemon's record of one agent, or null. */
   readonly agent: (id: string) => Promise<AgentDirectoryEntry | null>;
+  /** The id of the agent of this daemon running the OpenCode session `sessionId`, or null. */
+  readonly agentOfSession: (sessionId: string) => Promise<string | null>;
 }
 
 export interface ReleaseService {
@@ -66,6 +68,7 @@ export function createReleaseService(options: ReleaseServiceOptions): ReleaseSer
   let paseo: PaseoApi | null = null;
   let publisher: CardPublisher | null = null;
   const directory = new Map<string, { entry: AgentDirectoryEntry | null; at: number }>();
+  const sessions = new Map<string, { agentId: string | null; at: number }>();
   const store = fileStore(join(options.stateDir, "release-cards.json"));
 
   async function lookup(id: string): Promise<AgentDirectoryEntry | null> {
@@ -78,6 +81,20 @@ export function createReleaseService(options: ReleaseServiceOptions): ReleaseSer
     });
     directory.set(id, { entry, at: now });
     return entry;
+  }
+
+  /** A Paseo agent on the OpenCode provider whose commit carries `opencode/<instance>/<ses_…>`. */
+  async function resolve(session: Session): Promise<string | null> {
+    if (session.harness !== "opencode") return null;
+    const known = sessions.get(session.id);
+    const now = clock.now().getTime();
+    if (known && (known.agentId || now - known.at < MISS_RETRY_MS)) return known.agentId;
+    const agentId = await options.agentOfSession(session.id).catch((error) => {
+      log.warn(`agente da sessão ${session.id}: ${describe(error)}`);
+      return null;
+    });
+    sessions.set(session.id, { agentId, at: now });
+    return agentId;
   }
 
   const append: CardAppend = async (agentId, item) => {
@@ -132,6 +149,7 @@ export function createReleaseService(options: ReleaseServiceOptions): ReleaseSer
         log,
         now: () => clock.now(),
         title: async (id) => (await lookup(id))?.title ?? null,
+        resolve,
       });
       void publish(tracker.current());
     },

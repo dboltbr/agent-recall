@@ -5,6 +5,7 @@ import {
   cardFor,
   cardTargets,
   createCardPublisher,
+  pusherAgent,
   RELEASE_CARD_KIND,
   ReleaseCardSchema,
   type CardItem,
@@ -75,7 +76,7 @@ function recorder(fail = false) {
   };
 }
 
-test("cardTargets: só releases do pusher Paseo deste host, ativos ou recém-terminados", () => {
+test("cardTargets: releases com pusher, ativos ou recém-terminados", () => {
   const other = buildRelease({
     run: run({ run_number: 190 }),
     jobs: midImages(),
@@ -83,12 +84,22 @@ test("cardTargets: só releases do pusher Paseo deste host, ativos ou recém-ter
     commits: null,
     now: NOW,
   });
-  const targets = cardTargets(snapshot(active(191), other, done(189, 30), done(188, 180)), "paseo", HOST, NOW);
+  const targets = cardTargets(snapshot(active(191), other, done(189, 30), done(188, 180)), NOW);
   assert.deepEqual(
     targets.map((release) => release.number),
-    [191, 189],
+    [191, 190, 189],
   );
-  assert.deepEqual(cardTargets(snapshot(active(191)), "paseo", "srv_other", NOW), []);
+  const anonymous = buildRelease({ run: run({ run_number: 192, head_commit: { message: "fix: sem trailer\n" } }), jobs: midImages(), note: null, commits: null, now: NOW });
+  assert.deepEqual(cardTargets(snapshot(anonymous), NOW), []);
+});
+
+test("pusherAgent: agente Paseo deste host direto, OpenCode pelo resolve", async () => {
+  const resolve = async (session: { id: string }) => (session.id === "ses_local" ? "agent-oc" : null);
+  assert.equal(await pusherAgent({ harness: "paseo", host: HOST, id: "agent-a" }, "paseo", HOST, resolve), "agent-a");
+  assert.equal(await pusherAgent({ harness: "paseo", host: "srv_other", id: "agent-a" }, "paseo", HOST, resolve), null);
+  assert.equal(await pusherAgent({ harness: "opencode", host: "felipe-win", id: "ses_local" }, "paseo", HOST, resolve), "agent-oc");
+  assert.equal(await pusherAgent({ harness: "opencode", host: "felipe-win", id: "ses_alheia" }, "paseo", HOST, resolve), null);
+  assert.equal(await pusherAgent({ harness: "opencode", host: "felipe-win", id: "ses_local" }, "paseo", HOST), null);
 });
 
 test("cardFor: corta os jobs fora das etapas e leva a fila enquanto ativo", () => {
@@ -181,4 +192,31 @@ test("publisher: o título do agente entra no cartão", async () => {
   });
   await publisher.publish(snapshot(active(191)), rec.append);
   assert.equal(rec.appended[0]!.item.data.pusherTitle, "Aviso ao morador: push");
+});
+
+test("publisher: push de agente Paseo no provider OpenCode (trailer opencode/…) ganha o cartão", async () => {
+  // release-238: `Agent-Session: opencode/felipe-win/ses_e873…`, a sessão do agente Paseo e6e3c45c.
+  const { store } = memoryStore();
+  const rec = recorder();
+  const publisher = createCardPublisher({
+    harness: "paseo",
+    host: HOST,
+    store,
+    log: quietLog,
+    now: () => NOW,
+    resolve: async (session) => (session.harness === "opencode" && session.id === "ses_e873" ? "agent-oc" : null),
+    title: async (id) => (id === "agent-oc" ? "Kysely com RLS" : null),
+  });
+  const release = buildRelease({
+    run: run({ run_number: 238, head_commit: { message: "fix(deploy): x\n\nAgent-Session: opencode/felipe-win/ses_e873\n" } }),
+    jobs: once(MID, 238, midImages),
+    note: null,
+    commits: null,
+    now: NOW,
+  });
+  assert.equal(await publisher.publish(snapshot(release), rec.append), 1);
+  assert.deepEqual(
+    rec.appended.map(({ agentId, item }) => [agentId, item.id, item.data.pusherTitle]),
+    [["agent-oc", "release-238", "Kysely com RLS"]],
+  );
 });
