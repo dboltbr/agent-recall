@@ -102,7 +102,9 @@ function createDelivery(exec: Exec, stateDir: string, config: () => HostConfig):
       const file = join(stateDir, `prompt-${process.pid}-${Date.now()}.txt`);
       await writeFile(file, text, "utf8");
       try {
-        await paseo(exec, ["send", target.id, "--prompt-file", file, "--no-wait"]);
+        // Steer: a busy agent takes the call inside its turn instead of losing it to an interrupt
+        // (the CLI default for a caller outside an agent); Paseo interrupts only when it cannot steer.
+        await paseo(exec, ["send", target.id, "--prompt-file", file, "--behavior", "steer", "--no-wait"]);
       } finally {
         await rm(file, { force: true });
       }

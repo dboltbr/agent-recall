@@ -16,7 +16,8 @@ Plugin do Paseo e do OpenCode que chama de volta o agente responsável quando um
   - `fix-pending` há 30 min sem `fix.readyAt` → lembra o owner.
 - O chamado é o prompt
   `Incidente release-<n>: carregue a skill dbolt-release-incident. Papel: <investigate|fix>. Nota: <json>`.
-  Prompt recusado → sessão filha no diretório da original (OpenCode; a API de plugin não tem
+  No Paseo o prompt entra com `--behavior steer`: agente ocupado recebe o chamado dentro do turno,
+  sem perder o que fazia. Prompt recusado → sessão filha no diretório da original (OpenCode; a API de plugin não tem
   fork) ou agente novo no workspace (Paseo). Se tudo falha, grava
   `recall` (`failedAt`, motivo) na nota.
 - Trava `mkdir` atômica por incidente e sessão em `~/.local/state/agent-recall/`: nenhum chamado
