@@ -38,7 +38,10 @@ export function blockedPrompt(release: Release): string {
     failedJob: release.failedJob,
     sessions: release.sessions.map((session) => `${session.harness}/${session.host}/${session.id}`),
   };
-  return `Release barrada ${release.name}: carregue a skill dbolt-release-incident. Papel: blocked. Release: ${JSON.stringify(snapshot)}`;
+  return (
+    `Release barrada ${release.name}: carregue a skill dbolt-release-incident. Papel: blocked. ` +
+    `Nada foi à produção; os pushes seguintes ficam barrados até a main passar. Release: ${JSON.stringify(snapshot)}`
+  );
 }
 
 /** What a harness can do. Each step throws when it was refused. */

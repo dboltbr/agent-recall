@@ -113,7 +113,7 @@ test("watcher: release barrada vira um prompt à sessão do push e um handoff `b
   );
   const [call] = delivery.recorded.prompts;
   assert.equal(call!.target.id, "ses_pusher");
-  assert.ok(call!.text.startsWith("Release barrada release-292: carregue a skill dbolt-release-incident. Papel: blocked. Release: {"));
+  assert.ok(call!.text.startsWith("Release barrada release-292: carregue a skill dbolt-release-incident. Papel: blocked. Nada foi"));
   const payload = JSON.parse(call!.text.slice(call!.text.indexOf("Release: ") + "Release: ".length));
   assert.equal(payload.number, 292);
   assert.equal(payload.failedJob.name, "verify-production / check");
