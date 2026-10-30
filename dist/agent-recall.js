@@ -20831,7 +20831,7 @@ function blockedPrompt(release) {
     failedJob: release.failedJob,
     sessions: release.sessions.map((session) => `${session.harness}/${session.host}/${session.id}`)
   };
-  return `Release barrada ${release.name}: carregue a skill dbolt-release-incident. Papel: blocked. Release: ${JSON.stringify(snapshot)}`;
+  return `Release barrada ${release.name}: carregue a skill dbolt-release-incident. Papel: blocked. Nada foi \xE0 produ\xE7\xE3o; os pushes seguintes ficam barrados at\xE9 a main passar. Release: ${JSON.stringify(snapshot)}`;
 }
 async function deliver(input2) {
   const { action, text, title, delivery, log: log2 } = input2;
@@ -21226,7 +21226,7 @@ var index_default = {
   // No dispose: the poller and the newest context outlive location eviction (see ./poller.ts).
   setup(ctx) {
     attach(registry2, ctx, {
-      sha: true ? "c779354ce225b756de7c5068baaf24ada90bedb3" : "unknown",
+      sha: true ? "10d7ea0b5a0ea0f178a9a2be33193bf888ed2c9a" : "unknown",
       stateDir: stateDirectory(),
       pid: process.pid,
       clock: { now: () => /* @__PURE__ */ new Date() },
