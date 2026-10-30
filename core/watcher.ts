@@ -1,10 +1,10 @@
 import { join } from "node:path";
-import { deliver, type Delivery, type Outcome } from "./deliver.ts";
+import { blockedPrompt, deliver, promptFor, type Delivery, type Failure, type Outcome } from "./deliver.ts";
 import { acquireLock, writeHandoff, writeHeartbeat } from "./host.ts";
 import { fetchNotes, recordRecallFailure, type FetchedNote } from "./notes.ts";
 import { describe, POLL_INTERVAL_MS, pollRef, type PollResult } from "./poll.ts";
 import type { ReleaseTracker } from "./release-fetch.ts";
-import { describeAction, dueReminder, isRecent, route, type Action } from "./route.ts";
+import { blockedRecalls, describeAction, dueReminder, isRecent, roleOf, route, type Action, type NoteAction } from "./route.ts";
 import type { Clock, Exec, Fetch, Harness, HostConfig, Logger, Me, Note } from "./types.ts";
 
 const TOKEN_TTL_MS = 10 * 60 * 1000;
@@ -65,36 +65,50 @@ export function createWatcher(options: WatcherOptions): Watcher {
     return value;
   }
 
-  async function act(action: Action, key: string, note: Note, config: HostConfig, me: Me, auth: string): Promise<Handled | null> {
+  interface Call {
+    readonly action: Action;
+    readonly text: string;
+    readonly title: string;
+    readonly drill: boolean;
+    readonly recordFailure: ((failure: Failure) => Promise<boolean>) | null;
+  }
+
+  async function call(input: Call, me: Me): Promise<Handled | null> {
+    const { action } = input;
     if (!(await acquireLock(options.stateDir, action.release, action.lock))) return null;
     log.info(`chamando: ${describeAction(action)}`);
-    const { outcome, session } = await deliver({
-      action,
-      note,
-      delivery: options.delivery,
-      recordFailure: (failure) =>
-        recordRecallFailure({
-          exec,
-          gitDir: join(options.stateDir, `${options.harness}.git`),
-          repository: config.repository,
-          notesRef: config.notesRef,
-          token: auth,
-          key,
-          recall: { ...failure, failedAt: clock.now().toISOString(), by: `${me.harness}/${me.host}`, state: note.state },
-        }),
-      host: me.host,
-      log,
-    });
+    const { outcome, session } = await deliver({ ...input, delivery: options.delivery, host: me.host, log });
     log.info(`${describeAction(action)}: ${outcome}`);
-    if (session && !note.drill) {
-      const role = action.kind === "recall" ? action.role : action.kind === "remind" ? "remind" : "investigate";
+    if (session && !input.drill) {
       await writeHandoff(options.stateDir, action.release, action.lock, {
-        role,
+        role: roleOf(action),
         session: { harness: me.harness, host: me.host, id: session },
         at: clock.now().toISOString(),
       }).catch((error) => log.warn(`${action.release}: registrar o chamado: ${describe(error)}`));
     }
     return { action, outcome, session };
+  }
+
+  function act(action: NoteAction, key: string, note: Note, config: HostConfig, me: Me, auth: string): Promise<Handled | null> {
+    return call(
+      {
+        action,
+        text: promptFor(action, note),
+        title: `Incidente ${action.release}${note.drill ? " [ensaio]" : ""}`,
+        drill: note.drill === true,
+        recordFailure: (failure) =>
+          recordRecallFailure({
+            exec,
+            gitDir: join(options.stateDir, `${options.harness}.git`),
+            repository: config.repository,
+            notesRef: config.notesRef,
+            token: auth,
+            key,
+            recall: { ...failure, failedAt: clock.now().toISOString(), by: `${me.harness}/${me.host}`, state: note.state },
+          }),
+      },
+      me,
+    );
   }
 
   async function tick(): Promise<TickReport> {
@@ -177,6 +191,19 @@ export function createWatcher(options: WatcherOptions): Watcher {
       await options.release
         .tick({ token: auth, notes, notesChanged: fetched })
         .catch((error) => log.warn(`release: ${describe(error)}`));
+      // A run that failed before the tag writes no note: the release status is what tells.
+      const releases = options.release.current()?.releases ?? [];
+      for (const action of blockedRecalls(releases, me, now)) {
+        const release = releases.find((candidate) => candidate.name === action.release)!;
+        const done = await call(
+          { action, text: blockedPrompt(release), title: `Release barrada ${action.release}`, drill: false, recordFailure: null },
+          me,
+        ).catch((error) => {
+          log.error(`${action.release}: ${describe(error)}`);
+          return null;
+        });
+        if (done) handled.push(done);
+      }
     }
     return { poll: poll.kind, fetched, handled };
   }

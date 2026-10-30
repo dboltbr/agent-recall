@@ -13,8 +13,9 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Delivery } from "../core/deliver.ts";
-import { isAlive } from "../core/host.ts";
+import { isAlive, readHandoffs } from "../core/host.ts";
 import { describe } from "../core/poll.ts";
+import { createReleaseSource, createReleaseTracker } from "../core/release-fetch.ts";
 import type { Clock, Exec, Fetch, HostConfig, Logger, SessionRef } from "../core/types.ts";
 import { createWatcher, type Watcher } from "../core/watcher.ts";
 
@@ -216,6 +217,17 @@ function startPoller(registry: Registry, deps: PollerDeps, handover: Promise<voi
       exec: deps.exec,
       delivery: createDelivery(registry, deps.exec, () => current!),
       log,
+      // No release UI here: the status only tells which pushes failed before the tag.
+      release: createReleaseTracker({
+        source: createReleaseSource({
+          fetch: deps.fetch,
+          clock: deps.clock,
+          log,
+          handoffs: (release) => readHandoffs(deps.stateDir, release),
+        }),
+        clock: deps.clock,
+        log,
+      }),
     });
     await watcher.tick();
   }

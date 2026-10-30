@@ -75,7 +75,7 @@ export const SignalSchema = z.object({
 });
 export type Signal = z.infer<typeof SignalSchema>;
 
-export const HANDOFF_ROLES = ["investigate", "fix", "remind", "owner"] as const;
+export const HANDOFF_ROLES = ["investigate", "fix", "remind", "owner", "blocked"] as const;
 export const HandoffRoleSchema = z.enum(HANDOFF_ROLES);
 export type HandoffRole = z.infer<typeof HandoffRoleSchema>;
 
@@ -233,6 +233,7 @@ export const HANDOFF_LABELS: Record<HandoffRole, string> = {
   fix: "correção",
   remind: "lembrete",
   owner: "responsável",
+  blocked: "release barrada",
 };
 
 export const SOURCE_LABELS: Readonly<Record<string, string>> = {
@@ -440,10 +441,11 @@ export interface ReleaseInput {
 
 /**
  * Delivered calls oldest first, then the note's owner and fix session; one entry per session.
- * Without an incident note there is no incident, so nothing (a drill's calls stay out too).
+ * Without an incident note only the `blocked` call of a run that failed before the tag (a drill's
+ * calls stay out: they write no handoff).
  */
 export function releaseHandoffs(note: Note | null, delivered: readonly Handoff[]): Handoff[] {
-  if (!note) return [];
+  if (!note) return delivered.filter((handoff) => handoff.role === "blocked");
   const out: Handoff[] = [];
   const add = (role: HandoffRole, ref: SessionRef | null, at: string | null) => {
     if (ref && !out.some((known) => sameSession(known.session, ref))) out.push({ role, session: toSession(ref), at });

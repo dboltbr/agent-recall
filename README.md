@@ -1,7 +1,7 @@
 # agent-recall
 
 Plugin do Paseo e do OpenCode que chama de volta o agente responsável quando uma release do
-`dboltbr/dbolt` fica vermelha.
+`dboltbr/dbolt` fica vermelha ou é barrada antes da produção.
 
 ## O que faz
 
@@ -21,6 +21,12 @@ Plugin do Paseo e do OpenCode que chama de volta o agente responsável quando um
   `recall` (`failedAt`, motivo) na nota.
 - Trava `mkdir` atômica por incidente e sessão em `~/.local/state/agent-recall/`: nenhum chamado
   duplo. Na partida trata só incidentes das últimas 8 h.
+- Release que falha antes da tag (verificação, build, publicação) não tem nota: o status das
+  releases (o mesmo da tela Releases) diz quem fez o push. A sessão do push, se for deste harness e
+  host, recebe uma vez por release
+  `Release barrada release-<n>: carregue a skill dbolt-release-incident. Papel: blocked. Release: <json>`
+  (número, URL, SHA, job que falhou, sessões da faixa). Falhas das últimas 8 h; release posterior
+  com tag encerra o chamado. Ninguém recebeu → só o log (não há nota).
 - Heartbeat a cada consulta em `~/.local/state/agent-recall/<paseo|opencode>.alive`:
   `{ "pid", "polledAt", "sha" }`. O hook de commit do dbolt exige esse arquivo.
 - No OpenCode, um poller por host (trava `~/.local/state/agent-recall/opencode.poller`) que vive o

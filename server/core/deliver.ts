@@ -1,6 +1,7 @@
 import { describe } from "./poll.ts";
 import { formatSession } from "./trailer.ts";
-import type { Action } from "./route.ts";
+import type { Release } from "./release-status.ts";
+import { roleOf, type Action, type NoteAction } from "./route.ts";
 import type { Logger, Note, Role, SessionRef } from "./types.ts";
 
 /** The contract prompt. The dbolt procedure lives in the skill, not here. */
@@ -16,7 +17,7 @@ export function reminderPrompt(release: string, note: Note): string {
   );
 }
 
-export function promptFor(action: Action, note: Note): string {
+export function promptFor(action: NoteAction, note: Note): string {
   switch (action.kind) {
     case "recall":
       return recallPrompt(action.release, action.role, note);
@@ -25,6 +26,19 @@ export function promptFor(action: Action, note: Note): string {
     case "remind":
       return reminderPrompt(action.release, note);
   }
+}
+
+/** A release that failed before the tag has no note: the prompt carries the run itself. */
+export function blockedPrompt(release: Release): string {
+  const snapshot = {
+    number: release.number,
+    url: release.url,
+    headSha: release.headSha,
+    title: release.title,
+    failedJob: release.failedJob,
+    sessions: release.sessions.map((session) => `${session.harness}/${session.host}/${session.id}`),
+  };
+  return `Release barrada ${release.name}: carregue a skill dbolt-release-incident. Papel: blocked. Release: ${JSON.stringify(snapshot)}`;
 }
 
 /** What a harness can do. Each step throws when it was refused. */
@@ -54,19 +68,22 @@ export interface Failure {
 
 export interface DeliverInput {
   readonly action: Action;
-  readonly note: Note;
+  /** The prompt (`promptFor` or `blockedPrompt`). */
+  readonly text: string;
+  /** Title of a fallback or new session. */
+  readonly title: string;
+  /** A drill: logs say so. */
+  readonly drill?: boolean;
   readonly delivery: Delivery;
-  /** Writes the failure into the note; true when it landed. */
-  readonly recordFailure: (failure: Failure) => Promise<boolean>;
+  /** Writes the failure into the note; true when it landed. Null: there is no note, only the log. */
+  readonly recordFailure: ((failure: Failure) => Promise<boolean>) | null;
   readonly host: string;
   readonly log: Logger;
 }
 
 /** Fallback chain: prompt → fork/new agent → failure in the note. Investigation: create → note. */
 export async function deliver(input: DeliverInput): Promise<Delivered> {
-  const { action, note, delivery, log } = input;
-  const text = promptFor(action, note);
-  const title = `Incidente ${action.release}${note.drill ? " [ensaio]" : ""}`;
+  const { action, text, title, delivery, log } = input;
   const failures: string[] = [];
   if (action.kind === "investigation") {
     try {
@@ -92,9 +109,10 @@ export async function deliver(input: DeliverInput): Promise<Delivered> {
     }
   }
   const target = action.kind === "investigation" ? undefined : formatSession(action.target);
-  const role = action.kind === "recall" ? action.role : action.kind === "remind" ? "remind" : "investigate";
+  const role = roleOf(action);
   const reason = failures.join("; ");
-  log.error(`${note.drill ? "[ensaio] " : ""}não consegui chamar ${target ?? "nova sessão de investigação"} para ${action.release} (${role}): ${reason}`);
+  log.error(`${input.drill ? "[ensaio] " : ""}não consegui chamar ${target ?? "nova sessão de investigação"} para ${action.release} (${role}): ${reason}`);
+  if (!input.recordFailure) return { outcome: "failed", session: null };
   try {
     if (await input.recordFailure({ role, target, reason })) return { outcome: "recorded", session: null };
     log.error(`${action.release}: a falha do chamado não entrou na nota`);
