@@ -16699,8 +16699,8 @@ function rewriteKeyNames(ctx) {
       bySchema.set(entry.schema, entry);
   }
   const rewrites = /* @__PURE__ */ new Map();
-  for (const record2 of pendingRecords.get(ctx) ?? []) {
-    const seen = ctx.seen.get(record2);
+  for (const record3 of pendingRecords.get(ctx) ?? []) {
+    const seen = ctx.seen.get(record3);
     const names = (seen?.def ?? seen?.schema)?.propertyNames;
     if (!names || names === true || rewrites.has(names))
       continue;
@@ -19766,10 +19766,16 @@ function date4(params) {
 // core/trailer.ts
 var HARNESSES = ["paseo", "opencode"];
 var VALUE = /^(paseo|opencode)\/([^/\s]+)\/([^/\s]+)$/;
+var LINE = /^Agent-Session:[ \t]*(\S+)[ \t]*$/gm;
 function parseSessionValue(value) {
   const match = VALUE.exec((value ?? "").trim());
   if (!match) return null;
   return { harness: match[1], host: match[2], id: match[3] };
+}
+function parseAgentSession(message) {
+  let found = null;
+  for (const match of message.matchAll(LINE)) found = parseSessionValue(match[1]) ?? found;
+  return found;
 }
 function formatSession(ref) {
   return `${ref.harness}/${ref.host}/${ref.id}`;
@@ -19786,6 +19792,10 @@ function toSessionRef(value) {
 }
 
 // core/release-status.ts
+var RELEASE_REPOSITORY = "dboltbr/dbolt";
+var RELEASE_WORKFLOW = "release";
+var RUNNER_ORG = "dboltbr";
+var RELEASE_HISTORY = 15;
 var RECENT_VERDICT_MS = 2 * 60 * 60 * 1e3;
 var STEP_IDS = ["verify", "images", "deploy", "tag", "watch"];
 var StepIdSchema = external_exports.enum(STEP_IDS);
@@ -19828,7 +19838,7 @@ var SignalSchema = external_exports.object({
   outcome: external_exports.string(),
   reason: external_exports.string().nullable()
 });
-var HANDOFF_ROLES = ["investigate", "fix", "remind", "owner"];
+var HANDOFF_ROLES = ["investigate", "fix", "remind", "owner", "blocked"];
 var HandoffRoleSchema = external_exports.enum(HANDOFF_ROLES);
 var HandoffSchema = external_exports.object({
   role: HandoffRoleSchema,
@@ -19905,6 +19915,234 @@ var ReleaseSnapshotSchema = external_exports.object({
   /** pt-BR reason the last refresh failed; the rest is the last good data. */
   error: external_exports.string().nullable()
 });
+var SOURCE_LABELS = {
+  errors5xx: "5xx",
+  sentry: "Sentry",
+  deployment: "implanta\xE7\xE3o",
+  watch: "vigia"
+};
+var DEPLOY_TIERS = /* @__PURE__ */ new Set(["wall", "console", "desktop", "marketing", "infrastructure", "mobile"]);
+function classifyJob(name) {
+  const [prefix, rest] = splitJobName(name);
+  if (prefix === "verify-production") return "verify";
+  if (prefix.startsWith("images-")) return rest !== null && /^build-push/.test(rest) ? "images" : null;
+  if (DEPLOY_TIERS.has(prefix) || name === "flags") return "deploy";
+  if (name === "release-tag") return "tag";
+  if (name === "watch") return "watch";
+  return null;
+}
+function imageName(name) {
+  const [prefix, rest] = splitJobName(name);
+  if (!prefix.startsWith("images-") || rest === null || !/^build-push/.test(rest)) return null;
+  const argument = /\(([^,)]+)/.exec(rest)?.[1]?.trim();
+  if (argument) return argument;
+  const suffix = /^build-push-([\w.-]+)/.exec(rest)?.[1];
+  return suffix ?? prefix.slice("images-".length);
+}
+function splitJobName(name) {
+  const at = name.indexOf(" / ");
+  return at < 0 ? [name.trim(), null] : [name.slice(0, at).trim(), name.slice(at + 3).trim()];
+}
+function jobState(job) {
+  if (job.status !== "completed") return job.status === "in_progress" ? "running" : "queued";
+  if (job.conclusion === "success" || job.conclusion === "neutral") return "success";
+  if (job.conclusion === "skipped") return "skipped";
+  if (job.conclusion === "cancelled") return "cancelled";
+  return "failure";
+}
+function toJob(job) {
+  return {
+    id: job.id,
+    name: job.name,
+    step: classifyJob(job.name),
+    image: imageName(job.name),
+    state: jobState(job),
+    runner: job.runner_name || null,
+    labels: [...job.labels ?? []],
+    startedAt: job.started_at,
+    completedAt: job.completed_at,
+    url: job.html_url ?? null
+  };
+}
+function iso(ms) {
+  return new Date(ms).toISOString();
+}
+function time3(value) {
+  if (!value) return null;
+  const ms = Date.parse(value);
+  return Number.isNaN(ms) ? null : ms;
+}
+function buildStep(id, jobs, runDone, now) {
+  const live = jobs.filter((job) => job.step === id && job.state !== "skipped");
+  const failed = live.find((job) => job.state === "failure");
+  const starts = live.filter((job) => job.state !== "queued").map((job) => time3(job.startedAt)).filter((ms) => ms !== null);
+  const startedMs = starts.length ? Math.min(...starts) : null;
+  let state;
+  if (live.length === 0) state = runDone ? "skipped" : "pending";
+  else if (failed) state = "failed";
+  else if (live.every((job) => job.state === "success")) state = "done";
+  else if (live.some((job) => job.state === "running") || live.some((job) => job.state === "success") && !runDone)
+    state = "running";
+  else if (live.some((job) => job.state === "cancelled")) state = "cancelled";
+  else state = runDone ? "cancelled" : "pending";
+  const finished = state === "done" || state === "failed" || state === "cancelled";
+  const ends = live.map((job) => time3(job.completedAt)).filter((ms) => ms !== null);
+  const completedMs = finished && ends.length ? Math.max(...ends) : null;
+  const images = id === "images";
+  return {
+    id,
+    state,
+    done: images ? live.filter((job) => job.state === "success").length : null,
+    total: images ? live.length : null,
+    startedAt: startedMs === null ? null : iso(startedMs),
+    completedAt: completedMs === null ? null : iso(completedMs),
+    durationMs: startedMs === null ? null : Math.max(0, (completedMs ?? now.getTime()) - startedMs),
+    failedJob: failed?.name ?? null
+  };
+}
+var SHIPPED_REVERT = /* @__PURE__ */ new Set(["reverted", "already-reverted"]);
+function record2(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+function strings(value) {
+  return Array.isArray(value) ? value.filter((item) => typeof item === "string") : [];
+}
+function noteRevert(note) {
+  const revert = record2(note.revert);
+  const decision = record2(note.decision);
+  const reverted = note.state === "reverted" || note.state === "escalated" && SHIPPED_REVERT.has(String(revert?.["reason"])) || decision?.["action"] === "revert";
+  if (!reverted) return null;
+  const commits = strings(revert?.["commits"]);
+  return {
+    commits: commits.length ? commits : strings(decision?.["commits"]),
+    commit: typeof revert?.["commit"] === "string" ? revert["commit"] : null
+  };
+}
+function noteSignals(note) {
+  const sources = record2(record2(note.verdict)?.["sources"]);
+  if (!sources) return [];
+  const rank = (outcome) => outcome === "red" ? 0 : outcome === "green" || outcome === "not-applicable" ? 2 : 1;
+  return Object.entries(sources).map(([source, value]) => {
+    const fields = record2(value) ?? {};
+    return {
+      source,
+      label: SOURCE_LABELS[source] ?? source,
+      outcome: typeof fields["outcome"] === "string" ? fields["outcome"] : "unknown",
+      reason: typeof fields["reason"] === "string" ? fields["reason"] : null
+    };
+  }).sort((a, b) => rank(a.outcome) - rank(b.outcome) || a.source.localeCompare(b.source));
+}
+function watchVerdict(input2) {
+  if (input2.note) return noteRevert(input2.note) ? "reverted" : "red";
+  if (!input2.completed) return null;
+  if (input2.steps.some((step) => step.id !== "watch" && step.state === "failed")) return "failed";
+  const watch = input2.jobs.find((job) => job.step === "watch" && job.state !== "skipped");
+  if (watch?.state === "success") return "green";
+  if (watch?.state === "failure") return "inconclusive";
+  if (input2.conclusion === "cancelled") return "cancelled";
+  if (!input2.jobs.some((job) => job.step !== null && job.state !== "skipped")) return "none";
+  return input2.conclusion === "success" ? "none" : watch ? "inconclusive" : "failed";
+}
+function releaseNameOf(runNumber) {
+  return `release-${runNumber}`;
+}
+function firstLine(message) {
+  return (message ?? "").split("\n")[0].trim();
+}
+function toSession(ref) {
+  return { harness: ref.harness, host: ref.host, id: ref.id };
+}
+function releaseHandoffs(note, delivered) {
+  if (!note) return delivered.filter((handoff2) => handoff2.role === "blocked");
+  const out = [];
+  const add = (role, ref, at) => {
+    if (ref && !out.some((known) => sameSession(known.session, ref))) out.push({ role, session: toSession(ref), at });
+  };
+  const ordered = [...delivered].sort((a, b) => (time3(a.at) ?? 0) - (time3(b.at) ?? 0));
+  for (const handoff2 of ordered) add(handoff2.role, handoff2.session, handoff2.at);
+  add("owner", parseSessionValue(note.owner), null);
+  add("fix", parseSessionValue(note.fix?.session), null);
+  return out;
+}
+function buildRelease(input2) {
+  const { run, note, now } = input2;
+  const jobs = input2.jobs.map(toJob);
+  const completed = run.status === "completed";
+  const steps = STEP_IDS.map((id) => buildStep(id, jobs, completed, now));
+  const verdict = watchVerdict({ completed, conclusion: run.conclusion, steps, jobs, note });
+  const failed = jobs.find((job) => job.step !== null && job.step !== "watch" && job.state === "failure");
+  const tagged = input2.tagged === true || jobs.some((job) => job.step === "tag" && job.state === "success");
+  const sessions = [];
+  const add = (ref) => {
+    if (ref && !sessions.some((known) => sameSession(known, ref))) sessions.push(toSession(ref));
+  };
+  const trailers = (input2.commits ?? []).map((commit) => parseAgentSession(commit.commit.message));
+  for (const ref of trailers) add(ref);
+  for (const value of note?.sessions ?? []) add(toSessionRef(value));
+  const head = run.head_commit?.message ?? "";
+  const pusher = parseAgentSession(head) ?? [...trailers].reverse().find((ref) => ref !== null) ?? null;
+  add(pusher);
+  const current = completed ? null : (steps.find((step) => step.state === "running") ?? steps.find((step) => step.state === "pending"))?.id ?? null;
+  return {
+    number: run.run_number,
+    name: releaseNameOf(run.run_number),
+    runId: run.id,
+    attempt: run.run_attempt ?? 1,
+    url: run.html_url,
+    status: completed ? "completed" : run.status === "in_progress" ? "running" : "queued",
+    conclusion: run.conclusion,
+    event: run.event,
+    headSha: run.head_sha,
+    title: firstLine(head) || run.display_title || run.head_sha.slice(0, 9),
+    createdAt: run.created_at,
+    updatedAt: run.updated_at,
+    startedAt: run.run_started_at ?? null,
+    completedAt: completed ? run.updated_at : null,
+    steps,
+    current,
+    verdict,
+    tag: tagged ? releaseNameOf(run.run_number) : null,
+    failedJob: failed ? { name: failed.name, url: failed.url } : null,
+    revert: note ? noteRevert(note) : null,
+    signals: note ? noteSignals(note) : [],
+    noteState: note?.state ?? null,
+    recallFailed: note ? record2(note.recall) !== null : false,
+    pusher: pusher ? toSession(pusher) : null,
+    sessions,
+    handoffs: releaseHandoffs(note, input2.handoffs ?? []),
+    jobs
+  };
+}
+function toRunner(runner, releases) {
+  const running = releases.flatMap((release) => release.jobs).find((job) => job.state === "running" && job.runner === runner.name);
+  return {
+    id: runner.id,
+    name: runner.name,
+    online: runner.status === "online",
+    busy: runner.busy,
+    labels: (runner.labels ?? []).map((label) => label.name),
+    job: running?.name ?? null
+  };
+}
+function buildSnapshot(input2) {
+  const releases = [...input2.releases].sort((a, b) => b.number - a.number).slice(0, RELEASE_HISTORY);
+  const active = releases.filter((release) => release.status !== "completed");
+  return {
+    version: 1,
+    repository: input2.repository,
+    workflow: input2.workflow,
+    fetchedAt: input2.now.toISOString(),
+    releases,
+    runners: input2.runners.filter((runner) => (runner.labels ?? []).some((label) => label.name === "self-hosted")).map((runner) => toRunner(runner, active)).sort((a, b) => a.name.localeCompare(b.name)),
+    queued: active.flatMap(
+      (release) => release.jobs.filter((job) => job.state === "queued").map((job) => ({ name: job.name, runNumber: release.number, labels: job.labels }))
+    ),
+    error: input2.error ?? null
+  };
+}
+function isActive(release) {
+  return release.status !== "completed";
+}
 var RELEASE_TIME_ZONE_OFFSET_MS = -3 * 60 * 60 * 1e3;
 
 // core/host.ts
@@ -19970,6 +20208,22 @@ async function writeHandoff(stateDir, release, lock, handoff2) {
   await writeFile(tmp, `${JSON.stringify(handoff2)}
 `, "utf8");
   await rename(tmp, path);
+}
+async function readHandoffs(stateDir, release) {
+  const parent = join(stateDir, release.replace(SAFE, "_"));
+  const locks = await readdir(parent, { withFileTypes: true }).catch(() => []);
+  const out = [];
+  for (const lock of locks) {
+    if (!lock.isDirectory()) continue;
+    const raw = await readFile(join(parent, lock.name, HANDOFF_FILE), "utf8").catch(() => null);
+    if (!raw) continue;
+    try {
+      const parsed = HandoffSchema.safeParse(JSON.parse(raw));
+      if (parsed.success) out.push(parsed.data);
+    } catch {
+    }
+  }
+  return out;
 }
 function isAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
@@ -20117,67 +20371,6 @@ import { mkdir as mkdir3, readFile as readFile3, rename as rename3, writeFile as
 import { homedir as homedir2 } from "node:os";
 import { join as join4 } from "node:path";
 
-// core/watcher.ts
-import { join as join3 } from "node:path";
-
-// core/deliver.ts
-function recallPrompt(release, role, note) {
-  return `Incidente ${release}: carregue a skill dbolt-release-incident. Papel: ${role}. Nota: ${JSON.stringify(note)}`;
-}
-function reminderPrompt(release, note) {
-  return `Lembrete: o fix-forward da ${release} passou de 30 min sem fix.readyAt; pela skill dbolt-release-incident (Prazos) o owner reverte agora e segue corrigindo. ` + recallPrompt(release, "investigate", note);
-}
-function promptFor(action, note) {
-  switch (action.kind) {
-    case "recall":
-      return recallPrompt(action.release, action.role, note);
-    case "investigation":
-      return recallPrompt(action.release, "investigate", note);
-    case "remind":
-      return reminderPrompt(action.release, note);
-  }
-}
-async function deliver(input2) {
-  const { action, note, delivery, log: log2 } = input2;
-  const text = promptFor(action, note);
-  const title = `Incidente ${action.release}${note.drill ? " [ensaio]" : ""}`;
-  const failures = [];
-  if (action.kind === "investigation") {
-    try {
-      const id = await delivery.create(text, title);
-      log2.info(`${action.release}: sess\xE3o de investiga\xE7\xE3o ${id} criada`);
-      return { outcome: "created", session: id };
-    } catch (error62) {
-      failures.push(`criar sess\xE3o: ${describe3(error62)}`);
-    }
-  } else {
-    try {
-      await delivery.prompt(action.target, text);
-      return { outcome: "prompt", session: action.target.id };
-    } catch (error62) {
-      failures.push(`prompt: ${describe3(error62)}`);
-    }
-    try {
-      const id = await delivery.fallback(action.target, text, title);
-      log2.warn(`${action.release}: ${formatSession(action.target)} recusou o prompt; chamado foi para ${id}`);
-      return { outcome: "fallback", session: id };
-    } catch (error62) {
-      failures.push(`fallback: ${describe3(error62)}`);
-    }
-  }
-  const target = action.kind === "investigation" ? void 0 : formatSession(action.target);
-  const role = action.kind === "recall" ? action.role : action.kind === "remind" ? "remind" : "investigate";
-  const reason = failures.join("; ");
-  log2.error(`${note.drill ? "[ensaio] " : ""}n\xE3o consegui chamar ${target ?? "nova sess\xE3o de investiga\xE7\xE3o"} para ${action.release} (${role}): ${reason}`);
-  try {
-    if (await input2.recordFailure({ role, target, reason })) return { outcome: "recorded", session: null };
-    log2.error(`${action.release}: a falha do chamado n\xE3o entrou na nota`);
-  } catch (error62) {
-    log2.error(`${action.release}: gravar a falha na nota: ${describe3(error62)}`);
-  }
-  return { outcome: "failed", session: null };
-}
-
 // core/notes.ts
 import { existsSync } from "node:fs";
 var FETCH_TIMEOUT_MS = 25e3;
@@ -20298,6 +20491,221 @@ function releaseName(note) {
   return value.startsWith("release-") ? value : `release-${value}`;
 }
 
+// core/release-fetch.ts
+var GITHUB_TIMEOUT_MS = 25e3;
+var IDLE_EVERY_TICKS = 10;
+var FORCE_THROTTLE_MS = 1e4;
+var PARALLEL = 4;
+var DEFAULT_RUNNER_GROUP = 1;
+var GitHubError = class extends Error {
+  status;
+  constructor(status, message) {
+    super(message);
+    this.status = status;
+  }
+};
+function createGitHubClient(fetch2) {
+  const cache = /* @__PURE__ */ new Map();
+  return async function get(path, token) {
+    const url2 = path.startsWith("https://") ? path : `https://api.github.com/${path}`;
+    const cached2 = cache.get(url2);
+    const headers = {
+      Accept: "application/vnd.github+json",
+      Authorization: `Bearer ${token}`,
+      "User-Agent": "agent-recall",
+      "X-GitHub-Api-Version": "2022-11-28"
+    };
+    if (cached2?.etag) headers["If-None-Match"] = cached2.etag;
+    let response;
+    try {
+      response = await fetch2(url2, { headers, signal: AbortSignal.timeout(GITHUB_TIMEOUT_MS) });
+    } catch (error62) {
+      throw new GitHubError(null, `GitHub ${path.split("?")[0]}: ${describe3(error62)}`);
+    }
+    if (response.status === 304 && cached2) return cached2.body;
+    if (response.status !== 200) throw new GitHubError(response.status, `GitHub respondeu ${response.status} em ${path.split("?")[0]}`);
+    const body = await response.json();
+    cache.set(url2, { etag: response.headers.get("etag"), body });
+    return body;
+  };
+}
+async function pool(items, worker) {
+  const results = new Array(items.length);
+  let next = 0;
+  const lanes = Array.from({ length: Math.min(PARALLEL, items.length) }, async () => {
+    while (next < items.length) {
+      const index = next++;
+      results[index] = await worker(items[index]);
+    }
+  });
+  await Promise.all(lanes);
+  return results;
+}
+function tagNumbers(refs) {
+  return refs.map((entry) => /^refs\/tags\/release-(\d+)$/.exec(entry.ref ?? "")?.[1]).filter((value) => value !== void 0).map(Number).sort((a, b) => a - b);
+}
+function previousTag(tags, number4) {
+  let found = null;
+  for (const tag of tags) if (tag < number4) found = tag;
+  return found === null ? null : releaseNameOf(found);
+}
+function notesByRelease(notes) {
+  const byName = /* @__PURE__ */ new Map();
+  for (const note of notes.values()) {
+    if (!note.drill) byName.set(releaseName(note), note);
+  }
+  return byName;
+}
+function createReleaseSource(options) {
+  const repository = options.repository ?? RELEASE_REPOSITORY;
+  const workflow = options.workflow ?? RELEASE_WORKFLOW;
+  const org = options.org ?? RUNNER_ORG;
+  const get = createGitHubClient(options.fetch);
+  const finishedJobs = /* @__PURE__ */ new Map();
+  const ranges = /* @__PURE__ */ new Map();
+  let snapshot = null;
+  let runners = [];
+  let loadedRuns = null;
+  const runsPath = (perPage, page = 1) => `repos/${repository}/actions/workflows/${workflow}.yml/runs?per_page=${perPage}&page=${page}`;
+  async function jobsOf(run, token) {
+    const key = `${run.id}:${run.run_attempt ?? 1}`;
+    const done = finishedJobs.get(key);
+    if (done) return done;
+    const jobs = [];
+    for (let page = 1; page <= 5; page++) {
+      const body = await get(`repos/${repository}/actions/runs/${run.id}/jobs?per_page=100&page=${page}`, token);
+      jobs.push(...body.jobs);
+      if (jobs.length >= body.total_count || body.jobs.length === 0) break;
+    }
+    if (run.status === "completed") finishedJobs.set(key, jobs);
+    return jobs;
+  }
+  async function commitsOf(run, tags, token) {
+    const base = previousTag(tags, run.run_number);
+    if (!base) return null;
+    const key = `${base}...${run.head_sha}`;
+    const known = ranges.get(key);
+    if (known) return known;
+    const body = await get(`repos/${repository}/compare/${key}?per_page=250`, token);
+    const commits = body.commits ?? [];
+    ranges.set(key, commits);
+    return commits;
+  }
+  async function tagList(token) {
+    return tagNumbers(await get(`repos/${repository}/git/matching-refs/tags/release-`, token));
+  }
+  async function build(run, tags, notes, token) {
+    const [jobs, commits] = await Promise.all([
+      jobsOf(run, token),
+      commitsOf(run, tags, token).catch((error62) => {
+        options.log.warn(`faixa de ${releaseNameOf(run.run_number)}: ${describe3(error62)}`);
+        return null;
+      })
+    ]);
+    const name = releaseNameOf(run.run_number);
+    const note = notes.get(name) ?? null;
+    const handoffs = note && options.handoffs ? await options.handoffs(name).catch(() => []) : [];
+    return buildRelease({
+      run,
+      jobs,
+      note,
+      commits,
+      tagged: tags.includes(run.run_number),
+      handoffs,
+      now: options.clock.now()
+    });
+  }
+  async function load(input2) {
+    const now = options.clock.now();
+    const notes = notesByRelease(input2.notes);
+    try {
+      const [page, tags] = await Promise.all([get(runsPath(RELEASE_HISTORY), input2.token), tagList(input2.token)]);
+      loadedRuns = page;
+      const previous = new Map((snapshot?.releases ?? []).map((release) => [release.runId, release]));
+      const releases = await pool(
+        page.workflow_runs,
+        (run) => build(run, tags, notes, input2.token).catch((error62) => {
+          const kept = previous.get(run.id);
+          if (!kept) throw error62;
+          options.log.warn(`${releaseNameOf(run.run_number)}: ${describe3(error62)}`);
+          return kept;
+        })
+      );
+      runners = await get(
+        `orgs/${org}/actions/runner-groups/${DEFAULT_RUNNER_GROUP}/runners?per_page=100`,
+        input2.token
+      ).then((body) => body.runners).catch((error62) => {
+        options.log.warn(`runners: ${describe3(error62)}`);
+        return runners;
+      });
+      snapshot = buildSnapshot({ repository, workflow, releases, runners, now });
+    } catch (error62) {
+      const message = describe3(error62);
+      snapshot = snapshot ? { ...snapshot, error: message } : buildSnapshot({ repository, workflow, releases: [], runners: [], now, error: message });
+    }
+    return snapshot;
+  }
+  async function lookup(input2) {
+    const known = snapshot?.releases.find((release) => release.number === input2.number);
+    if (known) return known;
+    const latest = snapshot?.releases[0]?.number ?? (await get(runsPath(1), input2.token)).workflow_runs[0]?.run_number;
+    if (latest === void 0 || input2.number > latest || input2.number < 1) return null;
+    const guess = Math.floor((latest - input2.number) / 100) + 1;
+    for (const page of [guess, guess + 1, guess - 1].filter((value) => value >= 1)) {
+      const body = await get(runsPath(100, page), input2.token);
+      const run = body.workflow_runs.find((candidate) => candidate.run_number === input2.number);
+      if (run) return build(run, await tagList(input2.token), notesByRelease(input2.notes), input2.token);
+    }
+    return null;
+  }
+  async function probe(token) {
+    return await get(runsPath(RELEASE_HISTORY), token) !== loadedRuns;
+  }
+  return { load, lookup, probe, current: () => snapshot };
+}
+function createReleaseTracker(options) {
+  let ticks = 0;
+  let last = null;
+  let lastForced = -Infinity;
+  let running = null;
+  function run(input2) {
+    if (running) return running;
+    running = (async () => {
+      const previous = options.source.current();
+      const next = await options.source.load(input2);
+      try {
+        await options.onSnapshot?.(next, previous);
+      } catch (error62) {
+        options.log.warn(`release: ${describe3(error62)}`);
+      }
+    })().finally(() => running = null);
+    return running;
+  }
+  return {
+    async tick(input2) {
+      last = input2;
+      const current = options.source.current();
+      const scheduled = ticks++ % IDLE_EVERY_TICKS === 0 || current === null || current.releases.some(isActive) || input2.notesChanged;
+      const due = scheduled || await options.source.probe(input2.token).catch((error62) => {
+        options.log.warn(`release: ${describe3(error62)}`);
+        return false;
+      });
+      if (due) await run(input2);
+    },
+    async refresh() {
+      const now = options.clock.now().getTime();
+      if (!last || now - lastForced < FORCE_THROTTLE_MS) return false;
+      lastForced = now;
+      await run(last);
+      return true;
+    },
+    current: () => options.source.current()
+  };
+}
+
+// core/watcher.ts
+import { join as join3 } from "node:path";
+
 // core/route.ts
 var CATCH_UP_MS = 8 * 60 * 60 * 1e3;
 var FIX_FORWARD_MS = 30 * 60 * 1e3;
@@ -20350,6 +20758,20 @@ function route(note, me) {
   }
   return actions;
 }
+function blockedRecalls(releases, me, now) {
+  const actions = [];
+  const shipped = Math.max(-Infinity, ...releases.filter((release) => release.tag !== null).map((release) => release.number));
+  for (const release of releases) {
+    if (release.verdict !== "failed" || release.tag !== null || !release.pusher) continue;
+    if (release.number < shipped) continue;
+    const at = Date.parse(release.completedAt ?? "");
+    if (!Number.isFinite(at) || now.getTime() - at > CATCH_UP_MS) continue;
+    const target = toSessionRef(release.pusher);
+    if (!target || !mine(target, me)) continue;
+    actions.push({ kind: "blocked", release: release.name, target, lock: `${target.id}.blocked` });
+  }
+  return actions;
+}
 function dueReminder(note, me, now) {
   if (note.state !== "fix-pending" || note.fix?.readyAt) return null;
   const owner = parseSessionValue(note.owner);
@@ -20357,6 +20779,18 @@ function dueReminder(note, me, now) {
   if (!owner || !mine(owner, me) || !Number.isFinite(at)) return null;
   if (now.getTime() - at < FIX_FORWARD_MS) return null;
   return { kind: "remind", release: releaseName(note), target: owner, lock: `${owner.id}.remind` };
+}
+function roleOf(action) {
+  switch (action.kind) {
+    case "recall":
+      return action.role;
+    case "investigation":
+      return "investigate";
+    case "remind":
+      return "remind";
+    case "blocked":
+      return "blocked";
+  }
 }
 function describeAction(action) {
   switch (action.kind) {
@@ -20366,7 +20800,77 @@ function describeAction(action) {
       return `${action.release} investigate \u2192 nova sess\xE3o`;
     case "remind":
       return `${action.release} lembrete 30 min \u2192 ${formatSession(action.target)}`;
+    case "blocked":
+      return `${action.release} barrada antes da produ\xE7\xE3o \u2192 ${formatSession(action.target)}`;
   }
+}
+
+// core/deliver.ts
+function recallPrompt(release, role, note) {
+  return `Incidente ${release}: carregue a skill dbolt-release-incident. Papel: ${role}. Nota: ${JSON.stringify(note)}`;
+}
+function reminderPrompt(release, note) {
+  return `Lembrete: o fix-forward da ${release} passou de 30 min sem fix.readyAt; pela skill dbolt-release-incident (Prazos) o owner reverte agora e segue corrigindo. ` + recallPrompt(release, "investigate", note);
+}
+function promptFor(action, note) {
+  switch (action.kind) {
+    case "recall":
+      return recallPrompt(action.release, action.role, note);
+    case "investigation":
+      return recallPrompt(action.release, "investigate", note);
+    case "remind":
+      return reminderPrompt(action.release, note);
+  }
+}
+function blockedPrompt(release) {
+  const snapshot = {
+    number: release.number,
+    url: release.url,
+    headSha: release.headSha,
+    title: release.title,
+    failedJob: release.failedJob,
+    sessions: release.sessions.map((session) => `${session.harness}/${session.host}/${session.id}`)
+  };
+  return `Release barrada ${release.name}: carregue a skill dbolt-release-incident. Papel: blocked. Release: ${JSON.stringify(snapshot)}`;
+}
+async function deliver(input2) {
+  const { action, text, title, delivery, log: log2 } = input2;
+  const failures = [];
+  if (action.kind === "investigation") {
+    try {
+      const id = await delivery.create(text, title);
+      log2.info(`${action.release}: sess\xE3o de investiga\xE7\xE3o ${id} criada`);
+      return { outcome: "created", session: id };
+    } catch (error62) {
+      failures.push(`criar sess\xE3o: ${describe3(error62)}`);
+    }
+  } else {
+    try {
+      await delivery.prompt(action.target, text);
+      return { outcome: "prompt", session: action.target.id };
+    } catch (error62) {
+      failures.push(`prompt: ${describe3(error62)}`);
+    }
+    try {
+      const id = await delivery.fallback(action.target, text, title);
+      log2.warn(`${action.release}: ${formatSession(action.target)} recusou o prompt; chamado foi para ${id}`);
+      return { outcome: "fallback", session: id };
+    } catch (error62) {
+      failures.push(`fallback: ${describe3(error62)}`);
+    }
+  }
+  const target = action.kind === "investigation" ? void 0 : formatSession(action.target);
+  const role = roleOf(action);
+  const reason = failures.join("; ");
+  log2.error(`${input2.drill ? "[ensaio] " : ""}n\xE3o consegui chamar ${target ?? "nova sess\xE3o de investiga\xE7\xE3o"} para ${action.release} (${role}): ${reason}`);
+  if (!input2.recordFailure) return { outcome: "failed", session: null };
+  try {
+    if (await input2.recordFailure({ role, target, reason })) return { outcome: "recorded", session: null };
+    log2.error(`${action.release}: a falha do chamado n\xE3o entrou na nota`);
+  } catch (error62) {
+    log2.error(`${action.release}: gravar a falha na nota: ${describe3(error62)}`);
+  }
+  return { outcome: "failed", session: null };
 }
 
 // core/watcher.ts
@@ -20388,35 +20892,40 @@ function createWatcher(options) {
     token = { value, at: now };
     return value;
   }
-  async function act(action, key, note, config2, me, auth) {
+  async function call(input2, me) {
+    const { action } = input2;
     if (!await acquireLock(options.stateDir, action.release, action.lock)) return null;
     log2.info(`chamando: ${describeAction(action)}`);
-    const { outcome, session } = await deliver({
-      action,
-      note,
-      delivery: options.delivery,
-      recordFailure: (failure2) => recordRecallFailure({
-        exec,
-        gitDir: join3(options.stateDir, `${options.harness}.git`),
-        repository: config2.repository,
-        notesRef: config2.notesRef,
-        token: auth,
-        key,
-        recall: { ...failure2, failedAt: clock.now().toISOString(), by: `${me.harness}/${me.host}`, state: note.state }
-      }),
-      host: me.host,
-      log: log2
-    });
+    const { outcome, session } = await deliver({ ...input2, delivery: options.delivery, host: me.host, log: log2 });
     log2.info(`${describeAction(action)}: ${outcome}`);
-    if (session && !note.drill) {
-      const role = action.kind === "recall" ? action.role : action.kind === "remind" ? "remind" : "investigate";
+    if (session && !input2.drill) {
       await writeHandoff(options.stateDir, action.release, action.lock, {
-        role,
+        role: roleOf(action),
         session: { harness: me.harness, host: me.host, id: session },
         at: clock.now().toISOString()
       }).catch((error62) => log2.warn(`${action.release}: registrar o chamado: ${describe3(error62)}`));
     }
     return { action, outcome, session };
+  }
+  function act(action, key, note, config2, me, auth) {
+    return call(
+      {
+        action,
+        text: promptFor(action, note),
+        title: `Incidente ${action.release}${note.drill ? " [ensaio]" : ""}`,
+        drill: note.drill === true,
+        recordFailure: (failure2) => recordRecallFailure({
+          exec,
+          gitDir: join3(options.stateDir, `${options.harness}.git`),
+          repository: config2.repository,
+          notesRef: config2.notesRef,
+          token: auth,
+          key,
+          recall: { ...failure2, failedAt: clock.now().toISOString(), by: `${me.harness}/${me.host}`, state: note.state }
+        })
+      },
+      me
+    );
   }
   async function tick() {
     const now = clock.now();
@@ -20495,6 +21004,18 @@ function createWatcher(options) {
     }
     if (options.release) {
       await options.release.tick({ token: auth, notes, notesChanged: fetched }).catch((error62) => log2.warn(`release: ${describe3(error62)}`));
+      const releases = options.release.current()?.releases ?? [];
+      for (const action of blockedRecalls(releases, me, now)) {
+        const release = releases.find((candidate) => candidate.name === action.release);
+        const done = await call(
+          { action, text: blockedPrompt(release), title: `Release barrada ${action.release}`, drill: false, recordFailure: null },
+          me
+        ).catch((error62) => {
+          log2.error(`${action.release}: ${describe3(error62)}`);
+          return null;
+        });
+        if (done) handled.push(done);
+      }
     }
     return { poll: poll.kind, fetched, handled };
   }
@@ -20652,7 +21173,18 @@ function startPoller(registry3, deps, handover) {
       fetch: deps.fetch,
       exec: deps.exec,
       delivery: createDelivery(registry3, deps.exec, () => current),
-      log: log2
+      log: log2,
+      // No release UI here: the status only tells which pushes failed before the tag.
+      release: createReleaseTracker({
+        source: createReleaseSource({
+          fetch: deps.fetch,
+          clock: deps.clock,
+          log: log2,
+          handoffs: (release) => readHandoffs(deps.stateDir, release)
+        }),
+        clock: deps.clock,
+        log: log2
+      })
     });
     await watcher.tick();
   }
@@ -20694,7 +21226,7 @@ var index_default = {
   // No dispose: the poller and the newest context outlive location eviction (see ./poller.ts).
   setup(ctx) {
     attach(registry2, ctx, {
-      sha: true ? "1dcde72adb7ce83a2e4e029144c75bb2da13d0f3" : "unknown",
+      sha: true ? "c779354ce225b756de7c5068baaf24ada90bedb3" : "unknown",
       stateDir: stateDirectory(),
       pid: process.pid,
       clock: { now: () => /* @__PURE__ */ new Date() },

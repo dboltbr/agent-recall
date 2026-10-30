@@ -6041,7 +6041,7 @@ var SignalSchema = z.object({
   outcome: z.string(),
   reason: z.string().nullable()
 });
-var HANDOFF_ROLES = ["investigate", "fix", "remind", "owner"];
+var HANDOFF_ROLES = ["investigate", "fix", "remind", "owner", "blocked"];
 var HandoffRoleSchema = z.enum(HANDOFF_ROLES);
 var HandoffSchema = z.object({
   role: HandoffRoleSchema,
@@ -6256,7 +6256,7 @@ function toSession(ref) {
   return { harness: ref.harness, host: ref.host, id: ref.id };
 }
 function releaseHandoffs(note, delivered) {
-  if (!note) return [];
+  if (!note) return delivered.filter((handoff2) => handoff2.role === "blocked");
   const out = [];
   const add = (role, ref, at) => {
     if (ref && !out.some((known) => sameSession(known.session, ref))) out.push({ role, session: toSession(ref), at });
