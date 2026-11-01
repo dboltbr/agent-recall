@@ -57,7 +57,7 @@ async function setup(options: {
 const mineRed = note({
   release: "release-90",
   updatedAt: hoursAgo(3),
-  sessions: [session("opencode", "archdev", "ses_culprit", ["c0ffee1"])],
+  owner: session("opencode", "archdev", "ses_culprit", ["c0ffee1"]),
 });
 
 test("304: heartbeat atualizado, nenhuma busca de notas, nenhum chamado", async () => {
@@ -99,7 +99,7 @@ test("recuperação na partida: incidente de 3 h é tratado uma vez, o de 9 h é
   const old = note({
     release: "release-80",
     updatedAt: hoursAgo(9),
-    sessions: [session("opencode", "archdev", "ses_old")],
+    owner: session("opencode", "archdev", "ses_old"),
   });
   const { watcher, delivery } = await setup({
     notes: { tag90: mineRed, tag80: old },
@@ -113,7 +113,7 @@ test("recuperação na partida: incidente de 3 h é tratado uma vez, o de 9 h é
   assert.equal(delivery.recorded.prompts.length, 1);
   const [call] = delivery.recorded.prompts;
   assert.equal(call!.target.id, "ses_culprit");
-  assert.ok(call!.text.startsWith("Incidente release-90: carregue a skill dbolt-release-incident. Papel: investigate. Nota: {"));
+  assert.ok(call!.text.startsWith("Incidente release-90: carregue a skill dbolt-release-incident. Papel: owner. "));
   await watcher.tick();
   assert.equal(delivery.recorded.prompts.length, 1, "ref mudou mas a nota é a mesma: sem segundo chamado");
 });
@@ -123,7 +123,7 @@ test("chamado entregue fica registrado no diretório da trava; ensaio não", asy
   const report = await watcher.tick();
   assert.equal(report.handled[0]!.session, "ses_culprit");
   assert.deepEqual(await readHandoffs(stateDir, "release-90"), [
-    { role: "investigate", session: { harness: "opencode", host: "archdev", id: "ses_culprit" }, at: NOW.toISOString() },
+    { role: "owner", session: { harness: "opencode", host: "archdev", id: "ses_culprit" }, at: NOW.toISOString() },
   ]);
   const forked = await setup({
     notes: { tag90: mineRed },
@@ -144,8 +144,8 @@ test("chamado entregue fica registrado no diretório da trava; ensaio não", asy
 
 test("readHandoffs ignora registro corrompido ou estranho", async () => {
   const stateDir = await tempState();
-  const good = { role: "fix", session: { harness: "paseo", host: "srv", id: "agent-1" }, at: NOW.toISOString() } as const;
-  await writeHandoff(stateDir, "release-7", "agent-1.fix", good);
+  const good = { role: "owner", session: { harness: "paseo", host: "srv", id: "agent-1" }, at: NOW.toISOString() } as const;
+  await writeHandoff(stateDir, "release-7", "agent-1.owner", good);
   await writeHandoff(stateDir, "release-7", "other", { ...good, role: "nope" } as never);
   await writeFile(join(stateDir, "release-7", "loose-file"), "x");
   assert.deepEqual(await readHandoffs(stateDir, "release-7"), [good]);
@@ -161,28 +161,44 @@ test("trava: dois processos no mesmo host chamam a sessão uma vez só", async (
   assert.equal(shared.recorded.prompts.length, 1);
 });
 
-test("faixa com duas sessões: só o incident-host cria a sessão de investigação", async () => {
+test("faixa com duas sessões: o dono recebe o pedido de ação, a avisada só o aviso com o nome dele", async () => {
   const many = note({
     release: "release-91",
-    sessions: [session("opencode", "archdev", "ses_a"), session("paseo", "srv_x", "agent-b")],
+    owner: session("opencode", "archdev", "ses_b", ["bbbbbbb"]),
+    notified: [session("opencode", "archdev", "ses_a", ["aaaaaaa"]), session("paseo", "srv_x", "agent-c")],
   });
-  const regular = await setup({ notes: { t: many }, refs: [{ status: 200, etag: '"e"' }] });
-  await regular.watcher.tick();
-  assert.equal(regular.delivery.recorded.created.length, 0);
-  assert.equal(regular.delivery.recorded.prompts.length, 0);
-  const incident = await setup({
-    notes: { t: many },
-    refs: [{ status: 200, etag: '"e"' }],
-    config: { ...config, incidentHost: true },
-  });
-  const report = await incident.watcher.tick();
-  assert.equal(incident.delivery.recorded.created.length, 1);
-  assert.equal(incident.delivery.recorded.prompts.length, 0);
-  assert.equal(report.handled[0]!.outcome, "created");
+  const { watcher, delivery, stateDir } = await setup({ notes: { t: many }, refs: [{ status: 200, etag: '"e"' }, { status: 304 }] });
+  const report = await watcher.tick();
+  assert.deepEqual(
+    report.handled.map((h) => [h.action.kind === "recall" ? h.action.role : h.action.kind, h.session]),
+    [
+      ["owner", "ses_b"],
+      ["notified", "ses_a"],
+    ],
+  );
+  const [owner, notified] = delivery.recorded.prompts;
+  assert.match(owner!.text, /Papel: owner\. A sua sessão é a dona da release-91/);
+  assert.match(notified!.text, /Papel: notified\. Aviso, sem pedido de ação: .* Quem age é a dona, opencode\/archdev\/ses_b;/);
+  assert.deepEqual(
+    (await readHandoffs(stateDir, "release-91")).map((h) => [h.role, h.session.id]).sort(),
+    [
+      ["notified", "ses_a"],
+      ["owner", "ses_b"],
+    ],
+  );
+  await watcher.tick();
+  assert.equal(delivery.recorded.prompts.length, 2, "tick seguinte não chama de novo");
+});
+
+test("nota sem dono não chama ninguém, nem as avisadas", async () => {
+  const orphan = note({ release: "release-91", owner: null, notified: [session("opencode", "archdev", "ses_a")] });
+  const { watcher, delivery } = await setup({ notes: { t: orphan }, refs: [{ status: 200, etag: '"e"' }] });
+  assert.deepEqual((await watcher.tick()).handled, []);
+  assert.equal(delivery.recorded.prompts.length, 0);
 });
 
 test("sessão de outro harness ou host não é chamada", async () => {
-  const other = note({ release: "release-92", sessions: [session("paseo", "srv_x", "agent-b")] });
+  const other = note({ release: "release-92", owner: session("paseo", "srv_x", "agent-b") });
   const { watcher, delivery } = await setup({ notes: { t: other }, refs: [{ status: 200, etag: '"e"' }] });
   await watcher.tick();
   assert.equal(delivery.recorded.prompts.length, 0);
@@ -207,11 +223,11 @@ test("fallback: prompt recusado → fork; fork recusado → falha gravada na not
   assert.equal(recorded.git.written.length, 1);
   const { key, body } = recorded.git.written[0]!;
   assert.equal(key, "t");
-  assert.equal(body["state"], "red");
+  assert.deepEqual(body["rollback"], mineRed.rollback, "o resto da nota fica como estava");
   assert.equal(body["updatedAt"], NOW.toISOString());
   assert.deepEqual(
     { ...(body["recall"] as Record<string, unknown>), reason: undefined },
-    { failedAt: NOW.toISOString(), by: "opencode/archdev", role: "investigate", target: "opencode/archdev/ses_culprit", state: "red", reason: undefined },
+    { failedAt: NOW.toISOString(), by: "opencode/archdev", role: "owner", target: "opencode/archdev/ses_culprit", rollback: "reverted", reason: undefined },
   );
   assert.match((body["recall"] as { reason: string }).reason, /prompt: prompt recusado; fallback: fork recusado/);
   const lost = await setup({
@@ -224,42 +240,46 @@ test("fallback: prompt recusado → fork; fork recusado → falha gravada na not
   assert.equal(lost.git.gitCalls("push").length, 3);
 });
 
-test("correção vai à sessão original do culpado; o owner não recebe fix", async () => {
-  const decided = note({
-    release: "release-93",
-    state: "fix-pending",
-    owner: "paseo/srv_x/agent-investigator",
-    sessions: [session("opencode", "archdev", "ses_culprit", ["deadbeef1234"]), session("opencode", "archdev", "ses_clean", ["0123456789"])],
-    assessment: { at: hoursAgo(0.1), suspects: [{ commit: "deadbeef1234" }] },
-  });
-  const { watcher, delivery } = await setup({ notes: { t: decided }, refs: [{ status: 200, etag: '"e"' }] });
-  await watcher.tick();
-  assert.deepEqual(
-    delivery.recorded.prompts.map((p) => [p.target.id, p.text.split(". Nota:")[0]]),
-    [["ses_culprit", "Incidente release-93: carregue a skill dbolt-release-incident. Papel: fix"]],
-  );
-});
-
-test("aos 30 min de fix-forward sem fix.readyAt, o owner recebe um lembrete só", async () => {
+test("rollback pendente: a avisada vai na hora, o dono quando o vigia grava o desfecho", async () => {
   const pending = note({
     release: "release-94",
-    state: "fix-pending",
-    owner: "opencode/archdev/ses_owner",
-    sessions: [session("opencode", "archdev", "ses_owner", ["aaaaaaa1"])],
-    assessment: { at: hoursAgo(0.4), suspects: [{ commit: "aaaaaaa1" }] },
+    owner: session("opencode", "archdev", "ses_owner", ["aaaaaaa1"]),
+    notified: [session("opencode", "archdev", "ses_other")],
+    rollback: { outcome: "pending" },
+    verdict: { verdict: "red", sources: { sentry: { outcome: "red", reason: "new-issue" } }, at: hoursAgo(0.05) },
   });
+  // fakeExec reads `notes` on every call: replacing the entry is the watch updating the note.
+  const notes: Record<string, Note> = { t: pending };
   const { watcher, delivery, clock } = await setup({
-    notes: { t: pending },
-    refs: [{ status: 200, etag: '"e"' }, { status: 304 }],
+    notes,
+    refs: [{ status: 200, etag: '"e1"' }, { status: 304 }, { status: 200, etag: '"e2"' }],
   });
   await watcher.tick();
-  assert.equal(delivery.recorded.prompts.length, 0, "24 min: ainda no prazo");
-  clock.set(new Date(NOW.getTime() + 7 * 60_000));
+  assert.deepEqual(delivery.recorded.prompts.map((p) => p.target.id), ["ses_other"]);
+  clock.set(new Date(NOW.getTime() + 30_000));
   await watcher.tick();
-  clock.set(new Date(NOW.getTime() + 8 * 60_000));
+  assert.equal(delivery.recorded.prompts.length, 1, "pendente há 3,5 min: o dono ainda espera");
+  notes["t"] = { ...pending, rollback: { outcome: "blocked", target: "dbolt-deploy", reason: "unsafe-migration", findings: [{}] } };
+  clock.set(new Date(NOW.getTime() + 60_000));
+  await watcher.tick();
+  assert.deepEqual(delivery.recorded.prompts.map((p) => p.target.id), ["ses_other", "ses_owner"]);
+  assert.match(delivery.recorded.prompts[1]!.text, /Motivo: Sentry: new-issue\. Rollback: impedido: a imagem anterior não aguenta o banco/);
+});
+
+test("rollback que fica pendente (vigia morreu): o dono é chamado aos 10 min, sem a nota mudar", async () => {
+  const stuck = note({
+    release: "release-95",
+    owner: session("opencode", "archdev", "ses_owner"),
+    rollback: { outcome: "pending" },
+    verdict: { verdict: "red", sources: {}, at: hoursAgo(0.1) },
+  });
+  const { watcher, delivery, clock } = await setup({ notes: { t: stuck }, refs: [{ status: 200, etag: '"e1"' }, { status: 304 }] });
+  await watcher.tick();
+  assert.equal(delivery.recorded.prompts.length, 0, "6 min: ainda espera o desfecho");
+  clock.set(new Date(NOW.getTime() + 4 * 60_000));
   await watcher.tick();
   assert.equal(delivery.recorded.prompts.length, 1);
-  assert.match(delivery.recorded.prompts[0]!.text, /^Lembrete: o fix-forward da release-94 passou de 30 min/);
+  assert.match(delivery.recorded.prompts[0]!.text, /Rollback: pendente: o vigia não gravou o desfecho do rollback/);
 });
 
 test("credencial recusada (401) não grava heartbeat", async () => {

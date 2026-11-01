@@ -24,9 +24,11 @@ import {
   type Tone,
 } from "../shared/release-copy.ts";
 import {
+  activityLabel,
   formatDuration,
   formatShortDuration,
   isActive,
+  otherActive,
   releaseDurationMs,
   releaseLabel,
   type Release,
@@ -207,6 +209,51 @@ export function QueueLine({ theme, text, style }: { theme: PluginTheme; text: st
   );
 }
 
+/**
+ * "Também em andamento": the other releases in flight, one line each (`#349 01/11 18:53 · na fila ·
+ * atrás de #348`); pressing one puts it in focus.
+ */
+export function OtherReleases({
+  theme,
+  snapshot,
+  release,
+  onSelect,
+}: {
+  theme: PluginTheme;
+  snapshot: ReleaseSnapshot;
+  release: Release;
+  onSelect(release: Release): void;
+}) {
+  const others = otherActive(snapshot, release);
+  if (!others.length) return null;
+  return (
+    <View>
+      <SectionLabel theme={theme}>Também em andamento</SectionLabel>
+      {others.map((other) => (
+        <Pressable
+          key={other.runId}
+          accessibilityRole="button"
+          accessibilityLabel={`${releaseLabel(other)}, ${activityLabel(snapshot, other)}. Mostrar esta release`}
+          onPress={() => onSelect(other)}
+          hitSlop={4}
+          style={({ pressed }) => ({ flexDirection: "row", alignItems: "center", gap: 8, paddingVertical: 3, minWidth: 0, opacity: pressed ? 0.6 : 1 })}
+        >
+          {other.status === "queued" ? (
+            <Icon name="Clock" size={13} color={theme.colors.foregroundMuted} />
+          ) : (
+            <Spin color={theme.colors.accent} size={13} />
+          )}
+          <Text style={{ color: theme.colors.foreground, fontWeight: "500", fontSize: 12.5 }}>{releaseLabel(other)}</Text>
+          <Text numberOfLines={1} style={{ color: theme.colors.foregroundMuted, fontSize: 12, flex: 1, minWidth: 0 }}>
+            {activityLabel(snapshot, other)}
+          </Text>
+          <Icon name="ChevronRight" size={14} color={theme.colors.foregroundMuted} />
+        </Pressable>
+      ))}
+    </View>
+  );
+}
+
 function Chip({ theme, children, tone, queued }: { theme: PluginTheme; children: ReactNode; tone?: Tone; queued?: boolean }) {
   return (
     <View
@@ -266,7 +313,7 @@ export interface WatchTargets {
   readonly open: OpenAgent;
 }
 
-/** `push · “title”` / `investigação · “title”` rows under the vigia step. */
+/** `push + dona · “title”` / `avisada · “title”` rows under the vigia step. */
 export function WatchLinks({ theme, watch, style }: { theme: PluginTheme; watch: WatchTargets; style?: object }) {
   if (!watch.links.length) return null;
   return (
@@ -302,19 +349,22 @@ export function StepList({
   queue,
   now,
   watch,
+  waiting = null,
 }: {
   theme: PluginTheme;
   release: Release;
   queue: string | null;
   now: Date;
   watch?: WatchTargets | null;
+  /** What holds the release (`waitingFor`): the deploy step says it while pending. */
+  waiting?: string | null;
 }) {
   return (
     <View>
       {release.steps.map((step, index) => {
         const pending = step.state === "pending" || step.state === "skipped";
         const duration = stepDurationMs(step, now);
-        const detail = stepDetail(release, step);
+        const detail = stepDetail(release, step, waiting);
         const markTone = stepMarkTone(release, step);
         return (
           <View key={step.id} style={{ flexDirection: "row", gap: 10, paddingVertical: 4, alignItems: "flex-start" }}>

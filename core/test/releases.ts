@@ -31,15 +31,15 @@ const SOLID = ["self-hosted", "linux", "amd64", "solid-srv"];
 /** `ago` = [started minutes ago, completed minutes ago]; omitted for queued jobs. */
 export function job(
   name: string,
-  state: "queued" | "running" | "success" | "failure" | "cancelled" | "skipped",
+  state: "queued" | "waiting" | "running" | "success" | "failure" | "cancelled" | "skipped",
   ago: [number, number?] | null = null,
   extra: Partial<GitHubJob> = {},
 ): GitHubJob {
-  const completed = state !== "queued" && state !== "running";
+  const completed = state !== "queued" && state !== "running" && state !== "waiting";
   return {
     id: nextJob++,
     name,
-    status: completed ? "completed" : state === "running" ? "in_progress" : "queued",
+    status: completed ? "completed" : state === "running" ? "in_progress" : state === "waiting" ? "pending" : "queued",
     conclusion: completed ? state : null,
     started_at: ago ? minutesAgo(ago[0]) : null,
     completed_at: completed && ago ? minutesAgo(ago[1] ?? ago[0]) : null,
@@ -51,10 +51,8 @@ export function job(
 }
 
 export const VERIFY_DONE = [
-  job("trigger", "success", [36, 35.8]),
-  job("verify-production / qlty", "success", [35.5, 35]),
-  job("verify-production / opengrep", "success", [34, 33.5]),
-  job("verify-production / secrets", "success", [30, 29]),
+  job("plan", "success", [36, 35.8]),
+  job("verify-production / scanners", "success", [35.5, 29]),
   job("verify-production / check", "success", [33, 12]),
   job("flags", "skipped", [36, 36]),
 ];
@@ -79,19 +77,60 @@ export function midImages(): GitHubJob[] {
   ];
 }
 
-/** Every step through the watch, which ends with `watch`. */
-export function finished(watch: "success" | "failure" | "cancelled"): GitHubJob[] {
-  return [
+/** The watch's outcome: its run judged (`success`/`failure`), or it was cancelled. */
+export type WatchEnd = "success" | "failure" | "cancelled";
+
+/** A release run and its watch run, as `buildRelease` takes them. */
+export interface Released {
+  readonly jobs: GitHubJob[];
+  readonly watch: { readonly run: GitHubRun; readonly jobs: GitHubJob[] } | null;
+}
+
+const LIGHT = ["self-hosted", "linux", "amd64", "solid-srv-light"];
+
+/** The `watch release-<n>` run of release-watch.yml: its one `watch` job, ended or still open. */
+export function watchRun(number: number, end: WatchEnd | "running", ago: [number, number?] = [1.8, 0.5]): Released["watch"] {
+  const open = end === "running";
+  return {
+    run: run({
+      run_number: 900 + number,
+      id: 41_000_000_000 + number,
+      name: `watch release-${number}`,
+      display_title: `watch release-${number}`,
+      status: open ? "in_progress" : "completed",
+      conclusion: open ? null : end,
+      created_at: minutesAgo(ago[0]),
+      run_started_at: minutesAgo(ago[0]),
+      updated_at: minutesAgo(open ? 0.2 : (ago[1] ?? ago[0])),
+      html_url: `https://github.com/dboltbr/dbolt/actions/runs/${41_000_000_000 + number}`,
+    }),
+    jobs: [job("watch", end, open ? [ago[0]] : ago, { labels: LIGHT })],
+  };
+}
+
+/**
+ * Every step through the tag; the run's `watch` job dispatches the watch run, which judges
+ * (`end`). `cancelled`: the release run itself was cancelled at the dispatch (superseded), no watch.
+ */
+export function released(end: WatchEnd, number = 0, endedAgo = 0.5): Released {
+  const jobs = [
     ...VERIFY_DONE,
     job("images-command / build-push-api", "success", [11, 7]),
     job("images-rtpengine / build-push", "success", [11, 5]),
+    job("previous-watch", "success", [10, 9.9], { labels: LIGHT }),
     job("wall / meta", "success", [4.5, 4.4], { labels: ["blacksmith-2vcpu-ubuntu-2404"] }),
     job("console / deploy", "success", [4, 2], { labels: ["blacksmith-2vcpu-ubuntu-2404"] }),
     job("infrastructure / check", "success", [4, 3]),
-    job("release-tag", "success", [2, 1.9]),
-    job("summary", "success", [1.9, 1.8]),
-    job("watch", watch, [1.8, 0.5], { labels: ["self-hosted", "linux", "amd64", "solid-srv-light"] }),
+    job("release-tag", "success", [2, 1.95]),
+    job("watch", end === "cancelled" ? "cancelled" : "success", [1.95, 1.9], { labels: LIGHT }),
+    job("summary", "success", [1.9, 1.85]),
   ];
+  return { jobs, watch: end === "cancelled" ? null : watchRun(number, end, [endedAgo + 1.3, endedAgo]) };
+}
+
+/** `buildRelease`'s jobs and watch from either a bare job list (no watch run) or `released()`. */
+export function jobsInput(jobs: GitHubJob[] | Released): Released {
+  return Array.isArray(jobs) ? { jobs, watch: null } : jobs;
 }
 
 export function commit(sha: string, subject: string, session?: string): GitHubCommit {

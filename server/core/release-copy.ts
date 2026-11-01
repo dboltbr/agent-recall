@@ -8,8 +8,10 @@ import {
   HANDOFF_LABELS,
   imageJobs,
   isActive,
+  freezeLabel,
   queueGroups,
   revertSummary,
+  rollbackLabel,
   STEP_LABELS,
   stepJobNames,
   VERDICT_LABELS,
@@ -104,7 +106,7 @@ export function watchSessions(release: Release): WatchSession[] {
   return out;
 }
 
-/** `push · “Aviso ao morador”`, `investigação + correção · agente 1a2b3c4d`. */
+/** `push · “Aviso ao morador”`, `push + dona · agente 1a2b3c4d`. */
 export function watchSessionLabel(entry: WatchSession, title: string | null): string {
   const kinds = entry.kinds.map((kind) => (kind === "push" ? "push" : HANDOFF_LABELS[kind])).join(" + ");
   const { session } = entry;
@@ -127,15 +129,16 @@ function jobShortName(name: string): string {
 }
 
 /** Second line of a step in the vertical list (images draw chips instead). */
-export function stepDetail(release: Release, step: Step): string {
+export function stepDetail(release: Release, step: Step, waiting: string | null = null): string {
   const names = stepJobNames(release, step.id);
   switch (step.id) {
     case "verify":
-      return names.length ? names.join(" · ") : "check · qlty · opengrep · secrets";
+      return names.length ? names.join(" · ") : "check · scanners";
     case "images":
       return step.state === "skipped" ? "nada a publicar" : "";
     case "deploy":
       if (step.state === "failed" && step.failedJob) return `${step.failedJob} falhou`;
+      if (step.state === "pending" && waiting?.startsWith("esperando")) return waiting;
       return names.length ? names.join(" · ") : "produção";
     case "tag":
       return release.tag ?? release.name;
@@ -294,7 +297,8 @@ export function verdictSignals(release: Release): { text: string; tone: Tone } {
       return { text: release.failedJob ? `${release.failedJob.name} falhou` : "o run falhou", tone: "bad" };
     case "red": {
       const tripped = release.signals.filter((signal) => signal.outcome === "red").map(signalText);
-      return { text: tripped.length ? tripped.join(" · ") : "vigia vermelho", tone: "bad" };
+      const rollback = [rollbackLabel(release), freezeLabel(release)].filter((part): part is string => part !== null);
+      return { text: [...(tripped.length ? tripped : ["vigia vermelho"]), ...rollback].join(" · "), tone: "bad" };
     }
     case "green": {
       const judged = release.signals.filter((signal) => signal.outcome === "green" || signal.outcome === "red");
@@ -320,7 +324,9 @@ export function verdictBanner(release: Release): { tone: Tone; text: string; lin
       return { tone: "warn", text: revertSummary(release) ?? "vigia reverteu", link: "signals" };
     case "red": {
       const tripped = release.signals.filter((signal) => signal.outcome === "red").map((signal) => signal.label);
-      return { tone: "bad", text: tripped.length ? `vigia vermelho · ${tripped.join(", ")}` : "vigia vermelho", link: "signals" };
+      const head = tripped.length ? `vigia vermelho · ${tripped.join(", ")}` : "vigia vermelho";
+      const text = [head, rollbackLabel(release), freezeLabel(release)].filter(Boolean).join(" · ");
+      return { tone: "bad", text, link: "signals" };
     }
     case "failed":
       return { tone: "bad", text: release.failedJob ? `${release.failedJob.name} falhou` : "o run falhou", link: "log" };

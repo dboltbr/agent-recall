@@ -21,13 +21,25 @@ export async function tempState(): Promise<string> {
 
 export const config: HostConfig = {
   instance: "archdev",
-  incidentHost: false,
   repository: "dboltbr/dbolt",
   notesRef: "refs/notes/release-watch",
 };
 
+/** A red note as `release-incident-note.py respond` leaves it: pin reverted and applied, no owner. */
 export function note(partial: Partial<Note> & Pick<Note, "release">): Note {
-  return { state: "red", updatedAt: hoursAgo(0.1), sessions: [], ...partial };
+  return {
+    verdict: {
+      verdict: "red",
+      sources: { errors5xx: { outcome: "red", reason: "errors5xx-ratio" }, sentry: { outcome: "green" } },
+      at: hoursAgo(0.2),
+    },
+    range: { from: "aaaaaaa", to: "bbbbbbb" },
+    owner: null,
+    notified: [],
+    rollback: { outcome: "reverted", target: "dbolt-deploy", commit: "d3p10y0000000000", applied: true, at: hoursAgo(0.1) },
+    updatedAt: hoursAgo(0.1),
+    ...partial,
+  };
 }
 
 export function session(harness: SessionRef["harness"], host: string, id: string, commits: string[] = []) {
@@ -105,11 +117,10 @@ export function fakeExec(notes: () => Record<string, Note | string>, behaviour: 
 export interface Recorded {
   prompts: Array<{ target: SessionRef; text: string }>;
   fallbacks: Array<{ target: SessionRef; text: string }>;
-  created: string[];
 }
 
-export function fakeDelivery(behaviour: { prompt?: "ok" | "refuse"; fallback?: "ok" | "refuse"; create?: "ok" | "refuse" } = {}) {
-  const recorded: Recorded = { prompts: [], fallbacks: [], created: [] };
+export function fakeDelivery(behaviour: { prompt?: "ok" | "refuse"; fallback?: "ok" | "refuse" } = {}) {
+  const recorded: Recorded = { prompts: [], fallbacks: [] };
   const delivery: Delivery = {
     async prompt(target, text) {
       recorded.prompts.push({ target, text });
@@ -119,11 +130,6 @@ export function fakeDelivery(behaviour: { prompt?: "ok" | "refuse"; fallback?: "
       recorded.fallbacks.push({ target, text });
       if (behaviour.fallback === "refuse") throw new Error("fork recusado");
       return "ses_fork";
-    },
-    async create(text) {
-      recorded.created.push(text);
-      if (behaviour.create === "refuse") throw new Error("criação recusada");
-      return "ses_new";
     },
   };
   return { delivery, recorded };

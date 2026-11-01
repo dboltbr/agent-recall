@@ -22,19 +22,19 @@ import {
   watchSessionLabel,
   watchSessions,
 } from "../release-copy.ts";
-import { buildRelease, buildSnapshot, stepOf, type Release } from "../release-status.ts";
+import { buildRelease, buildSnapshot, stepOf, type GitHubJob, type Release } from "../release-status.ts";
 import type { Note } from "../types.ts";
 import { NOW } from "./fakes.ts";
-import { finished, job, midImages, minutesAgo, run, RUNNERS, VERIFY_DONE } from "./releases.ts";
+import { jobsInput, released, job, midImages, minutesAgo, run, RUNNERS, VERIFY_DONE, type Released } from "./releases.ts";
 
 function active(): Release {
   return buildRelease({ run: run({ run_number: 172 }), jobs: midImages(), note: null, commits: null, now: NOW });
 }
 
-function done(number: number, jobs = finished("success"), note: Note | null = null, conclusion = "success"): Release {
+function done(number: number, jobs: GitHubJob[] | Released = released("success"), note: Note | null = null, conclusion = "success"): Release {
   return buildRelease({
     run: run({ run_number: number, status: "completed", conclusion, updated_at: minutesAgo(0.5) }),
-    jobs,
+    ...jobsInput(jobs),
     note,
     commits: null,
     now: NOW,
@@ -45,11 +45,11 @@ const snapshotOf = (...releases: Release[]) =>
   buildSnapshot({ repository: "dboltbr/dbolt", workflow: "release", releases, runners: RUNNERS, now: NOW });
 
 const reverted = (number: number) =>
-  done(number, finished("failure"), {
+  done(number, released("failure"), {
     release: `release-${number}`,
-    state: "reverted",
     updatedAt: minutesAgo(1),
-    revert: { commits: ["a", "b", "c"], commit: "d" },
+    owner: { harness: "opencode", host: "archdev", id: "ses_pusher" },
+    rollback: { outcome: "reverted", target: "dbolt-deploy", commit: "d", applied: true, commits: ["a", "b", "c"] },
     verdict: { sources: { errors5xx: { outcome: "red", reason: "errors5xx-ratio" }, sentry: { outcome: "green" } } },
   } as Note);
 
@@ -77,7 +77,7 @@ test("pusherLine: agente Paseo com título, sessão OpenCode pelo host", () => {
 
 test("stepDetail e pipeMeta: as linhas do mock p1b/p4a", () => {
   const release = active();
-  assert.equal(stepDetail(release, stepOf(release, "verify")), "qlty · opengrep · secrets · check");
+  assert.equal(stepDetail(release, stepOf(release, "verify")), "scanners · check");
   assert.equal(stepDetail(release, stepOf(release, "deploy")), "produção");
   assert.equal(stepDetail(release, stepOf(release, "tag")), "release-172");
   assert.equal(stepDetail(release, stepOf(release, "watch")), "sinais do blast radius → veredito");
@@ -166,9 +166,11 @@ test("vereditos e reversões: só runs terminados com palavra do vigia", () => {
   );
   assert.deepEqual(verdictBanner(reverted(170)), {
     tone: "warn",
-    text: "vigia reverteu 3 commits · agente avisado",
+    text: "vigia reverteu no dbolt-deploy · main congelada · agente avisado",
     link: "signals",
   });
+  const blocked = { ...reverted(170), verdict: "red" as const, rollback: { outcome: "blocked", target: "dbolt-deploy", frozen: true } };
+  assert.deepEqual(verdictBanner(blocked), { tone: "bad", text: "vigia vermelho · 5xx · rollback impedido · main congelada", link: "signals" });
   assert.equal(verdictBanner(active()), null);
 });
 
@@ -184,22 +186,26 @@ test("freshness: idade do snapshot e a falha do GitHub", () => {
 });
 
 test("verdictSignals: a célula de sinais da tabela de vereditos", () => {
-  assert.deepEqual(verdictSignals(reverted(170)), { text: "vigia reverteu 3 commits · agente avisado", tone: "warn" });
+  assert.deepEqual(verdictSignals(reverted(170)), { text: "vigia reverteu no dbolt-deploy · main congelada · agente avisado", tone: "warn" });
   assert.deepEqual(verdictSignals(done(171)), { text: "sem regressão", tone: "muted" });
   const failed = done(4818, [job("verify-production / check", "failure", [20, 1])], null, "failure");
   assert.deepEqual(verdictSignals(failed), { text: "verify-production / check falhou", tone: "bad" });
-  assert.deepEqual(verdictSignals({ ...reverted(170), verdict: "red" }), { text: "5xx · errors5xx-ratio", tone: "bad" });
+  assert.deepEqual(verdictSignals({ ...reverted(170), verdict: "red", rollback: null }), { text: "5xx · errors5xx-ratio", tone: "bad" });
+  assert.deepEqual(verdictSignals({ ...reverted(170), verdict: "red", rollback: { outcome: "failed", target: "dbolt-deploy", frozen: true } }), {
+    text: "5xx · errors5xx-ratio · rollback falhou · main congelada",
+    tone: "bad",
+  });
   assert.deepEqual(verdictSignals({ ...reverted(170), verdict: "green" }), { text: "1/2 sinais ok", tone: "muted" });
 });
 
 test("watchSessions: quem fez o push e para onde o incidente foi, uma entrada por sessão", () => {
-  const red = { release: "release-172", state: "investigating", updatedAt: minutesAgo(1), owner: "opencode/archdev/ses_pusher" } as Note;
+  const red: Note = { release: "release-172", updatedAt: minutesAgo(1), owner: { harness: "opencode", host: "archdev", id: "ses_pusher" }, notified: [] };
   const release = buildRelease({
     run: run({ run_number: 172, status: "completed", conclusion: "failure" }),
-    jobs: finished("failure"),
+    ...released("failure"),
     note: red,
     commits: null,
-    handoffs: [{ role: "investigate", session: { harness: "paseo", host: "srv_X", id: "agent-investigator-1" }, at: minutesAgo(3) }],
+    handoffs: [{ role: "notified", session: { harness: "paseo", host: "srv_X", id: "agent-notified-1" }, at: minutesAgo(3) }],
     now: NOW,
   });
   const entries = watchSessions(release);
@@ -207,11 +213,11 @@ test("watchSessions: quem fez o push e para onde o incidente foi, uma entrada po
     entries.map((entry) => [entry.session.id, entry.kinds]),
     [
       ["ses_pusher", ["push", "owner"]],
-      ["agent-investigator-1", ["investigate"]],
+      ["agent-notified-1", ["notified"]],
     ],
   );
-  assert.equal(watchSessionLabel(entries[0]!, "Aviso ao morador"), "push + responsável · “Aviso ao morador”");
-  assert.equal(watchSessionLabel(entries[1]!, null), "investigação · agente agent-in");
+  assert.equal(watchSessionLabel(entries[0]!, "Aviso ao morador"), "push + dona · “Aviso ao morador”");
+  assert.equal(watchSessionLabel(entries[1]!, null), "avisada · agente agent-no");
   assert.deepEqual(
     watchSessions(active()).map((entry) => entry.kinds),
     [["push"]],
@@ -222,8 +228,8 @@ test("linha recolhida: ícone pelo veredito, falha e revert inconfundíveis", ()
   assert.equal(releaseLineIcon(active()), "LoaderCircle");
   assert.equal(releaseLineIcon(done(180)), "CircleCheck");
   assert.equal(releaseLineIcon(done(181, [...VERIFY_DONE, job("images-command / build-push-api", "failure", [5, 4])], null, "failure")), "CircleX");
-  assert.equal(releaseLineIcon(done(184, finished("failure"), null, "failure")), "CircleDashed", "vigia sem veredito");
-  assert.equal(releaseLineIcon(done(182, finished("cancelled"), null, "cancelled")), "CircleSlash");
+  assert.equal(releaseLineIcon(done(184, released("failure"), null, "failure")), "CircleDashed", "vigia sem veredito");
+  assert.equal(releaseLineIcon(done(182, released("cancelled"), null, "cancelled")), "CircleSlash");
   assert.equal(releaseLineIcon(done(183, [job("trigger", "success", [3, 2.9])])), "CircleMinus");
 });
 
@@ -235,7 +241,7 @@ test("releaseRange: contíguo vira faixa, poucos espalhados viram lista", () => 
 });
 
 test("supersededGroup: conta e diz o que foi descartado", () => {
-  const cancelled = (number: number) => done(number, finished("cancelled"), null, "cancelled");
+  const cancelled = (number: number) => done(number, released("cancelled"), null, "cancelled");
   const noop = (number: number) => done(number, [job("trigger", "success", [3, 2.9])]);
   assert.deepEqual(supersededGroup([cancelled(246), cancelled(247), cancelled(248), cancelled(249)]), {
     title: "4 lançamentos cancelados",

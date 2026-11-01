@@ -3,7 +3,7 @@
 // release-watch notes. The Paseo UI (via `shared/release-status.ts`, a sync copy) and the
 // OpenChamber extension import it; `core/release-fetch.ts` is the fetcher that feeds it.
 import { z } from "zod";
-import { parseAgentSession, parseSessionValue, sameSession, toSessionRef } from "./trailer.ts";
+import { parseAgentSession, sameSession, toSessionRef } from "./trailer.ts";
 import type { Note, SessionRef } from "./types.ts";
 
 export const RELEASE_REPOSITORY = "dboltbr/dbolt";
@@ -23,7 +23,8 @@ export type StepId = z.infer<typeof StepIdSchema>;
 export const StepStateSchema = z.enum(["pending", "running", "done", "failed", "cancelled", "skipped"]);
 export type StepState = z.infer<typeof StepStateSchema>;
 
-export const JobStateSchema = z.enum(["queued", "running", "success", "failure", "cancelled", "skipped"]);
+/** `waiting`: held by a concurrency group (GitHub `pending`), not by a runner. */
+export const JobStateSchema = z.enum(["queued", "waiting", "running", "success", "failure", "cancelled", "skipped"]);
 export type JobState = z.infer<typeof JobStateSchema>;
 
 /** The watch's (vigia) word on a finished release, or why there is none. */
@@ -75,7 +76,7 @@ export const SignalSchema = z.object({
 });
 export type Signal = z.infer<typeof SignalSchema>;
 
-export const HANDOFF_ROLES = ["investigate", "fix", "remind", "owner", "blocked"] as const;
+export const HANDOFF_ROLES = ["owner", "notified", "blocked"] as const;
 export const HandoffRoleSchema = z.enum(HANDOFF_ROLES);
 export type HandoffRole = z.infer<typeof HandoffRoleSchema>;
 
@@ -83,7 +84,7 @@ export type HandoffRole = z.infer<typeof HandoffRoleSchema>;
 export const HandoffSchema = z.object({
   role: HandoffRoleSchema,
   session: SessionSchema,
-  /** When this host delivered the call; null for what only the note says (owner, fix session). */
+  /** When this host delivered the call; null for what only the note says (owner, notified). */
   at: z.string().nullable(),
 });
 export type Handoff = z.infer<typeof HandoffSchema>;
@@ -114,8 +115,15 @@ export const ReleaseSchema = z.object({
   failedJob: z.object({ name: z.string(), url: z.string().nullable() }).nullable(),
   revert: z.object({ commits: z.array(z.string()), commit: z.string().nullable() }).nullable(),
   signals: z.array(SignalSchema),
-  /** `state` of the release-watch incident note, when there is one (red releases only). */
-  noteState: z.string().nullable(),
+  /**
+   * The watch's rollback from the incident note (red releases only): `outcome` (`pending`,
+   * `reverted`, `blocked`, `failed`, `none`), `target` (`dbolt-deploy` or `main`) and whether the
+   * note freezes main (not resolved, not a drill). Defaults so older timeline cards still render.
+   */
+  rollback: z
+    .object({ outcome: z.string(), target: z.string().nullable(), frozen: z.boolean() })
+    .nullable()
+    .default(null),
   /** The note carries a `recall` failure: no agent could be told. */
   recallFailed: z.boolean(),
   /** Session that pushed the head commit (newest trailer of the range as fallback). */
@@ -124,7 +132,7 @@ export const ReleaseSchema = z.object({
   sessions: z.array(SessionSchema),
   /**
    * Where the incident went: the calls this host's harnesses delivered (local record), then the
-   * note's owner and fix session. Empty without an incident. Defaults so timeline cards written
+   * note's owner and notified sessions. Empty without an incident. Defaults so timeline cards written
    * before the field still render.
    */
   handoffs: z.array(HandoffSchema).default([]),
@@ -181,6 +189,7 @@ export interface GitHubRun {
   readonly updated_at: string;
   readonly run_started_at?: string | null;
   readonly head_commit?: { readonly message?: string } | null;
+  readonly name?: string;
 }
 
 export interface GitHubJob {
@@ -229,10 +238,8 @@ export const VERDICT_LABELS: Record<Verdict, string> = {
 };
 
 export const HANDOFF_LABELS: Record<HandoffRole, string> = {
-  investigate: "investigação",
-  fix: "correção",
-  remind: "lembrete",
-  owner: "responsável",
+  owner: "dona",
+  notified: "avisada",
   blocked: "release barrada",
 };
 
@@ -247,15 +254,32 @@ export const SOURCE_LABELS: Readonly<Record<string, string>> = {
 
 const DEPLOY_TIERS = new Set(["wall", "console", "desktop", "marketing", "infrastructure", "mobile"]);
 
-/** Which step a job belongs to; null for `trigger`, `summary` and the images' bookkeeping jobs. */
+/**
+ * Which step a job of the release run belongs to; null for `plan`, `summary` and the images'
+ * bookkeeping jobs. `previous-watch` holds the publication (deploy); the run's `watch` job only
+ * dispatches release-watch.yml, so it closes the tag step. The watch step is the job of the
+ * separate `watch release-<n>` run (`toJob(job, "watch")`).
+ */
 export function classifyJob(name: string): StepId | null {
   const [prefix, rest] = splitJobName(name);
   if (prefix === "verify-production") return "verify";
   if (prefix.startsWith("images-")) return rest !== null && /^build-push/.test(rest) ? "images" : null;
-  if (DEPLOY_TIERS.has(prefix) || name === "flags") return "deploy";
-  if (name === "release-tag") return "tag";
-  if (name === "watch") return "watch";
+  if (DEPLOY_TIERS.has(prefix) || name === "flags" || name === PREVIOUS_WATCH) return "deploy";
+  if (name === "release-tag" || name === WATCH_DISPATCH) return "tag";
   return null;
+}
+
+/** The release run's job that waits for the previous release's watch (concurrency release-watch). */
+export const PREVIOUS_WATCH = "previous-watch";
+/** The release run's job that dispatches the watch run. */
+export const WATCH_DISPATCH = "watch";
+/** The watch workflow's run name: `watch release-<n>`. */
+export const WATCH_WORKFLOW = "release-watch";
+
+/** `watch release-349` → 349. */
+export function watchRunNumber(run: Pick<GitHubRun, "display_title"> & { readonly name?: string }): number | null {
+  const match = /^watch release-(\d+)$/.exec((run.display_title ?? run.name ?? "").trim());
+  return match ? Number(match[1]) : null;
 }
 
 /** `images-vms / build-push (vms-api, …)` → `vms-api`; `build-push-api` → `api`; else the workflow. */
@@ -274,18 +298,21 @@ function splitJobName(name: string): [string, string | null] {
 }
 
 export function jobState(job: Pick<GitHubJob, "status" | "conclusion">): JobState {
-  if (job.status !== "completed") return job.status === "in_progress" ? "running" : "queued";
+  if (job.status === "in_progress") return "running";
+  if (job.status === "pending" || job.status === "waiting") return "waiting";
+  if (job.status !== "completed") return "queued";
   if (job.conclusion === "success" || job.conclusion === "neutral") return "success";
   if (job.conclusion === "skipped") return "skipped";
   if (job.conclusion === "cancelled") return "cancelled";
   return "failure";
 }
 
-export function toJob(job: GitHubJob): Job {
+/** A job of the release run, or of its watch run (every job there is the watch step). */
+export function toJob(job: GitHubJob, run: "release" | "watch" = "release"): Job {
   return {
     id: job.id,
     name: job.name,
-    step: classifyJob(job.name),
+    step: run === "watch" ? "watch" : classifyJob(job.name),
     image: imageName(job.name),
     state: jobState(job),
     runner: job.runner_name || null,
@@ -306,6 +333,12 @@ function time(value: string | null): number | null {
   return Number.isNaN(ms) ? null : ms;
 }
 
+/** The later of two timestamps (`a` when `b` is missing or unreadable). */
+function latest(a: string, b: string | null): string {
+  const later = time(b);
+  return later !== null && later > (time(a) ?? -Infinity) ? b! : a;
+}
+
 /** One step from its jobs. `runDone`: a step with no job left to appear is skipped, not pending. */
 export function buildStep(id: StepId, jobs: readonly Job[], runDone: boolean, now: Date, attemptStart: string | null = null): Step {
   const live = jobs.filter((job) => job.step === id && job.state !== "skipped");
@@ -317,9 +350,9 @@ export function buildStep(id: StepId, jobs: readonly Job[], runDone: boolean, no
     return start !== null && start >= attemptMs;
   });
   const timed = current.length ? current : live;
-  // A queued job's `started_at` is when it was queued: only jobs that ran start the step.
+  // A queued or waiting job's `started_at` is when it was queued: only jobs that ran start the step.
   const starts = timed
-    .filter((job) => job.state !== "queued")
+    .filter((job) => job.state !== "queued" && job.state !== "waiting")
     .map((job) => time(job.startedAt))
     .filter((ms): ms is number => ms !== null);
   const startedMs = starts.length ? Math.min(...starts) : null;
@@ -349,8 +382,6 @@ export function buildStep(id: StepId, jobs: readonly Job[], runDone: boolean, no
 
 // ── Verdict ─────────────────────────────────────────────────────────────────────────────────
 
-const SHIPPED_REVERT = new Set(["reverted", "already-reverted"]);
-
 function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
 }
@@ -359,19 +390,24 @@ function strings(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 }
 
-/** The revert a note records, or null when the watch/investigator did not revert. */
+/** The watch's revert (`rollback.outcome: reverted`), or null when it did not revert. */
 export function noteRevert(note: Note): Release["revert"] {
-  const revert = record(note.revert);
-  const decision = record(note.decision);
-  const reverted =
-    note.state === "reverted" ||
-    (note.state === "escalated" && SHIPPED_REVERT.has(String(revert?.["reason"]))) ||
-    decision?.["action"] === "revert";
-  if (!reverted) return null;
-  const commits = strings(revert?.["commits"]);
+  const rollback = record(note.rollback);
+  if (rollback?.["outcome"] !== "reverted") return null;
   return {
-    commits: commits.length ? commits : strings(decision?.["commits"]),
-    commit: typeof revert?.["commit"] === "string" ? (revert["commit"] as string) : null,
+    commits: strings(rollback["commits"]),
+    commit: typeof rollback["commit"] === "string" ? (rollback["commit"] as string) : null,
+  };
+}
+
+/** The note's rollback for the UI; `frozen` follows `scripts/release_freeze.py` (`is_frozen`). */
+export function noteRollback(note: Note): Release["rollback"] {
+  const rollback = record(note.rollback);
+  if (!rollback) return null;
+  return {
+    outcome: typeof rollback["outcome"] === "string" ? (rollback["outcome"] as string) : "pending",
+    target: typeof rollback["target"] === "string" ? (rollback["target"] as string) : null,
+    frozen: !note.resolvedBy && note.drill !== true,
   };
 }
 
@@ -402,9 +438,10 @@ export interface VerdictInput {
 }
 
 /**
- * The vigia mapping. An incident note exists only on red: revert recorded → reverted, any other
- * state → red. Without a note: an earlier step failed → failed; the watch passed → green; the watch
- * ended otherwise → inconclusive; a cancelled run → cancelled; only `trigger` ran → none.
+ * The vigia mapping. An incident note exists only on red: `rollback.outcome` reverted → reverted,
+ * any other → red. Without a note: an earlier step failed → failed; the watch passed → green; the
+ * watch ended otherwise (failed or cancelled) → inconclusive; a cancelled run → cancelled; only
+ * `plan` ran → none.
  */
 export function watchVerdict(input: VerdictInput): Verdict | null {
   if (input.note) return noteRevert(input.note) ? "reverted" : "red";
@@ -412,7 +449,8 @@ export function watchVerdict(input: VerdictInput): Verdict | null {
   if (input.steps.some((step) => step.id !== "watch" && step.state === "failed")) return "failed";
   const watch = input.jobs.find((job) => job.step === "watch" && job.state !== "skipped");
   if (watch?.state === "success") return "green";
-  if (watch?.state === "failure") return "inconclusive";
+  // Published but not judged: a failed watch without a note, or a cancelled one.
+  if (watch?.state === "failure" || watch?.state === "cancelled") return "inconclusive";
   if (input.conclusion === "cancelled") return "cancelled";
   if (!input.jobs.some((job) => job.step !== null && job.state !== "skipped")) return "none";
   return input.conclusion === "success" ? "none" : watch ? "inconclusive" : "failed";
@@ -443,11 +481,18 @@ export interface ReleaseInput {
   readonly tagged?: boolean;
   /** Calls this host delivered for the release's incident (`readHandoffs`), any order. */
   readonly handoffs?: readonly Handoff[];
+  /** The `watch release-<n>` run of release-watch.yml and its jobs, once dispatched and listed. */
+  readonly watch?: { readonly run: GitHubRun; readonly jobs: readonly GitHubJob[] } | null;
   readonly now: Date;
 }
 
+/** A dispatched watch may take this long to show up in the runs list before the release ends without it. */
+export const WATCH_DISPATCH_GRACE_MS = 10 * 60 * 1000;
+
+const NOT_STARTED = new Set<JobState>(["queued", "waiting"]);
+
 /**
- * Delivered calls oldest first, then the note's owner and fix session; one entry per session.
+ * Delivered calls oldest first, then the note's owner and notified sessions; one entry per session.
  * Without an incident note only the `blocked` call of a run that failed before the tag (a drill's
  * calls stay out: they write no handoff).
  */
@@ -459,15 +504,23 @@ export function releaseHandoffs(note: Note | null, delivered: readonly Handoff[]
   };
   const ordered = [...delivered].sort((a, b) => (time(a.at) ?? 0) - (time(b.at) ?? 0));
   for (const handoff of ordered) add(handoff.role, handoff.session, handoff.at);
-  add("owner", parseSessionValue(note.owner), null);
-  add("fix", parseSessionValue(note.fix?.session), null);
+  add("owner", toSessionRef(note.owner), null);
+  for (const entry of note.notified ?? []) add("notified", toSessionRef(entry), null);
   return out;
 }
 
 export function buildRelease(input: ReleaseInput): Release {
   const { run, note, now } = input;
-  const jobs = input.jobs.map(toJob);
-  const completed = run.status === "completed";
+  const watchRun = input.watch?.run ?? null;
+  const jobs = [...input.jobs.map((job) => toJob(job)), ...(input.watch?.jobs ?? []).map((job) => toJob(job, "watch"))];
+  // The release run ends at the dispatch; the release goes on until its watch run ends.
+  const dispatch = jobs.find((job) => job.name === WATCH_DISPATCH && job.step === "tag");
+  const dispatchedAt = time(dispatch?.state === "success" ? dispatch.completedAt : null);
+  const watchOpen = watchRun
+    ? watchRun.status !== "completed"
+    : dispatchedAt !== null && now.getTime() - dispatchedAt < WATCH_DISPATCH_GRACE_MS;
+  const completed = run.status === "completed" && !watchOpen;
+  const started = run.status === "in_progress" || watchOpen || jobs.some((job) => !NOT_STARTED.has(job.state));
   const steps = STEP_IDS.map((id) => buildStep(id, jobs, completed, now, (run.run_attempt ?? 1) > 1 ? run.run_started_at ?? null : null));
   const verdict = watchVerdict({ completed, conclusion: run.conclusion, steps, jobs, note });
   const failed = jobs.find((job) => job.step !== null && job.step !== "watch" && job.state === "failure");
@@ -478,7 +531,6 @@ export function buildRelease(input: ReleaseInput): Release {
   };
   const trailers = (input.commits ?? []).map((commit) => parseAgentSession(commit.commit.message));
   for (const ref of trailers) add(ref);
-  for (const value of note?.sessions ?? []) add(toSessionRef(value));
   const head = run.head_commit?.message ?? "";
   const pusher = parseAgentSession(head) ?? [...trailers].reverse().find((ref) => ref !== null) ?? null;
   add(pusher);
@@ -490,7 +542,7 @@ export function buildRelease(input: ReleaseInput): Release {
     runId: run.id,
     attempt: run.run_attempt ?? 1,
     url: run.html_url,
-    status: completed ? "completed" : run.status === "in_progress" ? "running" : "queued",
+    status: completed ? "completed" : started ? "running" : "queued",
     conclusion: run.conclusion,
     event: run.event,
     headSha: run.head_sha,
@@ -498,7 +550,7 @@ export function buildRelease(input: ReleaseInput): Release {
     createdAt: run.created_at,
     updatedAt: run.updated_at,
     startedAt: run.run_started_at ?? null,
-    completedAt: completed ? run.updated_at : null,
+    completedAt: completed ? latest(run.updated_at, watchRun?.updated_at ?? null) : null,
     steps,
     current,
     verdict,
@@ -506,7 +558,7 @@ export function buildRelease(input: ReleaseInput): Release {
     failedJob: failed ? { name: failed.name, url: failed.url } : null,
     revert: note ? noteRevert(note) : null,
     signals: note ? noteSignals(note) : [],
-    noteState: note?.state ?? null,
+    rollback: note ? noteRollback(note) : null,
     recallFailed: note ? record(note.recall) !== null : false,
     pusher: pusher ? toSession(pusher) : null,
     sessions,
@@ -569,11 +621,68 @@ export function isActive(release: Release): boolean {
   return release.status !== "completed";
 }
 
-/** Runs in flight, the running ones before the queued ones (a run waiting on the concurrency
- * group says less than the one it waits on); newest first within each group. */
+/** Where an active release is: moving through verify→tag, judged by its watch run, or queued. */
+export type ReleasePhase = "pipeline" | "watch" | "queued";
+
+export function releasePhase(release: Release): ReleasePhase {
+  if (release.status === "queued") return "queued";
+  return release.current === "watch" ? "watch" : "pipeline";
+}
+
+const PHASE_ORDER: Record<ReleasePhase, number> = { pipeline: 0, watch: 1, queued: 2 };
+
+/**
+ * Releases in flight, the one in focus first: the run moving through verify→tag (closest to
+ * production), then the open watches, then the runs queued on release-production; oldest first
+ * within each phase (it gets there first).
+ */
 export function activeReleases(snapshot: ReleaseSnapshot): Release[] {
-  const active = snapshot.releases.filter(isActive);
-  return [...active.filter((release) => release.status === "running"), ...active.filter((release) => release.status !== "running")];
+  return snapshot.releases
+    .filter(isActive)
+    .sort((a, b) => PHASE_ORDER[releasePhase(a)] - PHASE_ORDER[releasePhase(b)] || a.number - b.number);
+}
+
+/** Other releases in flight besides `release`, in focus order. */
+export function otherActive(snapshot: ReleaseSnapshot, release: Release): Release[] {
+  return activeReleases(snapshot).filter((other) => other.runId !== release.runId);
+}
+
+/** The newest active release below `release` in `phase`. */
+function ahead(snapshot: ReleaseSnapshot, release: Release, phase: ReleasePhase): Release | null {
+  return (
+    snapshot.releases
+      .filter((other) => isActive(other) && other.number < release.number && releasePhase(other) === phase)
+      .sort((a, b) => b.number - a.number)[0] ?? null
+  );
+}
+
+/**
+ * What holds an active release, pt-BR: the run ahead on release-production (`na fila · atrás de
+ * #348`), or the previous release's watch holding the publication (`esperando o vigia de #347`).
+ * Null when nothing holds it (a job waiting for a runner shows in the runner queue).
+ */
+export function waitingFor(snapshot: ReleaseSnapshot, release: Release): string | null {
+  if (!isActive(release)) return null;
+  if (releasePhase(release) === "queued") {
+    const holder = ahead(snapshot, release, "pipeline");
+    return holder ? `na fila · atrás de #${holder.number}` : "na fila";
+  }
+  if (release.jobs.some((job) => job.name === PREVIOUS_WATCH && job.step === "deploy" && job.state === "waiting")) {
+    const watch = ahead(snapshot, release, "watch");
+    return watch ? `esperando o vigia de #${watch.number}` : "esperando o vigia anterior";
+  }
+  return null;
+}
+
+/** One line for a release in the "também em andamento" list: `imagens 3/9`, `vigia aberto`, `na fila · atrás de #348`. */
+export function activityLabel(snapshot: ReleaseSnapshot, release: Release): string {
+  const phase = releasePhase(release);
+  if (phase === "watch") return "vigia aberto";
+  const step = release.current ? stepOf(release, release.current) : null;
+  // A job running says more than the wait ahead (`verificação` before `esperando o vigia de #347`).
+  const moving = phase === "pipeline" && release.jobs.some((job) => job.state === "running");
+  const waiting = moving ? null : waitingFor(snapshot, release);
+  return waiting ?? (step ? stepLabel(step) : "em andamento");
 }
 
 /** A finished run that published nothing: cancelled by a newer push, or a no-op (flux-only push). */
@@ -586,7 +695,7 @@ export function lastFinished(snapshot: ReleaseSnapshot): Release | null {
   return snapshot.releases.find((release) => !isActive(release) && !isSuperseded(release)) ?? null;
 }
 
-/** What the sidebar row shows: the newest active run, else the last verdict while still recent. */
+/** What the sidebar row shows: the release in focus (`activeReleases`), else the last verdict while still recent. */
 export function footerRelease(snapshot: ReleaseSnapshot, now: Date): Release | null {
   const active = activeReleases(snapshot);
   if (active.length) return active[0]!;
@@ -762,12 +871,39 @@ export function queueSummary(snapshot: ReleaseSnapshot): string | null {
   return `${total} na fila — runner ${runner.name} ${why}`;
 }
 
-/** `vigia reverteu 3 commits · agente avisado` for reverted releases. */
+/** How the watch's rollback ended, in pt-BR (`vigia reverteu no dbolt-deploy`, `rollback impedido`). */
+export function rollbackLabel(release: Release): string | null {
+  const rollback = release.rollback;
+  if (!rollback) return null;
+  switch (rollback.outcome) {
+    case "reverted":
+      return rollback.target === "main" ? "vigia reverteu as flags na main" : "vigia reverteu no dbolt-deploy";
+    case "blocked":
+      return "rollback impedido";
+    case "failed":
+      return "rollback falhou";
+    case "none":
+      return "nada a reverter";
+    default:
+      return "rollback em andamento";
+  }
+}
+
+/** `main congelada` while the note freezes main, else null. */
+export function freezeLabel(release: Release): string | null {
+  return release.rollback?.frozen ? "main congelada" : null;
+}
+
+/** Whether the incident's owner was told: `agente avisado`, `aviso ao agente falhou`, `sem dono`. */
+function noticeLabel(release: Release): string {
+  if (release.recallFailed) return "aviso ao agente falhou";
+  return release.handoffs.some((handoff) => handoff.role === "owner") ? "agente avisado" : "sem dono";
+}
+
+/** `vigia reverteu no dbolt-deploy · main congelada · agente avisado` for reverted releases. */
 export function revertSummary(release: Release): string | null {
   if (release.verdict !== "reverted") return null;
-  const count = release.revert?.commits.length ?? 0;
-  const commits = count === 1 ? "1 commit" : count > 1 ? `${count} commits` : "a faixa";
-  return `vigia reverteu ${commits} · ${release.recallFailed ? "aviso ao agente falhou" : "agente avisado"}`;
+  return [rollbackLabel(release) ?? "vigia reverteu", freezeLabel(release), noticeLabel(release)].filter(Boolean).join(" · ");
 }
 
 /** Signals the watch tripped on (`5xx · errors5xx-ratio`). */
@@ -782,7 +918,8 @@ export function verdictDetail(release: Release): string {
       return revertSummary(release) ?? "";
     case "red": {
       const tripped = trippedSignals(release).map((signal) => signal.label);
-      return tripped.length ? `vigia vermelho · ${tripped.join(", ")}` : "vigia vermelho";
+      const head = tripped.length ? `vigia vermelho · ${tripped.join(", ")}` : "vigia vermelho";
+      return [head, rollbackLabel(release), freezeLabel(release)].filter(Boolean).join(" · ");
     }
     case "failed":
       return release.failedJob ? `${release.failedJob.name} falhou` : "falhou";
@@ -804,10 +941,10 @@ export function imageJobs(release: Release): Job[] {
   return release.jobs.filter((job) => job.step === "images" && job.state !== "skipped");
 }
 
-/** Job names of a step, deduped (`check · qlty · opengrep · secrets`). */
+/** Job names of a step, deduped (`check · scanners`); the watch's gate and dispatch are not tiers. */
 export function stepJobNames(release: Release, id: StepId): string[] {
   const names = release.jobs
-    .filter((job) => job.step === id && job.state !== "skipped")
+    .filter((job) => job.step === id && job.state !== "skipped" && (id === "watch" || (job.name !== PREVIOUS_WATCH && job.name !== WATCH_DISPATCH)))
     .map((job) => {
       const [prefix, rest] = splitJobName(job.name);
       if (id === "images") return job.image ?? job.name;

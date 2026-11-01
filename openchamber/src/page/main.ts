@@ -7,6 +7,7 @@ import { startFeed, type FeedState } from "../ui/feed.ts";
 import { commitLines, lanes, outcomeBanner, pill, pipeline, releaseHead, runnersList, signalsList, toneText, type Actions, type Watch } from "../ui/render.ts";
 import {
   cancelledCount,
+  activityLabel,
   elapsedLabel,
   headline,
   otherActive,
@@ -20,7 +21,6 @@ import {
   shortSha,
   signalSummary,
   snapshotError,
-  statusLabel,
 } from "../ui/view.ts";
 
 function boardCard(snapshot: ReleaseSnapshot, release: Release, now: Date, actions: Actions, pinned: boolean, unpin: () => void, select: (release: Release) => void, watch: Watch | null): HTMLElement {
@@ -38,7 +38,7 @@ function boardCard(snapshot: ReleaseSnapshot, release: Release, now: Date, actio
         "div",
         { class: "rl-commit clickable", title: other.title, onClick: () => select(other) },
         icon("clock", 13),
-        h("span", { class: "ellipsis" }, `${releaseLabel(other)} ${statusLabel(other)} · ${other.title || "(sem título)"}`),
+        h("span", { class: "ellipsis" }, `${releaseLabel(other)} · ${activityLabel(snapshot, other)} · ${other.title || "(sem título)"}`),
       ),
     ),
     pipeline(release, now, watch),

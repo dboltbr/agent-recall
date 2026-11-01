@@ -1,10 +1,10 @@
-// Sidebar footer row (mock p3): the release in flight, or the last verdict for two hours after,
-// with the five-segment step bar. A press opens the step popover; with nothing to show the row
-// reads "Releases" and opens the screen.
+// Sidebar footer row (mock p3): the release in focus (with `+N` for the others in flight), or the
+// last verdict for two hours after, with the five-segment step bar. A press opens the step
+// popover; with nothing to show the row reads "Releases" and opens the screen.
 import type { PluginPopoverProps, PluginSidebarItemProps } from "@getpaseo/plugin/client";
 import { SidebarRow } from "@getpaseo/plugin/client/ui";
 import { watchTone } from "../shared/release-copy.ts";
-import { footerRelease, isActive, releaseLabel, type Release } from "../shared/release-status.ts";
+import { footerRelease, isActive, otherActive, releaseLabel, type Release } from "../shared/release-status.ts";
 import type { ReleaseView } from "../shared/rpc.ts";
 import { useNow, useReleaseState } from "./data.ts";
 import { SegBar } from "./kit.tsx";
@@ -36,13 +36,15 @@ export function ReleaseFooterItem({ theme, currentScreen, openScreen, openPopove
   const { view } = useReleaseState();
   const now = useNow(30_000);
   const release = view?.snapshot ? footerRelease(view.snapshot, now) : null;
+  // `+2`: other releases in flight, listed in the popover.
+  const others = release && isActive(release) && view?.snapshot ? otherActive(view.snapshot, release).length : 0;
   const onScreen = currentScreen?.screenId === RELEASES_SCREEN;
   if (!release) {
     return <SidebarRow icon="Rocket" label="Releases" active={onScreen} onPress={() => openScreen({ screenId: RELEASES_SCREEN })} />;
   }
   return (
     <SidebarRow
-      label={releaseLabel(release)}
+      label={others ? `${releaseLabel(release)} +${others}` : releaseLabel(release)}
       active={onScreen}
       onPress={() => openPopover(FooterPopover)}
       trailing={<SegBar theme={theme} steps={release.steps} watchTone={isActive(release) ? null : watchTone(release)} />}

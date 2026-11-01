@@ -77,10 +77,10 @@ export interface RecallFailure {
   /** `<harness>/<host>` of the plugin that gave up. */
   readonly by: string;
   readonly role: string;
-  /** The session it tried, or absent for a new investigation session. */
-  readonly target?: string;
-  /** Note state the call was for. */
-  readonly state: string;
+  /** The session it tried (`<harness>/<host>/<id>`). */
+  readonly target: string;
+  /** `rollback.outcome` the call carried (`pending` when it went out before the watch finished). */
+  readonly rollback: string | null;
 }
 
 export interface RecordFailureInput extends FetchNotesInput {
@@ -163,9 +163,7 @@ export function parseNote(raw: string): Note | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const note = value as Record<string, unknown>;
   const release = note["release"];
-  if ((typeof release !== "string" && typeof release !== "number") || typeof note["state"] !== "string") {
-    return null;
-  }
+  if (typeof release !== "string" && typeof release !== "number") return null;
   if (typeof note["updatedAt"] !== "string") return null;
   return value as Note;
 }

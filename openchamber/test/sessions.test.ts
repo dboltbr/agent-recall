@@ -6,15 +6,15 @@ import { loadSessionTitles, sessionIndex, watchLinks, watchSessionIds, type Sess
 import { reverted, running } from "./fixture.ts";
 import { settle } from "./timers.ts";
 
-/** Release 170 after the watch reverted: pushed from ses_pusher, then investigated and fixed. */
+/** Release 170 after the watch reverted: pushed from ses_pusher (the owner), with two other sessions notified. */
 const incident: Release = {
   ...reverted,
   pusher: { harness: "opencode", host: "archdev", id: "ses_pusher" },
   handoffs: [
-    { role: "investigate", session: { harness: "opencode", host: "archdev", id: "ses_pusher" }, at: "2026-10-27T11:00:00Z" },
-    { role: "fix", session: { harness: "opencode", host: "archdev", id: "ses_fix" }, at: "2026-10-27T11:05:00Z" },
-    { role: "owner", session: { harness: "paseo", host: "srv_X", id: "agent-owner" }, at: "2026-10-27T11:06:00Z" },
-    { role: "fix", session: { harness: "opencode", host: "archdev", id: "ses_gone" }, at: "2026-10-27T11:07:00Z" },
+    { role: "owner", session: { harness: "opencode", host: "archdev", id: "ses_pusher" }, at: "2026-10-27T11:00:00Z" },
+    { role: "notified", session: { harness: "opencode", host: "archdev", id: "ses_fix" }, at: "2026-10-27T11:05:00Z" },
+    { role: "notified", session: { harness: "paseo", host: "srv_X", id: "agent-notified" }, at: "2026-10-27T11:06:00Z" },
+    { role: "notified", session: { harness: "opencode", host: "archdev", id: "ses_gone" }, at: "2026-10-27T11:07:00Z" },
   ],
 };
 
@@ -44,8 +44,8 @@ test("watchLinks: só sessões OpenCode que o servidor lista, push primeiro e pa
     ["ses_fix", ""],
   ]);
   assert.deepEqual(watchLinks(incident, titles), [
-    { sessionId: "ses_pusher", label: "push + investigação · “Aviso ao morador”" },
-    { sessionId: "ses_fix", label: "correção · sessão ses_fix" },
+    { sessionId: "ses_pusher", label: "push + dona · “Aviso ao morador”" },
+    { sessionId: "ses_fix", label: "avisada · sessão ses_fix" },
   ]);
   assert.deepEqual(watchLinks(incident, new Map()), [], "sessão que este servidor não lista não vira link");
   assert.deepEqual(watchSessionIds(incident), ["ses_pusher", "ses_fix", "ses_gone"], "agente Paseo fica de fora");

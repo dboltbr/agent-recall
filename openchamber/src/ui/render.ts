@@ -9,6 +9,7 @@ import {
   STEP_LABELS,
   stepLabel,
   trippedSignals,
+  waitingFor,
   type Job,
   type Release,
   type ReleaseSnapshot,
@@ -177,7 +178,7 @@ export function stepsList(snapshot: ReleaseSnapshot, release: Release, now: Date
   const queue = queueView(snapshot);
   for (const step of release.steps) {
     const detail = h("div", { class: "sd" });
-    const text = stepDetail(release, step);
+    const text = stepDetail(release, step, waitingFor(snapshot, release));
     if (step.id === "tag") detail.append(h("span", { class: "mono" }, text));
     else if (text) detail.append(text);
     if (step.id === "images" && step.state !== "pending" && step.state !== "skipped") {
@@ -207,12 +208,15 @@ export function outcomeBanner(release: Release, actions: Actions): HTMLElement |
   if (release.verdict === "reverted") {
     const parts = revertParts(release);
     const revertCommit = release.revert?.commit ?? null;
+    // The pin revert lives in dbolt-deploy; only a flags revert is a commit of this repository.
+    const openRevert = (sha: string) =>
+      release.rollback?.target === "main" ? actions.openCommit(sha) : actions.openUrl(`https://github.com/dboltbr/dbolt-deploy/commit/${sha}`);
     return h(
       "div",
       { class: "rl-banner warn" },
       icon("undo", 14),
       h("span", null, parts ? [parts.what, parts.notice].filter(Boolean).join(" · ") : headline(release)),
-      revertCommit ? h("button", { class: "link", onClick: () => actions.openCommit(revertCommit) }, "ver reversão") : null,
+      revertCommit ? h("button", { class: "link", onClick: () => openRevert(revertCommit) }, "ver reversão") : null,
     );
   }
   if (release.verdict === "failed") {
@@ -220,7 +224,7 @@ export function outcomeBanner(release: Release, actions: Actions): HTMLElement |
     return h("div", { class: "rl-banner bad" }, icon("xCircle", 14), h("span", null, headline(release)), h("button", { class: "link", onClick: () => actions.openUrl(url) }, "ver log"));
   }
   if (release.verdict === "red") {
-    return h("div", { class: "rl-banner bad" }, icon("alert", 14), h("span", null, `${headline(release)} · investigação em andamento`));
+    return h("div", { class: "rl-banner bad" }, icon("alert", 14), h("span", null, headline(release)));
   }
   return null;
 }

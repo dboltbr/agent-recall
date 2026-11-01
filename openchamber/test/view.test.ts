@@ -30,7 +30,7 @@ test("headline e statusLabel: etapa em curso enquanto ativo, veredito depois", (
   assert.equal(headline(running), "imagens 3/9");
   assert.equal(statusLabel(running), "em andamento");
   assert.equal(headline(failed), "verify-production / check falhou");
-  assert.deepEqual(revertParts(reverted), { what: "vigia reverteu 3 commits", notice: "agente avisado" });
+  assert.deepEqual(revertParts(reverted), { what: "vigia reverteu no dbolt-deploy · main congelada", notice: "agente avisado" });
   assert.equal(revertParts(green), null);
   assert.equal(releaseColumn(failed), "#169 27/10 06:26");
   assert.equal(releaseColumn(green), "#171 27/10 10:00");
@@ -72,7 +72,7 @@ test("releaseChip: título curto, contexto completo dentro dos limites do host",
   assert.ok(chip.text.length <= 16_000 && chip.title.length <= 200);
 
   const revertChip = releaseChip(fixtureSnapshot(), reverted, FIXTURE_NOW);
-  assert.match(revertChip.text, /Reversão do vigia: 41d0c8e5b, a19f2c3d4, 77b0e1f2a/);
+  assert.match(revertChip.text, /Rollback: vigia reverteu no dbolt-deploy no commit e9c4d2a1b · main congelada\./);
   assert.match(revertChip.text, /5xx \(errors5xx\): red/);
   assert.doesNotMatch(revertChip.text, /Fila:/);
 });

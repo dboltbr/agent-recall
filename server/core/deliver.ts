@@ -1,31 +1,101 @@
 import { describe } from "./poll.ts";
 import { formatSession } from "./trailer.ts";
-import type { Release } from "./release-status.ts";
-import { roleOf, type Action, type NoteAction } from "./route.ts";
-import type { Logger, Note, Role, SessionRef } from "./types.ts";
+import { noteSignals, type Release } from "./release-status.ts";
+import { noteOwner, roleOf, type Action, type NoteAction } from "./route.ts";
+import type { Logger, Note, SessionRef } from "./types.ts";
 
-/** The contract prompt. The dbolt procedure lives in the skill, not here. */
-export function recallPrompt(release: string, role: Role, note: Note): string {
-  return `Incidente ${release}: carregue a skill dbolt-release-incident. Papel: ${role}. Nota: ${JSON.stringify(note)}`;
+/** Why the watch could not revert, in pt-BR (codes of `scripts/release-incident-note.py`). */
+const ROLLBACK_REASONS: Readonly<Record<string, string>> = {
+  "dlc-rollback-missing": "sem o artefato dlc-rollback do run da release",
+  "dlc-rollback-invalid": "artefato dlc-rollback ilegível",
+  "dlc-rollback-range-mismatch": "dlc-rollback de outra faixa",
+  "unsafe-migration": "a imagem anterior não aguenta o banco depois da faixa",
+  conflict: "o revert conflita com o HEAD",
+  "deploy-error": "o dbolt-deploy recusou o revert",
+  "push-failed": "o push do revert na main falhou",
+  "push-rejected": "o push do revert na main foi recusado 3 vezes",
+  "range-too-large": "a faixa é grande demais para reverter",
+  "nothing-to-revert": "a faixa não tem commit de flags revertível",
+  "already-reverted": "a main já desfez as flags da faixa",
+  drill: "ensaio",
+};
+
+function reasonText(reason: string | undefined): string {
+  if (!reason) return "sem motivo na nota";
+  const text = ROLLBACK_REASONS[reason];
+  return text ? `${text} (${reason})` : reason;
 }
 
-export function reminderPrompt(release: string, note: Note): string {
+/** `5xx: errors5xx-ratio; Sentry: new-issue`: the red sources of the verdict. */
+export function redReasons(note: Note): string {
+  const red = noteSignals(note).filter((signal) => signal.outcome === "red");
+  return red.length ? red.map((signal) => (signal.reason ? `${signal.label}: ${signal.reason}` : signal.label)).join("; ") : "vigia vermelho";
+}
+
+/** Where production stands after the watch's rollback, in one pt-BR sentence. */
+export function rollbackLine(release: string, note: Note): string {
+  const rollback = note.rollback;
+  const commit = typeof rollback?.commit === "string" ? ` (commit ${rollback.commit.slice(0, 12)})` : "";
+  switch (rollback?.outcome) {
+    case "reverted": {
+      const what = rollback.target === "main" ? "reverteu as flags da faixa na main" : `reverteu a ${release} no dbolt-deploy`;
+      const applied = rollback.applied
+        ? "o Flux aplicou: produção voltou à release anterior"
+        : "o Flux NÃO aplicou em 5 min: confira o Flux antes de contar com a release anterior";
+      return `o vigia ${what}${commit}; ${applied}.`;
+    }
+    case "blocked": {
+      const findings = rollback.findings?.length ? `, ${rollback.findings.length} achado(s) em findings` : "";
+      return `impedido: ${reasonText(rollback.reason)}${findings}. Produção segue na ${release}; o caminho é Fixes-Release.`;
+    }
+    case "failed": {
+      const detail = rollback.detail ? `: ${rollback.detail}` : "";
+      return `falhou: ${reasonText(rollback.reason)}${detail}. Produção segue na ${release}.`;
+    }
+    case "none":
+      return `nada revertido: ${reasonText(rollback.reason)}.`;
+    case "pending":
+      return "pendente: o vigia não gravou o desfecho do rollback; leia a nota antes de agir.";
+    default:
+      return "a nota não traz rollback.";
+  }
+}
+
+/** The freeze the note puts on main, or the drill's lack of one. */
+function freezeLine(release: string, note: Note): string {
+  if (note.drill) return "Ensaio: nada foi revertido nem congelado.";
   return (
-    `Lembrete: o fix-forward da ${release} passou de 30 min sem fix.readyAt; pela skill ` +
-    `dbolt-release-incident (Prazos) o owner reverte agora e segue corrigindo. ` +
-    recallPrompt(release, "investigate", note)
+    `A main está congelada para código até ficar verde uma release com Fixes-Release: ${release} ` +
+    `(com o "ship" do responsável) ou Reverts-Release: ${release}; Break-Glass só por decisão do responsável.`
+  );
+}
+
+/** The owner: asked to act, with the reason, the rollback and the freeze. */
+export function ownerPrompt(release: string, note: Note): string {
+  return (
+    `Incidente ${release}: carregue a skill dbolt-release-incident. Papel: owner. ` +
+    `A sua sessão é a dona da ${release}, vermelha no vigia: investigue e corrija com Fixes-Release ou reverta com Reverts-Release. ` +
+    `Motivo: ${redReasons(note)}. Rollback: ${rollbackLine(release, note)} ${freezeLine(release, note)} ` +
+    `Nota: ${JSON.stringify(note)}`
+  );
+}
+
+/** A notified session: told, never asked to act, with the owner's name. */
+export function notifiedPrompt(release: string, note: Note): string {
+  const owner = noteOwner(note);
+  const push = note.drill
+    ? "Ensaio: a main não fica congelada."
+    : "O seu próximo push de código para a main será recusado até a correção verde.";
+  return (
+    `Incidente ${release}: carregue a skill dbolt-release-incident. Papel: notified. ` +
+    `Aviso, sem pedido de ação: um commit seu está na faixa da ${release}, vermelha no vigia (motivo: ${redReasons(note)}). ` +
+    `Quem age é a dona, ${owner ? formatSession(owner) : "sem dono"}; investigar, corrigir e reverter cabem a ela. ` +
+    `${push} Nota: ${JSON.stringify(note)}`
   );
 }
 
 export function promptFor(action: NoteAction, note: Note): string {
-  switch (action.kind) {
-    case "recall":
-      return recallPrompt(action.release, action.role, note);
-    case "investigation":
-      return recallPrompt(action.release, "investigate", note);
-    case "remind":
-      return reminderPrompt(action.release, note);
-  }
+  return action.role === "owner" ? ownerPrompt(action.release, note) : notifiedPrompt(action.release, note);
 }
 
 /** A release that failed before the tag has no note: the prompt carries the run itself. */
@@ -50,11 +120,9 @@ export interface Delivery {
   prompt(target: SessionRef, text: string): Promise<void>;
   /** Fork (OpenCode) or new agent in the session's workspace (Paseo), then prompt it. */
   fallback(target: SessionRef, text: string, title: string): Promise<string>;
-  /** New investigation session in a checkout of the repository. */
-  create(text: string, title: string): Promise<string>;
 }
 
-export type Outcome = "prompt" | "fallback" | "created" | "recorded" | "failed";
+export type Outcome = "prompt" | "fallback" | "recorded" | "failed";
 
 /** How a call ended, and the session id that received it (null when nobody did). */
 export interface Delivered {
@@ -65,7 +133,7 @@ export interface Delivered {
 /** What gave up, for the note's `recall` field. */
 export interface Failure {
   readonly role: string;
-  readonly target?: string;
+  readonly target: string;
   readonly reason: string;
 }
 
@@ -84,37 +152,27 @@ export interface DeliverInput {
   readonly log: Logger;
 }
 
-/** Fallback chain: prompt → fork/new agent → failure in the note. Investigation: create → note. */
+/** Fallback chain: prompt → fork/new agent → failure in the note. */
 export async function deliver(input: DeliverInput): Promise<Delivered> {
   const { action, text, title, delivery, log } = input;
   const failures: string[] = [];
-  if (action.kind === "investigation") {
-    try {
-      const id = await delivery.create(text, title);
-      log.info(`${action.release}: sessão de investigação ${id} criada`);
-      return { outcome: "created", session: id };
-    } catch (error) {
-      failures.push(`criar sessão: ${describe(error)}`);
-    }
-  } else {
-    try {
-      await delivery.prompt(action.target, text);
-      return { outcome: "prompt", session: action.target.id };
-    } catch (error) {
-      failures.push(`prompt: ${describe(error)}`);
-    }
-    try {
-      const id = await delivery.fallback(action.target, text, title);
-      log.warn(`${action.release}: ${formatSession(action.target)} recusou o prompt; chamado foi para ${id}`);
-      return { outcome: "fallback", session: id };
-    } catch (error) {
-      failures.push(`fallback: ${describe(error)}`);
-    }
+  try {
+    await delivery.prompt(action.target, text);
+    return { outcome: "prompt", session: action.target.id };
+  } catch (error) {
+    failures.push(`prompt: ${describe(error)}`);
   }
-  const target = action.kind === "investigation" ? undefined : formatSession(action.target);
+  try {
+    const id = await delivery.fallback(action.target, text, title);
+    log.warn(`${action.release}: ${formatSession(action.target)} recusou o prompt; chamado foi para ${id}`);
+    return { outcome: "fallback", session: id };
+  } catch (error) {
+    failures.push(`fallback: ${describe(error)}`);
+  }
+  const target = formatSession(action.target);
   const role = roleOf(action);
   const reason = failures.join("; ");
-  log.error(`${input.drill ? "[ensaio] " : ""}não consegui chamar ${target ?? "nova sessão de investigação"} para ${action.release} (${role}): ${reason}`);
+  log.error(`${input.drill ? "[ensaio] " : ""}não consegui chamar ${target} para ${action.release} (${role}): ${reason}`);
   if (!input.recordFailure) return { outcome: "failed", session: null };
   try {
     if (await input.recordFailure({ role, target, reason })) return { outcome: "recorded", session: null };

@@ -77,7 +77,7 @@ function fakeContext(name: string) {
 const culprit: Note = note({
   release: "release-90",
   updatedAt: hoursAgo(3),
-  sessions: [session("opencode", "archdev", "ses_culprit", ["c0ffee1"])],
+  owner: session("opencode", "archdev", "ses_culprit", ["c0ffee1"]),
 });
 
 async function setup(refs: Array<{ status: number; etag?: string; sha?: string }>, notes: () => Record<string, Note>) {
@@ -139,7 +139,7 @@ test("localização despejada: o poller segue e chama pelo contexto descartado",
   await tick();
   assert.equal(home.state.prompts.length, 1);
   assert.equal(home.state.prompts[0]!.sessionID, "ses_culprit");
-  assert.match(home.state.prompts[0]!.text, /^Incidente release-90: carregue a skill dbolt-release-incident\. Papel: investigate\./);
+  assert.match(home.state.prompts[0]!.text, /^Incidente release-90: carregue a skill dbolt-release-incident\. Papel: owner\./);
   assert.equal((await heartbeat())?.polledAt, "2026-10-27T16:02:00.000Z");
   await registry.poller!.stop();
 });

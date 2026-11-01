@@ -6,7 +6,7 @@ import { boot, serviceCall, type Host } from "../ui/boot.ts";
 import { h, icon, replaceChildren, spinner } from "../ui/dom.ts";
 import { startFeed, type FeedState } from "../ui/feed.ts";
 import { commitLines, outcomeBanner, releaseHead, runnersList, signalsList, stepsList, verdictRows, type Actions, type Watch } from "../ui/render.ts";
-import { badgeState, cancelledCount, otherActive, primaryRelease, queueView, recentVerdicts, snapshotError, statusLabel } from "../ui/view.ts";
+import { activityLabel, badgeState, cancelledCount, otherActive, primaryRelease, queueView, recentVerdicts, snapshotError } from "../ui/view.ts";
 
 function chipNumber(item: GuestItem | null): number | null {
   if (!item || !isGuestAttachItem(item)) return null;
@@ -30,7 +30,7 @@ export function releaseView(snapshot: ReleaseSnapshot, release: Release, now: Da
         "div",
         { class: "rl-commit clickable", title: other.title, onClick: () => select(other) },
         icon("clock", 13),
-        h("span", { class: "ellipsis" }, `${releaseLabel(other)} ${statusLabel(other)} · ${other.title || "(sem título)"}`),
+        h("span", { class: "ellipsis" }, `${releaseLabel(other)} · ${activityLabel(snapshot, other)} · ${other.title || "(sem título)"}`),
       ),
     ),
     outcomeBanner(release, actions),

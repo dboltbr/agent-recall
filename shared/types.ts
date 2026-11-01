@@ -14,25 +14,41 @@ export interface NoteSession extends SessionRef {
   readonly commits?: readonly string[];
 }
 
+/**
+ * The watch's rollback of a red release (`scripts/release-incident-note.py respond`): the pin in
+ * `dbolt-deploy`, or the range's flag commits on `main` for a flags-only release. Read
+ * defensively: it is JSON from another repository.
+ */
+export interface NoteRollback {
+  /** `pending` until the watch records how it ended: `reverted`, `blocked`, `failed` or `none`. */
+  readonly outcome?: string;
+  readonly target?: string;
+  /** The revert commit (`dbolt-deploy` or `main`). */
+  readonly commit?: string;
+  /** Flux applied the revert within 5 min. */
+  readonly applied?: boolean;
+  readonly reason?: string;
+  readonly findings?: readonly unknown[];
+  readonly detail?: string;
+  readonly commits?: readonly string[];
+  readonly at?: string;
+}
+
 /** Body of a `refs/notes/release-watch` note, keyed by the commit of tag `release-<n>`. */
 export interface Note {
   readonly release: string | number;
   /** The watch verdict object (`{verdict, sources, missing, at}`); read through release-status. */
   readonly verdict?: unknown;
-  readonly range?: { readonly from?: string; readonly to?: string };
-  readonly sessions?: readonly NoteSession[];
-  readonly state: string;
-  readonly owner?: string;
+  readonly range?: { readonly from?: string | null; readonly to?: string; readonly truncated?: boolean };
+  /** The `Agent-Session` of the range head: the session that acts. Null: nobody is called. */
+  readonly owner?: NoteSession | null;
+  /** The range's other sessions: told, never asked to act. */
+  readonly notified?: readonly NoteSession[];
+  readonly rollback?: NoteRollback | null;
   readonly updatedAt: string;
+  /** The green release that lifted the freeze. */
+  readonly resolvedBy?: string;
   readonly drill?: boolean;
-  readonly assessment?: {
-    readonly at?: string;
-    readonly suspects?: readonly { readonly commit?: string }[];
-  };
-  readonly decision?: { readonly action?: string; readonly commits?: readonly string[] };
-  readonly fix?: { readonly session?: string; readonly readyAt?: string };
-  /** `{commit, commits, reason, at, dispatched}` once a revert is under way. */
-  readonly revert?: unknown;
   /** Written by this plugin when a call failed on every rung. */
   readonly recall?: unknown;
 }
@@ -40,7 +56,6 @@ export interface Note {
 /** `~/.config/agent-recall/config.json`. */
 export interface HostConfig {
   readonly instance: string;
-  readonly incidentHost: boolean;
   readonly repository: string;
   readonly notesRef: string;
 }
@@ -49,7 +64,6 @@ export interface HostConfig {
 export interface Me {
   readonly harness: Harness;
   readonly host: string;
-  readonly incidentHost: boolean;
 }
 
 export interface ExecResult {
@@ -80,4 +94,5 @@ export interface Logger {
   error(message: string): void;
 }
 
-export type Role = "investigate" | "fix";
+/** `owner` is asked to act; `notified` is only told, with the owner's name. */
+export type Role = "owner" | "notified";

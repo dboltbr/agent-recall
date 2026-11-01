@@ -12,6 +12,8 @@ import {
   RELEASE_WORKFLOW,
   RUNNER_ORG,
   releaseNameOf,
+  WATCH_WORKFLOW,
+  watchRunNumber,
   type GitHubCommit,
   type GitHubJob,
   type GitHubRun,
@@ -119,6 +121,8 @@ export interface ReleaseSourceOptions {
   readonly log: Logger;
   readonly repository?: string;
   readonly workflow?: string;
+  /** The workflow whose `watch release-<n>` runs judge each release (release-watch.yml). */
+  readonly watchWorkflow?: string;
   readonly org?: string;
   /** Calls this host delivered for a release's incident (`readHandoffs` on the state dir). */
   readonly handoffs?: (release: string) => Promise<readonly Handoff[]>;
@@ -153,6 +157,7 @@ interface JobsPage {
 export function createReleaseSource(options: ReleaseSourceOptions): ReleaseSource {
   const repository = options.repository ?? RELEASE_REPOSITORY;
   const workflow = options.workflow ?? RELEASE_WORKFLOW;
+  const watchWorkflow = options.watchWorkflow ?? WATCH_WORKFLOW;
   const org = options.org ?? RUNNER_ORG;
   const get = createGitHubClient(options.fetch);
   /** Jobs of completed runs never change: keyed `<run id>:<attempt>`. */
@@ -162,9 +167,23 @@ export function createReleaseSource(options: ReleaseSourceOptions): ReleaseSourc
   let snapshot: ReleaseSnapshot | null = null;
   let runners: readonly GitHubRunner[] = [];
   let loadedRuns: unknown = null;
+  /** Watch runs of the last load by release number. */
+  let watchRuns = new Map<number, GitHubRun>();
 
-  const runsPath = (perPage: number, page = 1) =>
-    `repos/${repository}/actions/workflows/${workflow}.yml/runs?per_page=${perPage}&page=${page}`;
+  const runsPath = (perPage: number, page = 1, name = workflow) =>
+    `repos/${repository}/actions/workflows/${name}.yml/runs?per_page=${perPage}&page=${page}`;
+
+  /** The newest `watch release-<n>` run of each release number on one page of the watch workflow. */
+  async function watchPage(perPage: number, token: string): Promise<Map<number, GitHubRun>> {
+    const body = await get<RunsPage>(runsPath(perPage, 1, watchWorkflow), token);
+    const byNumber = new Map<number, GitHubRun>();
+    for (const run of body.workflow_runs) {
+      const number = watchRunNumber(run);
+      const known = number === null ? undefined : byNumber.get(number);
+      if (number !== null && (!known || run.id > known.id)) byNumber.set(number, run);
+    }
+    return byNumber;
+  }
 
   async function jobsOf(run: GitHubRun, token: string): Promise<readonly GitHubJob[]> {
     const key = `${run.id}:${run.run_attempt ?? 1}`;
@@ -196,9 +215,17 @@ export function createReleaseSource(options: ReleaseSourceOptions): ReleaseSourc
     return tagNumbers(await get<{ ref?: string }[]>(`repos/${repository}/git/matching-refs/tags/release-`, token));
   }
 
-  async function build(run: GitHubRun, tags: readonly number[], notes: Map<string, Note>, token: string): Promise<Release> {
-    const [jobs, commits] = await Promise.all([
+  async function build(
+    run: GitHubRun,
+    tags: readonly number[],
+    notes: Map<string, Note>,
+    watches: ReadonlyMap<number, GitHubRun>,
+    token: string,
+  ): Promise<Release> {
+    const watchRun = watches.get(run.run_number) ?? null;
+    const [jobs, watchJobs, commits] = await Promise.all([
       jobsOf(run, token),
+      watchRun ? jobsOf(watchRun, token) : Promise.resolve(null),
       commitsOf(run, tags, token).catch((error) => {
         options.log.warn(`faixa de ${releaseNameOf(run.run_number)}: ${describe(error)}`);
         return null;
@@ -214,6 +241,7 @@ export function createReleaseSource(options: ReleaseSourceOptions): ReleaseSourc
       commits,
       tagged: tags.includes(run.run_number),
       handoffs,
+      watch: watchRun && watchJobs ? { run: watchRun, jobs: watchJobs } : null,
       now: options.clock.now(),
     });
   }
@@ -222,11 +250,17 @@ export function createReleaseSource(options: ReleaseSourceOptions): ReleaseSourc
     const now = options.clock.now();
     const notes = notesByRelease(input.notes);
     try {
-      const [page, tags] = await Promise.all([get<RunsPage>(runsPath(RELEASE_HISTORY), input.token), tagList(input.token)]);
+      // Each watch run judges one release: a page as long as the history covers it.
+      const [page, tags, watches] = await Promise.all([
+        get<RunsPage>(runsPath(RELEASE_HISTORY), input.token),
+        tagList(input.token),
+        watchPage(RELEASE_HISTORY, input.token),
+      ]);
       loadedRuns = page;
+      watchRuns = watches;
       const previous = new Map((snapshot?.releases ?? []).map((release) => [release.runId, release]));
       const releases = await pool(page.workflow_runs, (run) =>
-        build(run, tags, notes, input.token).catch((error) => {
+        build(run, tags, notes, watches, input.token).catch((error) => {
           const kept = previous.get(run.id);
           if (!kept) throw error;
           options.log.warn(`${releaseNameOf(run.run_number)}: ${describe(error)}`);
@@ -262,7 +296,9 @@ export function createReleaseSource(options: ReleaseSourceOptions): ReleaseSourc
     for (const page of [guess, guess + 1, guess - 1].filter((value) => value >= 1)) {
       const body = await get<RunsPage>(runsPath(100, page), input.token);
       const run = body.workflow_runs.find((candidate) => candidate.run_number === input.number);
-      if (run) return build(run, await tagList(input.token), notesByRelease(input.notes), input.token);
+      if (!run) continue;
+      const watches = watchRuns.has(run.run_number) ? watchRuns : await watchPage(100, input.token);
+      return build(run, await tagList(input.token), notesByRelease(input.notes), watches, input.token);
     }
     return null;
   }

@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { cardFor } from "../../shared/release-cards.ts";
-import { buildRelease, buildSnapshot, type Release } from "../../shared/release-status.ts";
+import { buildRelease, buildSnapshot, type GitHubJob, type Release } from "../../shared/release-status.ts";
 import { NOW } from "../../core/test/fakes.ts";
-import { finished, job, midImages, minutesAgo, run, RUNNERS } from "../../core/test/releases.ts";
+import { jobsInput, released, job, midImages, minutesAgo, run, RUNNERS, type Released } from "../../core/test/releases.ts";
 import { cardView, releaseOpen } from "../card-view.ts";
 
-function release(number: number, conclusion: string | null, jobs = finished("success")): Release {
+function release(number: number, conclusion: string | null, jobs: GitHubJob[] | Released = released("success")): Release {
   return buildRelease({
     run: run({
       run_number: number,
@@ -14,7 +14,7 @@ function release(number: number, conclusion: string | null, jobs = finished("suc
       conclusion,
       updated_at: minutesAgo(1),
     }),
-    jobs: conclusion ? jobs : midImages(),
+    ...jobsInput(conclusion ? jobs : midImages()),
     note: null,
     commits: null,
     now: NOW,
@@ -29,13 +29,13 @@ test("releaseOpen: ativo aberto, terminal (qualquer veredito) recolhido, escolha
   assert.equal(releaseOpen(live, null), true);
   assert.equal(releaseOpen(release(249, "success"), null), false);
   assert.equal(releaseOpen(release(248, "failure"), null), false, "falha também recolhe; a linha mostra o vermelho");
-  assert.equal(releaseOpen(release(247, "cancelled", finished("cancelled")), null), false);
+  assert.equal(releaseOpen(release(247, "cancelled", released("cancelled")), null), false);
   assert.equal(releaseOpen(release(249, "success"), true), true);
   assert.equal(releaseOpen(live, false), false);
 });
 
 test("cardView: dobrado some, cabeça do grupo lista do mais velho ao próprio", () => {
-  const cancelled = (number: number) => release(number, "cancelled", finished("cancelled"));
+  const cancelled = (number: number) => release(number, "cancelled", released("cancelled"));
   const noop = release(248, "success", [job("trigger", "success", [3, 2.9])]);
   const head = cancelled(249);
   const s = snap(cancelled(246), cancelled(247), noop, head);

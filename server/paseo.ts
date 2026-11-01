@@ -9,7 +9,7 @@ import { nodeExec } from "./core/exec.ts";
 import { loadConfig, stateDirectory } from "./core/host.ts";
 import { describe } from "./core/poll.ts";
 import { firstIn, updatePaseo } from "./core/self-update.ts";
-import type { Exec, HostConfig, Logger, SessionRef } from "./core/types.ts";
+import type { Exec, Logger, SessionRef } from "./core/types.ts";
 import { createWatcher } from "./core/watcher.ts";
 import { createReleaseService, type ReleaseService } from "./release.ts";
 
@@ -85,12 +85,7 @@ async function agentOfSession(sessionId: string): Promise<string | null> {
   return null;
 }
 
-async function originMatches(exec: Exec, cwd: string, repository: string): Promise<boolean> {
-  const origin = await exec("git", ["-C", cwd, "remote", "get-url", "origin"], { timeoutMs: 10_000 });
-  return origin.code === 0 && new RegExp(`[/:]${repository}(\\.git)?$`).test(origin.stdout.trim());
-}
-
-function createDelivery(exec: Exec, stateDir: string, config: () => HostConfig): Delivery {
+function createDelivery(exec: Exec, stateDir: string): Delivery {
   async function run(args: string[], text: string): Promise<string> {
     const out = await paseo(exec, ["run", "--no-wait", "--json", ...args, text]);
     const id = (JSON.parse(out) as { agentId?: string }).agentId;
@@ -119,22 +114,6 @@ function createDelivery(exec: Exec, stateDir: string, config: () => HostConfig):
       if (record.config?.thinkingOptionId) args.push("--thinking", record.config.thinkingOptionId);
       return run(args, text);
     },
-    async create(text: string, title: string) {
-      const { repository } = config();
-      const workspaces = JSON.parse(await paseo(exec, ["workspace", "ls", "--json"])) as Array<{
-        workspaceId: string;
-        cwd: string;
-        isolation?: string;
-      }>;
-      const preferred = join(homedir(), "dev", "dbolt");
-      const ordered = [...workspaces].sort(
-        (a, b) => Number(b.cwd === preferred) - Number(a.cwd === preferred) || Number(b.isolation === "local") - Number(a.isolation === "local"),
-      );
-      for (const workspace of ordered) {
-        if (await originMatches(exec, workspace.cwd, repository)) return run(["--workspace", workspace.workspaceId, "--title", title], text);
-      }
-      throw new Error(`nenhum workspace Paseo com checkout de ${repository}`);
-    },
   };
 }
 
@@ -150,7 +129,6 @@ export function startPaseoRecall(): PaseoRecall {
   const clock = { now: () => new Date() };
   let stop: (() => Promise<void>) | null = null;
   let stopped = false;
-  let current: HostConfig | null = null;
   const release = createReleaseService({
     fetch: (input, init) => fetch(input, init),
     clock,
@@ -171,14 +149,14 @@ export function startPaseoRecall(): PaseoRecall {
     const watcher = createWatcher({
       harness: "paseo",
       host: () => serverId,
-      loadConfig: async () => (current = await loadConfig()),
+      loadConfig: () => loadConfig(),
       stateDir,
       sha,
       pid: process.pid,
       clock,
       fetch: (input, init) => fetch(input, init),
       exec,
-      delivery: createDelivery(exec, stateDir, () => current!),
+      delivery: createDelivery(exec, stateDir),
       log,
       release: release.tracker,
     });

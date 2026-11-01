@@ -4,14 +4,15 @@
 // Paseo's popover owns scrolling and padding: the content sizes itself, no inner ScrollView.
 import type { PluginTheme } from "@getpaseo/plugin";
 import { Loading } from "@getpaseo/plugin/client/ui";
+import { useState } from "react";
 import { Text, View } from "react-native";
 import { commitUrl, verdictBanner, waitingLabel, watchUrl } from "../shared/release-copy.ts";
-import { isActive, queueSummary, type Release } from "../shared/release-status.ts";
+import { isActive, queueSummary, waitingFor, type Release } from "../shared/release-status.ts";
 import type { ReleaseView } from "../shared/rpc.ts";
 import { agentTitle, retryReleases, useNow, useReleaseState } from "./data.ts";
 import { Banner, LinkText, PressText } from "./kit.tsx";
 import { localAgent, watchLinks, type OpenAgent } from "./navigate.ts";
-import { CommitLine, PusherLine, ReleaseHeader, RunnerQueue, SectionLabel, Signals, StepList } from "./release-parts.tsx";
+import { CommitLine, OtherReleases, PusherLine, QueueLine, ReleaseHeader, RunnerQueue, SectionLabel, Signals, StepList } from "./release-parts.tsx";
 
 const BANNER_ICONS = { ok: "ShieldCheck", bad: "CircleX", warn: "Undo2", run: "Info", muted: "Info" } as const;
 
@@ -43,25 +44,30 @@ export function ReleaseBody({
   release,
   openReleases,
   openAgent,
+  onSelect = null,
 }: {
   theme: PluginTheme;
   view: ReleaseView;
   release: Release;
   openReleases: (() => void) | null;
   openAgent: OpenAgent | null;
+  /** Puts another release in flight in focus; null hides the "também em andamento" list. */
+  onSelect?: ((release: Release) => void) | null;
 }) {
   const now = useNow();
   const snapshot = view.snapshot!;
   const active = isActive(release);
   const waiting = waitingLabel(snapshot);
+  const held = waitingFor(snapshot, release);
   const watch = openAgent ? { links: watchLinks(view, release), open: openAgent } : null;
   return (
     <View>
       <ReleaseHeader theme={theme} release={release} now={now} />
       <CommitLine theme={theme} release={release} />
       <PusherLine theme={theme} release={release} title={pusherTitle(view, release)} now={now} />
+      {held ? <QueueLine theme={theme} text={held} /> : null}
       <SectionLabel theme={theme}>Etapas</SectionLabel>
-      <StepList theme={theme} release={release} queue={active ? queueSummary(snapshot) : null} now={now} watch={watch} />
+      <StepList theme={theme} release={release} queue={active ? queueSummary(snapshot) : null} now={now} watch={watch} waiting={held} />
       {active && snapshot.runners.length ? (
         <>
           <SectionLabel theme={theme} trailing={waiting ? <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11.5 }}>{waiting}</Text> : null}>
@@ -72,6 +78,7 @@ export function ReleaseBody({
       ) : null}
       <VerdictBanner theme={theme} release={release} />
       {release.verdict === "reverted" || release.verdict === "red" ? <Signals theme={theme} release={release} /> : null}
+      {onSelect ? <OtherReleases theme={theme} snapshot={snapshot} release={release} onSelect={onSelect} /> : null}
       <View style={{ flexDirection: "row", alignItems: "center", gap: 14, marginTop: 10, paddingTop: 8, borderTopWidth: 1, borderTopColor: theme.colors.border }}>
         <LinkText theme={theme} href={release.url} icon="ExternalLink" label="ver run" />
         <LinkText theme={theme} href={commitUrl(snapshot.repository, release.headSha)} icon="GitCommitHorizontal" label="ver commit" muted />
@@ -95,7 +102,11 @@ export function ReleasePopover({
   openAgent: OpenAgent | null;
 }) {
   const { view, error, loading } = useReleaseState();
-  const release = view?.snapshot ? pick(view) : null;
+  // A release picked from "também em andamento"; it falls back to `pick` once it leaves the snapshot.
+  const [focus, setFocus] = useState<number | null>(null);
+  const picked = view?.snapshot ? pick(view) : null;
+  const focused = focus === null ? null : (view?.snapshot?.releases.find((release) => release.runId === focus) ?? null);
+  const release = focused ?? picked;
   return (
     <View style={{ padding: 12, width: 410, maxWidth: "100%" }}>
       {loading && !view ? (
@@ -114,7 +125,19 @@ export function ReleasePopover({
         </View>
       ) : (
         <>
-          <ReleaseBody theme={theme} view={view} release={release} openReleases={openReleases} openAgent={openAgent} />
+          {focused && picked && focused.runId !== picked.runId ? (
+            <View style={{ marginBottom: 6 }}>
+              <PressText theme={theme} label={`← voltar para #${picked.number}`} onPress={() => setFocus(null)} muted />
+            </View>
+          ) : null}
+          <ReleaseBody
+            theme={theme}
+            view={view}
+            release={release}
+            openReleases={openReleases}
+            openAgent={openAgent}
+            onSelect={(other) => setFocus(other.runId)}
+          />
           {error ? <Text style={{ color: theme.colors.statusWarning, fontSize: 11.5, marginTop: 8 }}>{error}</Text> : null}
         </>
       )}

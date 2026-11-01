@@ -7,9 +7,9 @@ import { blockedRecalls } from "../route.ts";
 import type { Me } from "../types.ts";
 import { createWatcher } from "../watcher.ts";
 import { config, fakeDelivery, fakeExec, fakeGitHub, fixedClock, NOW, quietLog, tempState, writeConfig } from "./fakes.ts";
-import { finished, job, minutesAgo, run, RUNNERS } from "./releases.ts";
+import { released, job, minutesAgo, run, RUNNERS } from "./releases.ts";
 
-const me: Me = { harness: "opencode", host: "archdev", incidentHost: false };
+const me: Me = { harness: "opencode", host: "archdev" };
 
 /** A run whose `verify-production / check` failed: nothing built, nothing tagged, no note. */
 function blocked(number: number, completedMinutesAgo: number, pusher = "opencode/archdev/ses_pusher"): Release {
@@ -36,7 +36,7 @@ function blocked(number: number, completedMinutesAgo: number, pusher = "opencode
 function shipped(number: number, completedMinutesAgo: number): Release {
   return buildRelease({
     run: run({ run_number: number, status: "completed", conclusion: "success", updated_at: minutesAgo(completedMinutesAgo) }),
-    jobs: finished("success"),
+    ...released("success"),
     note: null,
     commits: null,
     now: NOW,

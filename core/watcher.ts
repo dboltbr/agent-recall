@@ -4,7 +4,7 @@ import { acquireLock, writeHandoff, writeHeartbeat } from "./host.ts";
 import { fetchNotes, recordRecallFailure, type FetchedNote } from "./notes.ts";
 import { describe, POLL_INTERVAL_MS, pollRef, type PollResult } from "./poll.ts";
 import type { ReleaseTracker } from "./release-fetch.ts";
-import { blockedRecalls, describeAction, dueReminder, isRecent, roleOf, route, type Action, type NoteAction } from "./route.ts";
+import { blockedRecalls, describeAction, isRecent, roleOf, route, type Action, type NoteAction } from "./route.ts";
 import type { Clock, Exec, Fetch, Harness, HostConfig, Logger, Me, Note } from "./types.ts";
 
 const TOKEN_TTL_MS = 10 * 60 * 1000;
@@ -40,7 +40,7 @@ export interface TickReport {
 }
 
 export interface Watcher {
-  /** One poll: heartbeat, ref check, notes fetch on change, calls, due reminders. */
+  /** One poll: heartbeat, ref check, notes fetch on change, calls the known notes ask for. */
   tick(): Promise<TickReport>;
   /** Ticks now and every 30 s, never overlapping. Returns stop. */
   start(intervalMs?: number): () => Promise<void>;
@@ -104,7 +104,12 @@ export function createWatcher(options: WatcherOptions): Watcher {
             notesRef: config.notesRef,
             token: auth,
             key,
-            recall: { ...failure, failedAt: clock.now().toISOString(), by: `${me.harness}/${me.host}`, state: note.state },
+            recall: {
+              ...failure,
+              failedAt: clock.now().toISOString(),
+              by: `${me.harness}/${me.host}`,
+              rollback: note.rollback?.outcome ?? null,
+            },
           }),
       },
       me,
@@ -127,7 +132,7 @@ export function createWatcher(options: WatcherOptions): Watcher {
       seen.clear();
       notes.clear();
     }
-    const me: Me = { harness: options.harness, host: options.host(config), incidentHost: config.incidentHost };
+    const me: Me = { harness: options.harness, host: options.host(config) };
     let auth: string;
     try {
       auth = await getToken();
@@ -172,20 +177,17 @@ export function createWatcher(options: WatcherOptions): Watcher {
           if (!note || seen.get(key) === raw) continue;
           seen.set(key, raw);
           notes.set(key, note);
-          if (!isRecent(note, now)) continue;
-          for (const action of route(note, me)) {
-            const done = await act(action, key, note, config, me, auth);
-            if (done) handled.push(done);
-          }
         }
       }
     }
+    // Every tick, not only on change: the owner's call waits for the rollback outcome, and a note
+    // left `pending` by a watch that died never changes again. The locks keep each call single.
     for (const [key, note] of notes) {
       if (!isRecent(note, now)) continue;
-      const reminder = dueReminder(note, me, now);
-      if (!reminder) continue;
-      const done = await act(reminder, key, note, config, me, auth);
-      if (done) handled.push(done);
+      for (const action of route(note, me, now)) {
+        const done = await act(action, key, note, config, me, auth);
+        if (done) handled.push(done);
+      }
     }
     if (options.release) {
       await options.release

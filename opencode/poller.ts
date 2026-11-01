@@ -8,9 +8,7 @@
 //
 // Only the holder of `~/.local/state/agent-recall/opencode.poller` polls; a dead holder's pid is
 // taken over on the next cycle. The heartbeat is written only after the context answered.
-import { existsSync } from "node:fs";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Delivery } from "../core/deliver.ts";
 import { isAlive, readHandoffs } from "../core/host.ts";
@@ -114,12 +112,6 @@ export async function claimPoller(stateDir: string, pid: number): Promise<boolea
   return (await readHolder(path).catch(() => 0)) === pid;
 }
 
-async function originMatches(exec: Exec, cwd: string, repository: string): Promise<boolean> {
-  if (!existsSync(cwd)) return false;
-  const origin = await exec("git", ["-C", cwd, "remote", "get-url", "origin"], { timeoutMs: 10_000 });
-  return origin.code === 0 && new RegExp(`[/:]${repository}(\\.git)?$`).test(origin.stdout.trim());
-}
-
 function within<T>(promise: Promise<T>, ms: number, timer: Timer, what: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const handle = timer.set(() => reject(new Error(`${what}: sem resposta em ${ms} ms`)), ms);
@@ -140,7 +132,7 @@ function within<T>(promise: Promise<T>, ms: number, timer: Timer, what: string):
  * Sessions are reached through the newest context, disposed or not. The plugin API has no fork,
  * so a refused prompt goes to a child session in the original's directory.
  */
-export function createDelivery(registry: Registry, exec: Exec, config: () => HostConfig): Delivery {
+export function createDelivery(registry: Registry): Delivery {
   const context = (): Context => {
     if (!registry.ctx) throw new Error("nenhum contexto OpenCode carregado");
     return registry.ctx;
@@ -160,27 +152,11 @@ export function createDelivery(registry: Registry, exec: Exec, config: () => Hos
       if (!directory) throw new Error(`sessão ${target.id} sem diretório`);
       return promptNew(await ctx.session.create({ title, parentID: target.id, location: { directory } }), text);
     },
-    async create(text: string, title: string) {
-      const { repository } = config();
-      const ctx = context();
-      const candidates = [join(homedir(), "dev", "dbolt")];
-      const listed = await ctx.session.list({ limit: 50, order: "desc" }).catch(() => [] as SessionInfo[]);
-      const sessions = Array.isArray(listed) ? listed : (listed.data ?? []);
-      for (const session of sessions) if (session.location?.directory) candidates.push(session.location.directory);
-      if (ctx.location?.directory) candidates.push(ctx.location.directory);
-      for (const directory of [...new Set(candidates)]) {
-        if (await originMatches(exec, directory, repository)) {
-          return promptNew(await ctx.session.create({ title, location: { directory } }), text);
-        }
-      }
-      throw new Error(`nenhum checkout de ${repository} neste host`);
-    },
   };
 }
 
 function startPoller(registry: Registry, deps: PollerDeps, handover: Promise<void>): Poller {
   const { log, timer } = deps;
-  let current: HostConfig | null = null;
   let watcher: Watcher | null = null;
   let holding = false;
   let ready: boolean | null = null;
@@ -208,14 +184,14 @@ function startPoller(registry: Registry, deps: PollerDeps, handover: Promise<voi
     watcher ??= createWatcher({
       harness: "opencode",
       host: (config) => config.instance,
-      loadConfig: async () => (current = await deps.loadConfig()),
+      loadConfig: deps.loadConfig,
       stateDir: deps.stateDir,
       sha: deps.sha,
       pid: deps.pid,
       clock: deps.clock,
       fetch: deps.fetch,
       exec: deps.exec,
-      delivery: createDelivery(registry, deps.exec, () => current!),
+      delivery: createDelivery(registry),
       log,
       // No release UI here: the status only tells which pushes failed before the tag.
       release: createReleaseTracker({

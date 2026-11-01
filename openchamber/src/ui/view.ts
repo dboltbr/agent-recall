@@ -3,17 +3,21 @@
 // the badge rule, the chip, the strip copy). No DOM, so it is tested with plain `node --test`.
 import {
   activeReleases,
+  activityLabel,
+  otherActive,
   releaseLabel,
   releaseStamp,
   findRelease,
   formatDuration,
   formatShortDuration,
+  freezeLabel,
   isActive,
   lastFinished,
   queueGroups,
   queueSummary,
   releaseDurationMs,
   revertSummary,
+  rollbackLabel,
   stepJobNames,
   stepLabel,
   stepOf,
@@ -35,14 +39,15 @@ export const PANEL_ID = "dbolt-release";
 export const PANEL_SURFACE = `plugin:${PANEL_ID}`;
 
 /**
- * The release every surface leads with: the newest run that is moving (a run waiting on the
- * concurrency group behind it has nothing to show yet), else the newest queued one, else the last
+ * The release every surface leads with: the one in focus among those in flight (`activeReleases`:
+ * the run moving through verify→tag, then an open watch, then a queued run), else the last
  * verdict, else the newest run.
  */
 export function primaryRelease(snapshot: ReleaseSnapshot): Release | null {
-  const active = activeReleases(snapshot);
-  return active.find((release) => release.status === "running") ?? active[0] ?? lastFinished(snapshot) ?? snapshot.releases[0] ?? null;
+  return activeReleases(snapshot)[0] ?? lastFinished(snapshot) ?? snapshot.releases[0] ?? null;
 }
+
+export { activityLabel, otherActive };
 
 export function releaseTone(release: Release): Tone {
   switch (release.verdict) {
@@ -118,10 +123,12 @@ export function stepDuration(step: Step, now: Date): string {
 }
 
 /** Second line of each step in the rail panel. */
-export function stepDetail(release: Release, step: Step): string {
+export function stepDetail(release: Release, step: Step, waiting: string | null = null): string {
   switch (step.id) {
-    case "verify":
     case "deploy":
+      if (step.state === "pending" && waiting?.startsWith("esperando")) return waiting;
+      return stepJobNames(release, step.id).join(" · ");
+    case "verify":
       return stepJobNames(release, step.id).join(" · ");
     case "images":
       return "";
@@ -141,7 +148,7 @@ export function headline(release: Release): string {
   return verdictDetail(release) || statusLabel(release);
 }
 
-/** `revertSummary` split for two-line layouts: `vigia reverteu 3 commits` / `agente avisado`. */
+/** `revertSummary` split for two-line layouts: `vigia reverteu no dbolt-deploy · main congelada` / `agente avisado`. */
 export function revertParts(release: Release): { what: string; notice: string } | null {
   const summary = revertSummary(release);
   if (!summary) return null;
@@ -203,11 +210,6 @@ export function recentVerdicts(snapshot: ReleaseSnapshot, except: Release | null
 /** Cancelled runs among the recent ones (superseded by a newer push). */
 export function cancelledCount(snapshot: ReleaseSnapshot): number {
   return snapshot.releases.filter((release) => release.verdict === "cancelled").length;
-}
-
-/** Other runs in flight besides the one in focus, e.g. the next push waiting on the group. */
-export function otherActive(snapshot: ReleaseSnapshot, release: Release): Release[] {
-  return activeReleases(snapshot).filter((other) => other.runId !== release.runId);
 }
 
 /** Watch reversals among the recent runs. */
@@ -283,7 +285,11 @@ export function releaseChip(snapshot: ReleaseSnapshot | null, release: Release, 
   if (queue?.line) lines.push(`Fila: ${queue.line}.`);
   if (queue?.hint) lines.push(queue.hint);
   if (release.failedJob) lines.push(`Job que falhou: ${release.failedJob.name}${release.failedJob.url ? ` (${release.failedJob.url})` : ""}.`);
-  if (release.revert) lines.push(`Reversão do vigia: ${release.revert.commits.join(", ") || "faixa"}${release.revert.commit ? ` no commit ${shortSha(release.revert.commit)}` : ""}.`);
+  const rollback = rollbackLabel(release);
+  if (rollback) {
+    const commit = release.revert?.commit ? ` no commit ${shortSha(release.revert.commit)}` : "";
+    lines.push(`Rollback: ${[`${rollback}${commit}`, freezeLabel(release)].filter(Boolean).join(" · ")}.`);
+  }
   if (release.signals.length > 0) {
     lines.push("Sinais do vigia:");
     for (const signal of release.signals) lines.push(`- ${signal.label} (${signal.source}): ${signal.outcome}${signal.reason ? `, ${signal.reason}` : ""}`);

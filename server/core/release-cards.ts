@@ -14,6 +14,7 @@ import {
   type Release,
   type ReleaseSnapshot,
   type Session,
+  waitingFor,
 } from "./release-status.ts";
 import type { Harness, Logger } from "./types.ts";
 
@@ -87,7 +88,7 @@ export function cardFor(release: Release, snapshot: ReleaseSnapshot, pusherTitle
   const card: ReleaseCard = {
     release: { ...release, jobs: release.jobs.filter((job) => job.step !== null && job.state !== "skipped") },
     pusherTitle,
-    queue: isActive(release) ? queueSummary(snapshot) : null,
+    queue: isActive(release) ? (waitingFor(snapshot, release) ?? queueSummary(snapshot)) : null,
   };
   if (fold.folded?.length) card.folded = fold.folded.map((older) => ({ ...older, jobs: [] }));
   if (fold.foldedInto !== undefined) card.foldedInto = fold.foldedInto;

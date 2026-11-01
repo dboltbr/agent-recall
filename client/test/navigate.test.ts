@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { buildRelease } from "../../shared/release-status.ts";
 import type { ReleaseView } from "../../shared/rpc.ts";
 import { NOW } from "../../core/test/fakes.ts";
-import { finished, minutesAgo, run } from "../../core/test/releases.ts";
+import { released, minutesAgo, run } from "../../core/test/releases.ts";
 import type { Note } from "../../shared/types.ts";
 import { hopToAgent, localAgent, RELEASES_SCREEN, sessionsOfAgent, takeHop, watchLinks } from "../navigate.ts";
 
@@ -17,13 +17,13 @@ function redRelease() {
       conclusion: "failure",
       head_commit: { message: "fix: x\n\nAgent-Session: paseo/srv_X/agent-pusher\n" },
     }),
-    jobs: finished("failure"),
-    note: { release: "release-190", state: "investigating", updatedAt: minutesAgo(1), owner: "paseo/srv_X/agent-gone" } as Note,
+    ...released("failure"),
+    note: { release: "release-190", updatedAt: minutesAgo(1), owner: { harness: "paseo", host: HOST, id: "agent-gone" } } satisfies Note,
     commits: null,
     handoffs: [
-      { role: "investigate", session: { harness: "paseo", host: HOST, id: "agent-inv" }, at: minutesAgo(3) },
-      { role: "fix", session: { harness: "opencode", host: "archdev", id: "ses_fix" }, at: minutesAgo(2) },
-      { role: "remind", session: { harness: "paseo", host: "srv_other", id: "agent-elsewhere" }, at: minutesAgo(1) },
+      { role: "notified", session: { harness: "paseo", host: HOST, id: "agent-notified" }, at: minutesAgo(3) },
+      { role: "notified", session: { harness: "opencode", host: "archdev", id: "ses_fix" }, at: minutesAgo(2) },
+      { role: "owner", session: { harness: "paseo", host: "srv_other", id: "agent-elsewhere" }, at: minutesAgo(1) },
     ],
     now: NOW,
   });
@@ -39,9 +39,9 @@ function viewOf(agents: string[], openCode: Record<string, string> = {}): Releas
 
 test("watchLinks: só agentes Paseo deste host que existem; o agente do cartão conta como existente", () => {
   const release = redRelease();
-  assert.deepEqual(watchLinks(viewOf(["agent-pusher", "agent-inv"]), release), [
+  assert.deepEqual(watchLinks(viewOf(["agent-pusher", "agent-notified"]), release), [
     { agentId: "agent-pusher", label: "push · “Aviso”" },
-    { agentId: "agent-inv", label: "investigação · agente agent-in" },
+    { agentId: "agent-notified", label: "avisada · agente agent-no" },
   ]);
   assert.deepEqual(
     watchLinks(null, release, ["agent-pusher"]).map((link) => link.agentId),
@@ -64,7 +64,7 @@ test("watchLinks: sessão OpenCode que um agente Paseo deste daemon roda vira li
 test("sessionsOfAgent: o agente vale pelo ref paseo e pela sessão OpenCode que roda", () => {
   const release = buildRelease({
     run: run({ run_number: 191, head_commit: { message: "fix: y\n\nAgent-Session: opencode/felipe-win/ses_oc\n" } }),
-    jobs: finished("success"),
+    ...released("success"),
     note: null,
     commits: null,
     handoffs: [],

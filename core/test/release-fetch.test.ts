@@ -4,23 +4,47 @@ import { createReleaseSource, createReleaseTracker, FORCE_THROTTLE_MS, IDLE_EVER
 import type { GitHubJob, GitHubRun } from "../release-status.ts";
 import type { Note } from "../types.ts";
 import { fakeApi, fixedClock, NOW, quietLog, type ApiReply } from "./fakes.ts";
-import { commit, finished, midImages, run, RUNNERS } from "./releases.ts";
+import { commit, jobsInput, released, midImages, run, RUNNERS, watchRun, type Released } from "./releases.ts";
 
 const RUNS = "repos/dboltbr/dbolt/actions/workflows/release.yml/runs?per_page=15&page=1";
+const WATCH_RUNS = (perPage: number) => `repos/dboltbr/dbolt/actions/workflows/release-watch.yml/runs?per_page=${perPage}&page=1`;
 const TAGS = "repos/dboltbr/dbolt/git/matching-refs/tags/release-";
 const RUNNERS_PATH = "orgs/dboltbr/actions/runner-groups/1/runners?per_page=100";
 const jobsPath = (r: GitHubRun) => `repos/dboltbr/dbolt/actions/runs/${r.id}/jobs?per_page=100&page=1`;
 
-function api(state: { runs: GitHubRun[]; jobs: Map<number, GitHubJob[]>; runsEtag?: string; runsStatus?: number }) {
+type State = { runs: GitHubRun[]; jobs: Map<number, GitHubJob[] | Released>; runsEtag?: string; runsStatus?: number };
+
+/** The watch runs of the releases in `state`: one per release whose jobs come with a watch run. */
+function watchRuns(state: State): NonNullable<Released["watch"]>[] {
+  return state.runs.flatMap((r) => {
+    const watch = jobsInput(state.jobs.get(r.run_number) ?? []).watch;
+    return watch ? [watch] : [];
+  });
+}
+
+function api(state: State) {
+  const watchList = (): ApiReply => {
+    const runs = watchRuns(state).map((watch) => watch.run);
+    return { body: { total_count: runs.length, workflow_runs: runs }, etag: `"watch-${runs.map((r) => `${r.id}${r.status}`).join()}"` };
+  };
   const routes: Record<string, ApiReply | (() => ApiReply)> = {
+    [WATCH_RUNS(15)]: watchList,
+    [WATCH_RUNS(100)]: watchList,
     [RUNS]: () => ({ status: state.runsStatus ?? 200, body: { total_count: state.runs.length, workflow_runs: state.runs }, etag: state.runsEtag ?? '"runs-1"' }),
     [TAGS]: { body: [{ ref: "refs/tags/release-170" }, { ref: "refs/tags/release-171" }], etag: '"tags"' },
     [RUNNERS_PATH]: { body: { total_count: 3, runners: RUNNERS }, etag: '"runners"' },
   };
   for (const r of state.runs) {
     routes[jobsPath(r)] = () => {
-      const jobs = state.jobs.get(r.run_number) ?? [];
+      const { jobs } = jobsInput(state.jobs.get(r.run_number) ?? []);
       return { body: { total_count: jobs.length, jobs }, etag: `"jobs-${r.run_number}-${jobs.length}"` };
+    };
+    // The watch run's jobs (fixtures number watch runs by release: one route per possible watch).
+    const watch = jobsInput(state.jobs.get(r.run_number) ?? []).watch ?? watchRun(r.run_number, "success");
+    routes[jobsPath(watch!.run)] = () => {
+      const current = jobsInput(state.jobs.get(r.run_number) ?? []).watch;
+      const jobs = current?.jobs ?? [];
+      return { body: { total_count: jobs.length, jobs }, etag: `"watch-jobs-${r.run_number}-${current?.run.status}"` };
     };
     routes[`repos/dboltbr/dbolt/compare/release-${r.run_number === 172 ? 171 : 170}...${r.head_sha}?per_page=250`] = {
       body: { commits: [commit("c1", "feat: x", "paseo/srv_KkHRlgUn9pdj/agent-1")] },
@@ -34,8 +58,8 @@ function fixture() {
   const active = run({ run_number: 172 });
   const state = {
     runs: [active, done],
-    jobs: new Map<number, GitHubJob[]>([
-      [171, finished("success")],
+    jobs: new Map<number, GitHubJob[] | Released>([
+      [171, released("success", 171)],
       [172, midImages()],
     ]),
     runsEtag: '"runs-1"',
@@ -85,7 +109,7 @@ test("nota da release vira veredito sem esperar a run", async () => {
   const github = api(state);
   const source = createReleaseSource({ fetch: github.fetch, clock: fixedClock(), log: quietLog });
   const notes = new Map<string, Note>([
-    ["tagcommit", { release: 172, state: "reverted", updatedAt: NOW.toISOString(), revert: { commits: ["a"] } } as Note],
+    ["tagcommit", { release: 172, updatedAt: NOW.toISOString(), rollback: { outcome: "reverted", target: "dbolt-deploy", commits: ["a"] } }],
   ]);
   const snapshot = await source.load({ token: "t", notes });
   assert.equal(snapshot.releases[0]!.verdict, "reverted");
@@ -101,17 +125,17 @@ test("handoffs do host entram só na release com incidente; leitor que falha nã
     handoffs: async (release) => {
       asked.push(release);
       if (release !== "release-172") throw new Error("disco");
-      return [{ role: "investigate", session: { harness: "paseo", host: "srv_X", id: "agent-inv" }, at: NOW.toISOString() }];
+      return [{ role: "owner", session: { harness: "paseo", host: "srv_X", id: "agent-owner" }, at: NOW.toISOString() }];
     },
   });
   const notes = new Map<string, Note>([
-    ["tagcommit", { release: 172, state: "red", updatedAt: NOW.toISOString() } as Note],
+    ["tagcommit", { release: 172, updatedAt: NOW.toISOString() }],
   ]);
   const snapshot = await source.load({ token: "t", notes });
   assert.deepEqual(asked, ["release-172"], "sem nota não há o que ler");
   assert.deepEqual(
     snapshot.releases[0]!.handoffs.map((handoff) => [handoff.role, handoff.session.id]),
-    [["investigate", "agent-inv"]],
+    [["owner", "agent-owner"]],
   );
   assert.deepEqual(snapshot.releases[1]!.handoffs, []);
 });
@@ -149,7 +173,7 @@ test("rastreador: a cada tick com run ativa; ocioso só sonda até mudar ou dar 
   assert.equal(seen.length, 2, "ativa: carrega todo tick");
 
   state.runs = [{ ...active, status: "completed", conclusion: "success" }, state.runs[1]!];
-  state.jobs.set(172, finished("success"));
+  state.jobs.set(172, released("success", 172));
   state.runsEtag = '"runs-2"';
   await tick();
   assert.equal(seen.length, 3);
@@ -188,7 +212,7 @@ test("lookup: release fora do snapshot pela página do histórico", async () => 
     "repos/dboltbr/dbolt/actions/workflows/release.yml/runs?per_page=100&page=2": {
       body: { total_count: 172, workflow_runs: [old] },
     },
-    [jobsPath(old)]: { body: { total_count: 1, jobs: finished("success") } },
+    [jobsPath(old)]: { body: { total_count: 1, jobs: released("success").jobs } },
   });
   const fetch: typeof github.fetch = (url, init) =>
     url.includes("per_page=100&page=2") || url.includes(`/runs/${old.id}/`) ? routes.fetch(url, init) : github.fetch(url, init);

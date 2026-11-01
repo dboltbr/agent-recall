@@ -14,14 +14,14 @@ import {
 } from "../release-cards.ts";
 import { buildRelease, buildSnapshot, type Release } from "../release-status.ts";
 import { NOW, quietLog } from "./fakes.ts";
-import { finished, job, midImages, minutesAgo, run, RUNNERS } from "./releases.ts";
+import { released, job, midImages, minutesAgo, run, RUNNERS, type Released } from "./releases.ts";
 
 const HOST = "srv_host";
 const PUSHED = (agent: string) => `test(api): teste do push\n\nAgent-Session: paseo/${HOST}/${agent}\n`;
 
 // Fixture jobs get fresh ids per call: one job list per release number keeps rebuilds identical.
 const MID = new Map<number, ReturnType<typeof midImages>>();
-const FINISHED = new Map<number, ReturnType<typeof finished>>();
+const FINISHED = new Map<number, Released>();
 const once = <T>(cache: Map<number, T>, number: number, make: () => T): T => {
   if (!cache.has(number)) cache.set(number, make());
   return cache.get(number)!;
@@ -46,7 +46,7 @@ function done(number: number, completedMinutesAgo: number, agent = "agent-a"): R
       updated_at: minutesAgo(completedMinutesAgo),
       head_commit: { message: PUSHED(agent) },
     }),
-    jobs: once(FINISHED, number, () => finished("success")),
+    ...once(FINISHED, number, () => released("success", number, completedMinutesAgo)),
     note: null,
     commits: null,
     now: NOW,

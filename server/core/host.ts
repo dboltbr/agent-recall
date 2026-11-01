@@ -34,7 +34,6 @@ export async function loadConfig(path = configPath()): Promise<HostConfig> {
   if (!instance) throw new Error(`${path} sem "instance"`);
   return {
     instance,
-    incidentHost: value["incidentHost"] === true,
     repository: text("repository", "dboltbr/dbolt"),
     notesRef: text("notesRef", "refs/notes/release-watch"),
   };

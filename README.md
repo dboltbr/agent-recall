@@ -7,21 +7,26 @@ Plugin do Paseo e do OpenCode que chama de volta o agente responsável quando um
 
 - A cada 30 s consulta a ref `refs/notes/release-watch` do `dboltbr/dbolt` com `If-None-Match` e o
   token do `gh` do host. Resposta 304 não faz nada.
-- Quando a ref muda, busca as notas (uma por tag `release-<n>`) e lê as sessões
-  `Agent-Session: paseo/<serverId>/<agentId>` | `opencode/<instance>/<ses_…>` da faixa.
-- Só chama sessões do próprio harness e host:
-  - `red` com uma sessão → essa sessão investiga;
-  - `red` com várias → só o host com `incidentHost: true` abre uma sessão nova de investigação;
-  - `reverted` | `fix-pending` → a sessão original do commit culpado recebe a correção;
-  - `fix-pending` há 30 min sem `fix.readyAt` → lembra o owner.
-- O chamado é o prompt
-  `Incidente release-<n>: carregue a skill dbolt-release-incident. Papel: <investigate|fix>. Nota: <json>`.
+- Quando a ref muda, busca as notas (uma por tag `release-<n>`). A nota, gravada pelo vigia, traz
+  o `owner` (a `Agent-Session` do commit mais novo da faixa), os `notified` (as outras sessões da
+  faixa, `paseo/<serverId>/<agentId>` | `opencode/<instance>/<ses_…>`) e o `rollback` que o vigia
+  fez (`reverted` no `dbolt-deploy` ou nas flags da `main`, `blocked`, `failed`, `none`, `pending`).
+- Só chama sessões do próprio harness e host, uma vez por sessão e papel:
+  - `owner` → pedido de ação: motivo do vermelho, desfecho do rollback e congelamento da `main`
+    (corrigir com `Fixes-Release` ou reverter com `Reverts-Release`). Espera o vigia gravar o
+    desfecho do rollback; se ele seguir `pending`, chama aos 10 min do veredito;
+  - `notified` → aviso sem pedido de ação, com o nome do dono e o aviso de que o próximo push de
+    código para a `main` será recusado até a correção verde. Vai na hora;
+  - nota sem `owner` não chama ninguém; nota com `resolvedBy` (correção verde) também não.
+- Os chamados são os prompts
+  `Incidente release-<n>: carregue a skill dbolt-release-incident. Papel: <owner|notified>. … Nota: <json>`.
   No Paseo o prompt entra com `--behavior steer`: agente ocupado recebe o chamado dentro do turno,
   sem perder o que fazia. Prompt recusado → sessão filha no diretório da original (OpenCode; a API de plugin não tem
   fork) ou agente novo no workspace (Paseo). Se tudo falha, grava
   `recall` (`failedAt`, motivo) na nota.
-- Trava `mkdir` atômica por incidente e sessão em `~/.local/state/agent-recall/`: nenhum chamado
-  duplo. Na partida trata só incidentes das últimas 8 h.
+- Trava `mkdir` atômica por incidente, papel e sessão em `~/.local/state/agent-recall/`: nenhum
+  chamado duplo. A cada consulta revê as notas das últimas 8 h, mesmo sem a ref mudar (é assim que
+  o dono de um rollback que ficou `pending` é chamado aos 10 min).
 - Release que falha antes da tag (verificação, build, publicação) não tem nota: o status das
   releases (o mesmo da tela Releases) diz quem fez o push. A sessão do push, se for deste harness e
   host, recebe uma vez por release
@@ -94,14 +99,12 @@ harness a revisão mais nova (`core/self-update.ts`). Falha só vai para o log.
 ```json
 {
   "instance": "archdev",
-  "incidentHost": true,
   "repository": "dboltbr/dbolt",
   "notesRef": "refs/notes/release-watch"
 }
 ```
 
 - `instance`: nome do host nos trailers `opencode/<instance>/…` (o Paseo usa o `server-id`).
-- `incidentHost`: só um host do time fica `true`; é ele que abre a sessão de investigação.
 - `notesRef`: `refs/notes/release-watch-drill` no ensaio.
 
 ## Desenvolvimento

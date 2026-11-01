@@ -21,18 +21,19 @@ import {
   stepOf,
   trippedSignals,
   verdictDetail,
+  type GitHubJob,
   type Release,
 } from "../release-status.ts";
 import type { Note } from "../types.ts";
 import { NOW } from "./fakes.ts";
-import { commit, finished, job, midImages, minutesAgo, run, RUNNERS, VERIFY_DONE } from "./releases.ts";
+import { commit, jobsInput, released, job, midImages, minutesAgo, run, RUNNERS, VERIFY_DONE, type Released } from "./releases.ts";
 
 const later = (minutes: number) => new Date(NOW.getTime() + minutes * 60_000);
 
-function completed(number: number, jobs = finished("success"), note: Note | null = null, partial = {}): Release {
+function completed(number: number, jobs: GitHubJob[] | Released = released("success"), note: Note | null = null, partial = {}): Release {
   return buildRelease({
     run: run({ run_number: number, status: "completed", conclusion: "success", updated_at: minutesAgo(0.5), ...partial }),
-    jobs,
+    ...jobsInput(jobs),
     note,
     commits: null,
     now: NOW,
@@ -42,9 +43,9 @@ function completed(number: number, jobs = finished("success"), note: Note | null
 function redNote(partial: Record<string, unknown> = {}): Note {
   return {
     release: "release-172",
-    state: "red",
     updatedAt: minutesAgo(1),
-    sessions: [{ harness: "opencode", host: "archdev", id: "ses_culprit", commits: ["c0ffee1"] }],
+    owner: { harness: "opencode", host: "archdev", id: "ses_culprit", commits: ["c0ffee1"] },
+    notified: [],
     verdict: {
       verdict: "red",
       missing: [],
@@ -61,10 +62,10 @@ function redNote(partial: Record<string, unknown> = {}): Note {
 
 test("classifyJob: o mapeamento job → etapa do workflow release", () => {
   const cases: Array<[string, string | null]> = [
-    ["trigger", null],
+    ["plan", null],
     ["summary", null],
     ["verify-production / check", "verify"],
-    ["verify-production / qlty", "verify"],
+    ["verify-production / scanners", "verify"],
     ["images-command / changes", null],
     ["images-vms / announcement", null],
     ["images-fs-bridge / build-push", "images"],
@@ -78,8 +79,9 @@ test("classifyJob: o mapeamento job → etapa do workflow release", () => {
     ["marketing / announcement", "deploy"],
     ["infrastructure / check", "deploy"],
     ["mobile / android", "deploy"],
+    ["previous-watch", "deploy"],
     ["release-tag", "tag"],
-    ["watch", "watch"],
+    ["watch", "tag"],
   ];
   for (const [name, step] of cases) assert.equal(classifyJob(name), step, name);
 });
@@ -111,7 +113,7 @@ test("release em andamento: verificação feita, imagens 3/9, resto pendente", (
   assert.equal(images.durationMs, 11.4 * 60_000, "conta até agora");
   assert.equal(pillLabel(release), "#172 27/10 11:24 · imagens 3/9");
   assert.equal(releaseLabel(release), "#172 27/10 11:24");
-  assert.deepEqual(stepJobNames(release, "verify"), ["qlty", "opengrep", "secrets", "check"]);
+  assert.deepEqual(stepJobNames(release, "verify"), ["scanners", "check"]);
   assert.deepEqual(stepJobNames(release, "images").slice(0, 4), ["api", "rtpengine", "fs-bridge", "vms-client-gateway"]);
   assert.ok(Math.abs(progress(release) - (1 + 3 / 9) / 5) < 1e-9);
 });
@@ -159,12 +161,13 @@ test("nova tentativa conta só os jobs executados nela, preservando os reaprovei
   assert.deepEqual(stepJobNames(release, "verify"), ["qlty", "check"]);
 });
 
-test("revertido: nota `reverted` com os commits, sinais disparados primeiro", () => {
-  const note = redNote({ state: "reverted", revert: { commits: ["a", "b", "c"], commit: "r3v", reason: "reverted" } });
-  const release = completed(172, finished("failure"), note);
+test("revertido: rollback `reverted` no dbolt-deploy, main congelada, sinais disparados primeiro", () => {
+  const note = redNote({ rollback: { outcome: "reverted", target: "dbolt-deploy", commit: "r3v", applied: true, commits: ["a", "b", "c"] } });
+  const release = completed(172, released("failure"), note);
   assert.equal(release.verdict, "reverted");
   assert.deepEqual(release.revert, { commits: ["a", "b", "c"], commit: "r3v" });
-  assert.equal(revertSummary(release), "vigia reverteu 3 commits · agente avisado");
+  assert.deepEqual(release.rollback, { outcome: "reverted", target: "dbolt-deploy", frozen: true });
+  assert.equal(revertSummary(release), "vigia reverteu no dbolt-deploy · main congelada · agente avisado");
   assert.deepEqual(
     release.signals.map((signal) => [signal.label, signal.outcome]),
     [
@@ -177,33 +180,41 @@ test("revertido: nota `reverted` com os commits, sinais disparados primeiro", ()
     trippedSignals(release).map((signal) => signal.reason),
     ["errors5xx-ratio"],
   );
-  assert.ok(release.sessions.some((session) => session.id === "ses_culprit"), "as sessões da nota entram");
+  assert.equal(release.sessions.some((session) => session.id === "ses_culprit"), false, "o dono da nota é handoff, não sessão da faixa");
 });
 
-test("revertido também via escalada já revertida ou decisão `revert`; aviso que falhou aparece", () => {
-  const escalated = completed(
+test("revertido: flags na main, aviso que falhou, sem dono e liberado pela correção verde", () => {
+  const flags = completed(
     172,
-    finished("failure"),
-    redNote({ state: "escalated", revert: { reason: "already-reverted", commits: ["a"] }, recall: { reason: "x" } }),
+    released("failure"),
+    redNote({ rollback: { outcome: "reverted", target: "main", commits: ["a"] }, recall: { reason: "x" } }),
   );
-  assert.equal(escalated.verdict, "reverted");
-  assert.equal(revertSummary(escalated), "vigia reverteu 1 commit · aviso ao agente falhou");
-  const decided = completed(172, finished("failure"), redNote({ state: "shipped", decision: { action: "revert", commits: ["a", "b"] } }));
-  assert.equal(decided.verdict, "reverted");
-  assert.deepEqual(decided.revert?.commits, ["a", "b"]);
+  assert.equal(flags.verdict, "reverted");
+  assert.equal(revertSummary(flags), "vigia reverteu as flags na main · main congelada · aviso ao agente falhou");
+  const ownerless = completed(172, released("failure"), redNote({ owner: null, rollback: { outcome: "reverted", target: "dbolt-deploy" }, resolvedBy: "release-173" }));
+  assert.equal(revertSummary(ownerless), "vigia reverteu no dbolt-deploy · sem dono");
+  const drill = completed(172, released("failure"), redNote({ drill: true, rollback: { outcome: "reverted", target: "dbolt-deploy" } }));
+  assert.equal(drill.rollback?.frozen, false, "ensaio não congela");
 });
 
-test("vermelho sem reversão; nota antes do fim da run já dá veredito", () => {
-  const red = completed(172, finished("failure"), redNote({ state: "investigating" }));
+test("vermelho sem reversão: rollback impedido ou falho e main congelada; nota antes do fim da run já dá veredito", () => {
+  const red = completed(172, released("failure"), redNote());
   assert.equal(red.verdict, "red");
+  assert.equal(red.rollback, null);
   assert.equal(verdictDetail(red), "vigia vermelho · 5xx");
-  const live = buildRelease({ run: run({ run_number: 173 }), jobs: finished("success").slice(0, -1), note: redNote(), commits: null, now: NOW });
+  const blocked = completed(172, released("failure"), redNote({ rollback: { outcome: "blocked", target: "dbolt-deploy", reason: "irreversible", findings: [{}] } }));
+  assert.equal(blocked.verdict, "red");
+  assert.equal(blocked.revert, null);
+  assert.equal(verdictDetail(blocked), "vigia vermelho · 5xx · rollback impedido · main congelada");
+  const failed = completed(172, released("failure"), redNote({ rollback: { outcome: "failed", target: "dbolt-deploy" }, resolvedBy: "release-173" }));
+  assert.equal(verdictDetail(failed), "vigia vermelho · 5xx · rollback falhou");
+  const live = buildRelease({ run: run({ run_number: 173 }), jobs: released("success").jobs, note: redNote(), commits: null, now: NOW });
   assert.equal(live.status, "running");
   assert.equal(live.verdict, "red");
 });
 
 test("inconclusivo, cancelado e sem publicação", () => {
-  assert.equal(completed(170, finished("failure"), null, { conclusion: "failure" }).verdict, "inconclusive");
+  assert.equal(completed(170, released("failure"), null, { conclusion: "failure" }).verdict, "inconclusive");
   const cancelled = completed(188, midImages().map((j) => (j.status === "completed" ? j : { ...j, status: "completed", conclusion: "cancelled" })), null, {
     conclusion: "cancelled",
   });
@@ -245,14 +256,14 @@ test("pílula: só a sessão com commit na release ativa ou na última concluíd
   const commits = (session: string) => [commit("c", "x", session)];
   const old = buildRelease({
     run: run({ run_number: 170, status: "completed", conclusion: "success" }),
-    jobs: finished("success"),
+    ...released("success"),
     note: null,
     commits: commits("paseo/srv_X/agent-170"),
     now: NOW,
   });
   const last = buildRelease({
     run: run({ run_number: 171, status: "completed", conclusion: "success", head_commit: null }),
-    jobs: finished("success"),
+    ...released("success"),
     note: null,
     commits: commits("paseo/srv_X/agent-171"),
     now: NOW,
@@ -303,7 +314,7 @@ test("formatação pt-BR de durações e tempo relativo", () => {
   assert.equal(formatDuration(null), "");
   assert.equal(formatAgo(minutesAgo(36), NOW), "há 36 min");
   assert.equal(formatAgo(minutesAgo(150), NOW), "há 2 h");
-  assert.equal(VERIFY_DONE.length, 6);
+  assert.equal(VERIFY_DONE.length, 4);
 });
 
 test("releaseStamp e releaseLabel: hora de São Paulo, virada do dia, sem hora", () => {
@@ -334,28 +345,34 @@ test("releaseStamp sem fuso no runtime: deslocamento fixo UTC−3", async () => 
   }
 });
 
-test("releaseHandoffs: chamados entregues primeiro, depois owner e sessão do fix, sem repetir", () => {
+test("releaseHandoffs: chamados entregues primeiro, depois o dono e os avisados da nota, sem repetir", () => {
   const at = (minutes: number) => minutesAgo(minutes);
-  const note = redNote({ owner: "paseo/srv_X/agent-owner", fix: { session: "opencode/archdev/ses_fix" } });
+  const note = redNote({
+    owner: { harness: "paseo", host: "srv_X", id: "agent-owner" },
+    notified: [
+      { harness: "opencode", host: "archdev", id: "ses_culprit" },
+      { harness: "opencode", host: "archdev", id: "ses_other" },
+    ],
+  });
   const handoffs = releaseHandoffs(note, [
-    { role: "remind", session: { harness: "paseo", host: "srv_X", id: "agent-owner" }, at: at(1) },
-    { role: "investigate", session: { harness: "opencode", host: "archdev", id: "ses_culprit" }, at: at(5) },
+    { role: "owner", session: { harness: "paseo", host: "srv_X", id: "agent-owner" }, at: at(1) },
+    { role: "notified", session: { harness: "opencode", host: "archdev", id: "ses_culprit" }, at: at(5) },
   ]);
   assert.deepEqual(
-    handoffs.map((handoff) => [handoff.role, handoff.session.id]),
+    handoffs.map((handoff) => [handoff.role, handoff.session.id, handoff.at !== null]),
     [
-      ["investigate", "ses_culprit"],
-      ["remind", "agent-owner"],
-      ["fix", "ses_fix"],
+      ["notified", "ses_culprit", true],
+      ["owner", "agent-owner", true],
+      ["notified", "ses_other", false],
     ],
   );
-  assert.deepEqual(releaseHandoffs(null, [{ role: "investigate", session: { harness: "paseo", host: "h", id: "a" }, at: at(1) }]), []);
-  const release = completed(172, finished("failure"), note);
+  assert.deepEqual(releaseHandoffs(null, [{ role: "owner", session: { harness: "paseo", host: "h", id: "a" }, at: at(1) }]), []);
+  const release = completed(172, released("failure"), note);
   assert.deepEqual(
     release.handoffs.map((handoff) => handoff.role),
-    ["owner", "fix"],
+    ["owner", "notified", "notified"],
   );
-  assert.equal(release.sessions.some((session) => session.id === "ses_fix"), false, "handoff não vira sessão do range");
+  assert.equal(release.sessions.some((session) => session.id === "ses_other"), false, "handoff não vira sessão do range");
 });
 
 test("cartão salvo antes de `handoffs` ainda passa no schema", () => {

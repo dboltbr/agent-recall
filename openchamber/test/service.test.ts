@@ -45,7 +45,7 @@ test("gh: login ausente vira erro pt-BR sem vazar saída", async () => {
 });
 
 test("loader: falha das notas mantém as últimas carregadas", async () => {
-  const note = { release: "release-170", state: "reverted", updatedAt: "2026-10-27T12:00:00Z" } as Note;
+  const note: Note = { release: "release-170", updatedAt: "2026-10-27T12:00:00Z" };
   let notesFail = false;
   const seen: number[] = [];
   const warnings: string[] = [];
