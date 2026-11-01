@@ -170,11 +170,9 @@ interface CheckRunsPage {
  */
 export function watchCheckRun(checkRuns: readonly GitHubCheckRun[], watch: Pick<GitHubRun, "id" | "run_started_at">): GitHubCheckRun | null {
   const attemptStart = Date.parse(watch.run_started_at ?? "");
-  const own = checkRuns.filter(
-    (check) =>
-      (check.details_url ?? "").endsWith(`/actions/runs/${watch.id}`) &&
-      !(Date.parse(check.started_at ?? "") < attemptStart),
-  );
+  // Without both times the attempt is unknown: nothing, rather than an older attempt's verdict.
+  const ofAttempt = (check: GitHubCheckRun) => Date.parse(check.started_at ?? "") >= attemptStart;
+  const own = checkRuns.filter((check) => (check.details_url ?? "").endsWith(`/actions/runs/${watch.id}`) && ofAttempt(check));
   return own.sort((a, b) => b.id - a.id)[0] ?? null;
 }
 

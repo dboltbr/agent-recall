@@ -315,7 +315,7 @@ test("progresso do vigia: lido com o run aberto, uma última vez ao fechar, nunc
   state.jobs.set(171, { jobs: released("success", 171).jobs, watch: rerun });
   check = { body: { check_runs: [checkRunOf(open.run, "done", "green", 7)] }, etag: '"check-3"' };
   snapshot = await source.load({ token: "t", notes: NOTES });
-  assert.equal(snapshot.releases[1]!.progress, null, "o veredito da tentativa anterior não é progresso");
+  assert.equal(snapshot.releases[1]!.progress as unknown, null, "o veredito da tentativa anterior não é progresso");
   check = { body: { check_runs: [checkRunOf(open.run, "done", "green", 7), checkRunOf(rerun.run, "deploying", null, 8)] }, etag: '"check-4"' };
   snapshot = await source.load({ token: "t", notes: NOTES });
   assert.equal(asked, 5);
@@ -334,4 +334,6 @@ test("watchCheckRun: o check run do próprio run do vigia; o de outro run nunca"
   assert.equal(watchCheckRun([newer, mine], own), mine, "outro vigia no mesmo commit, mais novo, não conta");
   assert.equal(watchCheckRun([mine, newer], { id: 1, run_started_at: null }), null);
   assert.equal(watchCheckRun([], own), null);
+  assert.equal(watchCheckRun([{ ...mine, started_at: null }], own), null, "sem horário, a tentativa é desconhecida");
+  assert.equal(watchCheckRun([mine], { ...own, run_started_at: null }), null);
 });
