@@ -10757,8 +10757,8 @@ var error43 = () => {
       case "not_multiple_of":
         return `N\xFAmero inv\xE1lido: deve ser m\xFAltiplo de ${issue2.divisor}`;
       case "unrecognized_keys": {
-        const plural2 = issue2.keys.length > 1 ? "s" : "";
-        return `Chave${plural2} inv\xE1lida${plural2}: ${joinValues(issue2.keys, ", ")}`;
+        const plural3 = issue2.keys.length > 1 ? "s" : "";
+        return `Chave${plural3} inv\xE1lida${plural3}: ${joinValues(issue2.keys, ", ")}`;
       }
       case "invalid_key":
         return `Entrada inv\xE1lida n${translateOriginWithArticle(issue2.origin, "definite")}`;
@@ -10902,8 +10902,8 @@ var error44 = () => {
       case "not_multiple_of":
         return `N\xFAmero inv\xE1lido: deve ser m\xFAltiplo de ${issue2.divisor}`;
       case "unrecognized_keys": {
-        const plural2 = issue2.keys.length > 1 ? "s" : "";
-        return `Chave${plural2} inv\xE1lida${plural2}: ${joinValues(issue2.keys, ", ")}`;
+        const plural3 = issue2.keys.length > 1 ? "s" : "";
+        return `Chave${plural3} inv\xE1lida${plural3}: ${joinValues(issue2.keys, ", ")}`;
       }
       case "invalid_key":
         return `Entrada inv\xE1lida n${translateOriginWithArticle(issue2.origin, "definite")}`;
@@ -19838,6 +19838,18 @@ var SignalSchema = external_exports.object({
   outcome: external_exports.string(),
   reason: external_exports.string().nullable()
 });
+var WatchPhaseSchema = external_exports.enum(["deploying", "observing", "done"]);
+var WatchProgressSchema = external_exports.object({
+  phase: WatchPhaseSchema,
+  /** The watch's own verdict (`green`, `red`, `inconclusive`, `pending`), null before the first one. */
+  verdict: external_exports.string().nullable(),
+  /** End of the observation window, once the deployment converged. */
+  windowEndsAt: external_exports.string().nullable(),
+  /** When the watch gives up as inconclusive. */
+  deadline: external_exports.string().nullable(),
+  /** Every source measured so far, red first. */
+  sources: external_exports.array(SignalSchema)
+});
 var HANDOFF_ROLES = ["owner", "notified", "blocked"];
 var HandoffRoleSchema = external_exports.enum(HANDOFF_ROLES);
 var HandoffSchema = external_exports.object({
@@ -19890,6 +19902,8 @@ var ReleaseSchema = external_exports.object({
    * before the field still render.
    */
   handoffs: external_exports.array(HandoffSchema).default([]),
+  /** The watch's live progress (its check run); null before it publishes or for older watches. */
+  progress: WatchProgressSchema.nullable().default(null),
   jobs: external_exports.array(JobSchema)
 });
 var RunnerSchema = external_exports.object({
@@ -19923,8 +19937,12 @@ var SOURCE_LABELS = {
   errors5xx: "5xx",
   sentry: "Sentry",
   deployment: "implanta\xE7\xE3o",
+  signals: "sinais",
   watch: "vigia"
 };
+function sourceLabel(source) {
+  return SOURCE_LABELS[source] ?? (source.startsWith("signal:") ? `sinal ${source.slice("signal:".length)}` : source);
+}
 var DEPLOY_TIERS = /* @__PURE__ */ new Set(["wall", "console", "desktop", "marketing", "infrastructure", "mobile"]);
 function classifyJob(name) {
   const [prefix, rest] = splitJobName(name);
@@ -20045,19 +20063,60 @@ function noteRollback(note) {
     frozen: !note.resolvedBy && note.drill !== true
   };
 }
+function bySeverity(signals) {
+  const rank = (outcome) => outcome === "red" ? 0 : outcome === "green" || outcome === "not-applicable" ? 2 : 1;
+  return signals.sort((a, b) => rank(a.outcome) - rank(b.outcome) || a.source.localeCompare(b.source));
+}
 function noteSignals(note) {
   const sources = record2(record2(note.verdict)?.["sources"]);
   if (!sources) return [];
-  const rank = (outcome) => outcome === "red" ? 0 : outcome === "green" || outcome === "not-applicable" ? 2 : 1;
-  return Object.entries(sources).map(([source, value]) => {
-    const fields = record2(value) ?? {};
-    return {
-      source,
-      label: SOURCE_LABELS[source] ?? source,
-      outcome: typeof fields["outcome"] === "string" ? fields["outcome"] : "unknown",
-      reason: typeof fields["reason"] === "string" ? fields["reason"] : null
-    };
-  }).sort((a, b) => rank(a.outcome) - rank(b.outcome) || a.source.localeCompare(b.source));
+  return bySeverity(
+    Object.entries(sources).map(([source, value]) => {
+      const fields = record2(value) ?? {};
+      return {
+        source,
+        label: sourceLabel(source),
+        outcome: typeof fields["outcome"] === "string" ? fields["outcome"] : "unknown",
+        reason: typeof fields["reason"] === "string" ? fields["reason"] : null
+      };
+    })
+  );
+}
+var CheckSnapshotSchema = external_exports.object({
+  schema: external_exports.literal(1),
+  phase: WatchPhaseSchema,
+  verdict: external_exports.string().nullish(),
+  windowEndsAt: external_exports.string().nullish(),
+  deadline: external_exports.string().nullish(),
+  sources: external_exports.array(external_exports.object({ name: external_exports.string(), outcome: external_exports.string(), reason: external_exports.string().nullish(), issues: external_exports.number().optional() }))
+});
+var plural2 = (count, one, many) => `${count} ${count === 1 ? one : many}`;
+function parseWatchProgress(checkRun) {
+  const block = /```json\n([\s\S]*?)\n```/.exec(checkRun.output?.text ?? "")?.[1];
+  if (!block) return null;
+  let raw;
+  try {
+    raw = JSON.parse(block);
+  } catch {
+    return null;
+  }
+  const parsed = CheckSnapshotSchema.safeParse(raw);
+  if (!parsed.success) return null;
+  const view = parsed.data;
+  return {
+    phase: view.phase,
+    verdict: view.verdict ?? null,
+    windowEndsAt: view.windowEndsAt ?? null,
+    deadline: view.deadline ?? null,
+    sources: bySeverity(
+      view.sources.map((source) => ({
+        source: source.name,
+        label: sourceLabel(source.name),
+        outcome: source.outcome,
+        reason: [source.reason, source.issues !== void 0 ? plural2(source.issues, "issue nova", "issues novas") : null].filter(Boolean).join(" \xB7 ") || null
+      }))
+    )
+  };
 }
 function watchVerdict(input2) {
   if (input2.note) return noteRevert(input2.note) ? "reverted" : "red";
@@ -20145,6 +20204,7 @@ function buildRelease(input2) {
     pusher: pusher ? toSession(pusher) : null,
     sessions,
     handoffs: releaseHandoffs(note, input2.handoffs ?? []),
+    progress: input2.progress ?? null,
     jobs
   };
 }
@@ -20527,6 +20587,7 @@ var IDLE_EVERY_TICKS = 10;
 var FORCE_THROTTLE_MS = 1e4;
 var PARALLEL = 4;
 var DEFAULT_RUNNER_GROUP = 1;
+var WATCH_CHECK = "release-watch";
 var GitHubError = class extends Error {
   status;
   constructor(status, message) {
@@ -20586,6 +20647,13 @@ function notesByRelease(notes) {
   }
   return byName;
 }
+function watchCheckRun(checkRuns, watch) {
+  const attemptStart = Date.parse(watch.run_started_at ?? "");
+  const ofAttempt = (check2) => Date.parse(check2.started_at ?? "") >= attemptStart;
+  const own2 = checkRuns.filter((check2) => (check2.details_url ?? "").endsWith(`/actions/runs/${watch.id}`) && ofAttempt(check2));
+  return own2.sort((a, b) => b.id - a.id)[0] ?? null;
+}
+var attemptKey = (run) => `${run.id}:${run.run_attempt}`;
 function createReleaseSource(options) {
   const repository = options.repository ?? RELEASE_REPOSITORY;
   const workflow = options.workflow ?? RELEASE_WORKFLOW;
@@ -20598,6 +20666,8 @@ function createReleaseSource(options) {
   let runners = [];
   let loadedRuns = null;
   let watchRuns = /* @__PURE__ */ new Map();
+  const progress = /* @__PURE__ */ new Map();
+  const settled = /* @__PURE__ */ new Set();
   const runsPath = (perPage, page = 1, name = workflow) => `repos/${repository}/actions/workflows/${name}.yml/runs?per_page=${perPage}&page=${page}`;
   async function watchPage(perPage, token) {
     const body = await get(runsPath(perPage, 1, watchWorkflow), token);
@@ -20633,14 +20703,32 @@ function createReleaseSource(options) {
     ranges.set(key, commits);
     return commits;
   }
+  async function progressOf(run, releaseSha, token) {
+    const key = attemptKey(run);
+    const known = progress.get(key) ?? null;
+    if (run.status === "completed" && (settled.has(key) || !progress.has(key))) return known;
+    try {
+      const body = await get(`repos/${repository}/commits/${releaseSha}/check-runs?check_name=${WATCH_CHECK}&filter=all&per_page=100`, token);
+      const check2 = watchCheckRun(body.check_runs, run);
+      const next = check2 ? parseWatchProgress(check2) : null;
+      progress.set(key, next);
+      if (run.status === "completed") settled.add(key);
+      return next;
+    } catch (error62) {
+      options.log.warn(`progresso do vigia de ${releaseNameOf(watchRunNumber(run) ?? run.run_number)}: ${describe3(error62)}`);
+      progress.set(key, known);
+      return known;
+    }
+  }
   async function tagList(token) {
     return tagNumbers(await get(`repos/${repository}/git/matching-refs/tags/release-`, token));
   }
   async function build(run, tags, notes, watches, token) {
     const watchRun = watches.get(run.run_number) ?? null;
-    const [jobs, watchJobs, commits] = await Promise.all([
+    const [jobs, watchJobs, watchProgress, commits] = await Promise.all([
       jobsOf(run, token),
       watchRun ? jobsOf(watchRun, token) : Promise.resolve(null),
+      watchRun ? progressOf(watchRun, run.head_sha, token) : Promise.resolve(null),
       commitsOf(run, tags, token).catch((error62) => {
         options.log.warn(`faixa de ${releaseNameOf(run.run_number)}: ${describe3(error62)}`);
         return null;
@@ -20657,6 +20745,7 @@ function createReleaseSource(options) {
       tagged: tags.includes(run.run_number),
       handoffs,
       watch: watchRun && watchJobs ? { run: watchRun, jobs: watchJobs } : null,
+      progress: watchProgress,
       now: options.clock.now()
     });
   }
@@ -20675,6 +20764,13 @@ function createReleaseSource(options) {
       ]);
       loadedRuns = page;
       watchRuns = watches;
+      const listed = new Set([...watches.values()].map(attemptKey));
+      for (const key of progress.keys()) {
+        if (!listed.has(key)) {
+          progress.delete(key);
+          settled.delete(key);
+        }
+      }
       const previous = new Map((snapshot?.releases ?? []).map((release) => [release.runId, release]));
       const releases = await pool(
         page.workflow_runs,
@@ -21274,7 +21370,7 @@ var index_default = {
   // No dispose: the poller and the newest context outlive location eviction (see ./poller.ts).
   setup(ctx) {
     attach(registry2, ctx, {
-      sha: true ? "f6ccc4867f3cd9452fe3490d2957441751f92f44" : "unknown",
+      sha: true ? "df9cfa4239b58609189e2e291dc944cfce146b5e" : "unknown",
       stateDir: stateDirectory(),
       pid: process.pid,
       clock: { now: () => /* @__PURE__ */ new Date() },
