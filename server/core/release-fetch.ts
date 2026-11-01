@@ -164,11 +164,17 @@ interface CheckRunsPage {
 }
 
 /**
- * The watch run's check run: the newest whose details link is that run (a rerun keeps the run id
- * and publishes a new check run). Another run's check run is never this watch's progress.
+ * The watch attempt's check run: the newest whose details link is that run and that started with
+ * this attempt (a rerun keeps the run id and publishes a new one; until it does, the previous
+ * attempt's is not this attempt's progress). Another run's check run never is.
  */
-export function watchCheckRun(checkRuns: readonly GitHubCheckRun[], watchRunId: number): GitHubCheckRun | null {
-  const own = checkRuns.filter((check) => (check.details_url ?? "").endsWith(`/actions/runs/${watchRunId}`));
+export function watchCheckRun(checkRuns: readonly GitHubCheckRun[], watch: Pick<GitHubRun, "id" | "run_started_at">): GitHubCheckRun | null {
+  const attemptStart = Date.parse(watch.run_started_at ?? "");
+  const own = checkRuns.filter(
+    (check) =>
+      (check.details_url ?? "").endsWith(`/actions/runs/${watch.id}`) &&
+      !(Date.parse(check.started_at ?? "") < attemptStart),
+  );
   return own.sort((a, b) => b.id - a.id)[0] ?? null;
 }
 
@@ -245,8 +251,8 @@ export function createReleaseSource(options: ReleaseSourceOptions): ReleaseSourc
     const known = progress.get(key) ?? null;
     if (run.status === "completed" && (settled.has(key) || !progress.has(key))) return known;
     try {
-      const body = await get<CheckRunsPage>(`repos/${repository}/commits/${releaseSha}/check-runs?check_name=${WATCH_CHECK}`, token);
-      const check = watchCheckRun(body.check_runs, run.id);
+      const body = await get<CheckRunsPage>(`repos/${repository}/commits/${releaseSha}/check-runs?check_name=${WATCH_CHECK}&filter=all&per_page=100`, token);
+      const check = watchCheckRun(body.check_runs, run);
       const next = check ? parseWatchProgress(check) : null;
       progress.set(key, next);
       if (run.status === "completed") settled.add(key);

@@ -233,6 +233,7 @@ export interface GitHubJob {
 /** A check run (only the fields read). */
 export interface GitHubCheckRun {
   readonly id: number;
+  readonly started_at?: string | null;
   readonly details_url?: string | null;
   readonly output?: { readonly text?: string | null } | null;
 }
