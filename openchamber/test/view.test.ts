@@ -13,8 +13,11 @@ import {
   releaseColumn,
   revertParts,
   statusLabel,
+  stepDetail,
   visibleBadge,
 } from "../src/ui/view.ts";
+import { buildRelease, stepOf } from "../../core/release-status.ts";
+import { released, run, watchRun } from "../../core/test/releases.ts";
 import { failed, FIXTURE_NOW, fixtureSnapshot, green, inconclusive, reverted, running, waiting } from "./fixture.ts";
 
 test("primaryRelease: ativo primeiro, depois o último veredito", () => {
@@ -92,4 +95,21 @@ test("zod-slim cobre todo builder que o contrato compartilhado usa", async () =>
   const used = new Set(sources.flatMap((source) => [...source.matchAll(/\bz\.([a-zA-Z]+)\(/g)].map((match) => match[1]!)));
   const slim = await import("../scripts/zod-slim.ts");
   for (const builder of used) assert.equal(typeof (slim.z as unknown as Record<string, unknown>)[builder], "function", `z.${builder} falta em zod-slim.ts`);
+});
+
+test("headline e stepDetail: com o vigia publicando, a fase e a contagem regressiva", () => {
+  const release = buildRelease({
+    run: run({ run_number: 172, status: "completed", conclusion: "success" }),
+    jobs: released("success", 172).jobs,
+    watch: watchRun(172, "running"),
+    progress: { phase: "observing", verdict: "pending", windowEndsAt: new Date(FIXTURE_NOW.getTime() + 7 * 60_000).toISOString(), deadline: null, sources: [] },
+    note: null,
+    commits: null,
+    now: FIXTURE_NOW,
+  });
+  assert.equal(headline(release, FIXTURE_NOW), "observando · faltam 7m");
+  assert.equal(stepDetail(release, stepOf(release, "watch"), null, FIXTURE_NOW), "observando · faltam 7m");
+  const old = { ...release, progress: null };
+  assert.equal(stepDetail(old, stepOf(old, "watch"), null, FIXTURE_NOW), "sinais do blast radius → veredito");
+  assert.notEqual(headline(old, FIXTURE_NOW), "observando · faltam 7m");
 });

@@ -13,7 +13,9 @@ import {
   RUNNER_ORG,
   releaseNameOf,
   WATCH_WORKFLOW,
+  parseWatchProgress,
   watchRunNumber,
+  type GitHubCheckRun,
   type GitHubCommit,
   type GitHubJob,
   type GitHubRun,
@@ -21,6 +23,7 @@ import {
   type Handoff,
   type Release,
   type ReleaseSnapshot,
+  type WatchProgress,
 } from "./release-status.ts";
 import type { Clock, Fetch, Logger, Note } from "./types.ts";
 
@@ -36,6 +39,8 @@ export const FORCE_THROTTLE_MS = 10_000;
 const PARALLEL = 4;
 /** GitHub's default runner group: the org's self-hosted runners. */
 const DEFAULT_RUNNER_GROUP = 1;
+/** The check run the watch publishes its progress on, on the release commit (release_watch_check.py). */
+export const WATCH_CHECK = "release-watch";
 
 export class GitHubError extends Error {
   readonly status: number | null;
@@ -154,6 +159,16 @@ interface JobsPage {
   readonly jobs: readonly GitHubJob[];
 }
 
+interface CheckRunsPage {
+  readonly check_runs: readonly GitHubCheckRun[];
+}
+
+/** The watch run's check run: the one whose details link is that run, else the newest. */
+export function watchCheckRun(checkRuns: readonly GitHubCheckRun[], watchRunId: number): GitHubCheckRun | null {
+  const own = checkRuns.filter((check) => (check.details_url ?? "").endsWith(`/actions/runs/${watchRunId}`));
+  return [...(own.length ? own : checkRuns)].sort((a, b) => b.id - a.id)[0] ?? null;
+}
+
 export function createReleaseSource(options: ReleaseSourceOptions): ReleaseSource {
   const repository = options.repository ?? RELEASE_REPOSITORY;
   const workflow = options.workflow ?? RELEASE_WORKFLOW;
@@ -169,6 +184,9 @@ export function createReleaseSource(options: ReleaseSourceOptions): ReleaseSourc
   let loadedRuns: unknown = null;
   /** Watch runs of the last load by release number. */
   let watchRuns = new Map<number, GitHubRun>();
+  /** Progress by watch run id, read while the run is open; `settled` ones had their last read after it closed. */
+  const progress = new Map<number, WatchProgress | null>();
+  const settled = new Set<number>();
 
   const runsPath = (perPage: number, page = 1, name = workflow) =>
     `repos/${repository}/actions/workflows/${name}.yml/runs?per_page=${perPage}&page=${page}`;
@@ -211,6 +229,27 @@ export function createReleaseSource(options: ReleaseSourceOptions): ReleaseSourc
     return commits;
   }
 
+  /**
+   * The open watch's check run, one conditional GET per load (304 while it does not move). A run
+   * seen open gets one last read after it closes; a run never seen open costs nothing.
+   */
+  async function progressOf(run: GitHubRun, token: string): Promise<WatchProgress | null> {
+    const known = progress.get(run.id) ?? null;
+    if (run.status === "completed" && (settled.has(run.id) || !progress.has(run.id))) return known;
+    try {
+      const body = await get<CheckRunsPage>(`repos/${repository}/commits/${run.head_sha}/check-runs?check_name=${WATCH_CHECK}`, token);
+      const check = watchCheckRun(body.check_runs, run.id);
+      const next = check ? parseWatchProgress(check) : null;
+      progress.set(run.id, next);
+      if (run.status === "completed") settled.add(run.id);
+      return next;
+    } catch (error) {
+      options.log.warn(`progresso do vigia de ${releaseNameOf(watchRunNumber(run) ?? run.run_number)}: ${describe(error)}`);
+      progress.set(run.id, known);
+      return known;
+    }
+  }
+
   async function tagList(token: string): Promise<number[]> {
     return tagNumbers(await get<{ ref?: string }[]>(`repos/${repository}/git/matching-refs/tags/release-`, token));
   }
@@ -223,9 +262,10 @@ export function createReleaseSource(options: ReleaseSourceOptions): ReleaseSourc
     token: string,
   ): Promise<Release> {
     const watchRun = watches.get(run.run_number) ?? null;
-    const [jobs, watchJobs, commits] = await Promise.all([
+    const [jobs, watchJobs, watchProgress, commits] = await Promise.all([
       jobsOf(run, token),
       watchRun ? jobsOf(watchRun, token) : Promise.resolve(null),
+      watchRun ? progressOf(watchRun, token) : Promise.resolve(null),
       commitsOf(run, tags, token).catch((error) => {
         options.log.warn(`faixa de ${releaseNameOf(run.run_number)}: ${describe(error)}`);
         return null;
@@ -242,6 +282,7 @@ export function createReleaseSource(options: ReleaseSourceOptions): ReleaseSourc
       tagged: tags.includes(run.run_number),
       handoffs,
       watch: watchRun && watchJobs ? { run: watchRun, jobs: watchJobs } : null,
+      progress: watchProgress,
       now: options.clock.now(),
     });
   }
@@ -262,6 +303,14 @@ export function createReleaseSource(options: ReleaseSourceOptions): ReleaseSourc
       ]);
       loadedRuns = page;
       watchRuns = watches;
+      // Progress of watch runs that left the page is never drawn again.
+      const listed = new Set([...watches.values()].map((watch) => watch.id));
+      for (const id of progress.keys()) {
+        if (!listed.has(id)) {
+          progress.delete(id);
+          settled.delete(id);
+        }
+      }
       const previous = new Map((snapshot?.releases ?? []).map((release) => [release.runId, release]));
       const releases = await pool(page.workflow_runs, (run) =>
         build(run, tags, notes, watches, input.token).catch((error) => {

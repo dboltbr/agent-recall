@@ -15,6 +15,7 @@ import {
   STEP_LABELS,
   stepJobNames,
   VERDICT_LABELS,
+  watchPhaseLabel,
   type HandoffRole,
   type Job,
   type Release,
@@ -129,7 +130,7 @@ function jobShortName(name: string): string {
 }
 
 /** Second line of a step in the vertical list (images draw chips instead). */
-export function stepDetail(release: Release, step: Step, waiting: string | null = null): string {
+export function stepDetail(release: Release, step: Step, waiting: string | null = null, now: Date = new Date()): string {
   const names = stepJobNames(release, step.id);
   switch (step.id) {
     case "verify":
@@ -145,7 +146,7 @@ export function stepDetail(release: Release, step: Step, waiting: string | null 
     case "watch":
       if (!isActive(release) && release.verdict === "reverted") return revertSummary(release) ?? "";
       if (!isActive(release) && release.verdict === "green") return "sem regressão";
-      return "sinais do blast radius → veredito";
+      return watchPhaseLabel(release, now) ?? "sinais do blast radius → veredito";
   }
 }
 
@@ -164,7 +165,7 @@ export function pipeMeta(release: Release, step: Step, now: Date): string {
       return release.tag ?? release.name;
     case "watch":
       if (!isActive(release) && release.verdict) return VERDICT_LABELS[release.verdict];
-      return step.state === "running" ? short : "";
+      return step.state === "running" ? (watchPhaseLabel(release, now, true) ?? short) : "";
     default:
       if (step.state === "pending") return "";
       return isActive(release) ? formatDuration(duration) : short;
@@ -281,11 +282,18 @@ export function signalText(signal: Signal): string {
   return signal.reason ? `${signal.label} · ${signal.reason}` : signal.label;
 }
 
-export function signalOutcome(signal: Signal): { label: string; tone: Tone } {
-  if (signal.outcome === "red") return { label: "acima", tone: "bad" };
+/** The live sources of the open watch (its check run), red first; empty once the release ended. */
+export function liveSources(release: Release): Signal[] {
+  return isActive(release) ? (release.progress?.sources ?? []) : [];
+}
+
+/** `live`: a source of the open watch, still being measured (`medindo`), red as `vermelho`. */
+export function signalOutcome(signal: Signal, live = false): { label: string; tone: Tone } {
+  if (signal.outcome === "red") return { label: live ? "vermelho" : "acima", tone: "bad" };
   if (signal.outcome === "green") return { label: "ok", tone: "ok" };
   if (signal.outcome === "not-applicable") return { label: "n/a", tone: "muted" };
-  return { label: signal.outcome === "pending" ? "pendente" : signal.outcome, tone: "muted" };
+  if (signal.outcome === "pending") return live ? { label: "medindo", tone: "run" } : { label: "pendente", tone: "muted" };
+  return { label: signal.outcome, tone: "muted" };
 }
 
 /** The "sinais" cell of the verdict table: what the vigia saw, in the verdict's tone. */

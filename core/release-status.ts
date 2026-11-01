@@ -78,6 +78,28 @@ export const SignalSchema = z.object({
 });
 export type Signal = z.infer<typeof SignalSchema>;
 
+/**
+ * Where the open watch is, from the check run `release-watch` it publishes on the release commit
+ * (`scripts/release_watch_check.py` of dboltbr/dbolt): deploying (the deployment has not
+ * converged), observing (the 15 min window runs) or done (the verdict is out; the run may still be
+ * rolling back).
+ */
+export const WatchPhaseSchema = z.enum(["deploying", "observing", "done"]);
+export type WatchPhase = z.infer<typeof WatchPhaseSchema>;
+
+export const WatchProgressSchema = z.object({
+  phase: WatchPhaseSchema,
+  /** The watch's own verdict (`green`, `red`, `inconclusive`, `pending`), null before the first one. */
+  verdict: z.string().nullable(),
+  /** End of the observation window, once the deployment converged. */
+  windowEndsAt: z.string().nullable(),
+  /** When the watch gives up as inconclusive. */
+  deadline: z.string().nullable(),
+  /** Every source measured so far, red first. */
+  sources: z.array(SignalSchema),
+});
+export type WatchProgress = z.infer<typeof WatchProgressSchema>;
+
 export const HANDOFF_ROLES = ["owner", "notified", "blocked"] as const;
 export const HandoffRoleSchema = z.enum(HANDOFF_ROLES);
 export type HandoffRole = z.infer<typeof HandoffRoleSchema>;
@@ -138,6 +160,8 @@ export const ReleaseSchema = z.object({
    * before the field still render.
    */
   handoffs: z.array(HandoffSchema).default([]),
+  /** The watch's live progress (its check run); null before it publishes or for older watches. */
+  progress: WatchProgressSchema.nullable().default(null),
   jobs: z.array(JobSchema),
 });
 export type Release = z.infer<typeof ReleaseSchema>;
@@ -206,6 +230,13 @@ export interface GitHubJob {
   readonly html_url?: string | null;
 }
 
+/** A check run (only the fields read). */
+export interface GitHubCheckRun {
+  readonly id: number;
+  readonly details_url?: string | null;
+  readonly output?: { readonly text?: string | null } | null;
+}
+
 export interface GitHubRunner {
   readonly id: number;
   readonly name: string;
@@ -249,8 +280,14 @@ export const SOURCE_LABELS: Readonly<Record<string, string>> = {
   errors5xx: "5xx",
   sentry: "Sentry",
   deployment: "implantação",
+  signals: "sinais",
   watch: "vigia",
 };
+
+/** `sentry` → `Sentry`; a blast-radius signal `signal:telemetry/api-issues` → `sinal telemetry/api-issues`. */
+export function sourceLabel(source: string): string {
+  return SOURCE_LABELS[source] ?? (source.startsWith("signal:") ? `sinal ${source.slice("signal:".length)}` : source);
+}
 
 // ── Job → step ──────────────────────────────────────────────────────────────────────────────
 
@@ -413,22 +450,74 @@ export function noteRollback(note: Note): Release["rollback"] {
   };
 }
 
+/** Red first, then what is still open, then the settled ones; by source within each. */
+function bySeverity(signals: Signal[]): Signal[] {
+  const rank = (outcome: string) => (outcome === "red" ? 0 : outcome === "green" || outcome === "not-applicable" ? 2 : 1);
+  return signals.sort((a, b) => rank(a.outcome) - rank(b.outcome) || a.source.localeCompare(b.source));
+}
+
 /** Health sources of the note's verdict (`verdict.sources`), red first. */
 export function noteSignals(note: Note): Signal[] {
   const sources = record(record(note.verdict)?.["sources"]);
   if (!sources) return [];
-  const rank = (outcome: string) => (outcome === "red" ? 0 : outcome === "green" || outcome === "not-applicable" ? 2 : 1);
-  return Object.entries(sources)
-    .map(([source, value]) => {
+  return bySeverity(
+    Object.entries(sources).map(([source, value]) => {
       const fields = record(value) ?? {};
       return {
         source,
-        label: SOURCE_LABELS[source] ?? source,
+        label: sourceLabel(source),
         outcome: typeof fields["outcome"] === "string" ? (fields["outcome"] as string) : "unknown",
         reason: typeof fields["reason"] === "string" ? (fields["reason"] as string) : null,
       };
-    })
-    .sort((a, b) => rank(a.outcome) - rank(b.outcome) || a.source.localeCompare(b.source));
+    }),
+  );
+}
+
+/** The check run's snapshot (`schema` 1); unknown fields and future schemas are ignored. */
+const CheckSnapshotSchema = z.object({
+  schema: z.literal(1),
+  phase: WatchPhaseSchema,
+  verdict: z.string().nullish(),
+  windowEndsAt: z.string().nullish(),
+  deadline: z.string().nullish(),
+  sources: z.array(z.object({ name: z.string(), outcome: z.string(), reason: z.string().nullish(), issues: z.number().optional() })),
+});
+
+const plural = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`;
+
+/**
+ * The watch's progress from its check run: the fenced JSON block of `output.text`. Null for a
+ * check run without one, or with a schema this plugin does not read.
+ */
+export function parseWatchProgress(checkRun: GitHubCheckRun): WatchProgress | null {
+  const block = /```json\n([\s\S]*?)\n```/.exec(checkRun.output?.text ?? "")?.[1];
+  if (!block) return null;
+  let raw: unknown;
+  try {
+    raw = JSON.parse(block);
+  } catch {
+    return null;
+  }
+  const parsed = CheckSnapshotSchema.safeParse(raw);
+  if (!parsed.success) return null;
+  const view = parsed.data;
+  return {
+    phase: view.phase,
+    verdict: view.verdict ?? null,
+    windowEndsAt: view.windowEndsAt ?? null,
+    deadline: view.deadline ?? null,
+    sources: bySeverity(
+      view.sources.map((source) => ({
+        source: source.name,
+        label: sourceLabel(source.name),
+        outcome: source.outcome,
+        reason:
+          [source.reason, source.issues !== undefined ? plural(source.issues, "issue nova", "issues novas") : null]
+            .filter(Boolean)
+            .join(" · ") || null,
+      })),
+    ),
+  };
 }
 
 export interface VerdictInput {
@@ -487,6 +576,8 @@ export interface ReleaseInput {
   readonly handoffs?: readonly Handoff[];
   /** The `watch release-<n>` run of release-watch.yml and its jobs, once dispatched and listed. */
   readonly watch?: { readonly run: GitHubRun; readonly jobs: readonly GitHubJob[] } | null;
+  /** The watch run's progress (`parseWatchProgress` of its check run), when read. */
+  readonly progress?: WatchProgress | null;
   readonly now: Date;
 }
 
@@ -569,6 +660,7 @@ export function buildRelease(input: ReleaseInput): Release {
     pusher: pusher ? toSession(pusher) : null,
     sessions,
     handoffs: releaseHandoffs(note, input.handoffs ?? []),
+    progress: input.progress ?? null,
     jobs,
   };
 }
@@ -680,10 +772,32 @@ export function waitingFor(snapshot: ReleaseSnapshot, release: Release): string 
   return null;
 }
 
+const WATCH_VERDICT_LABELS: Readonly<Record<string, string>> = { green: "verde", red: "vermelho", inconclusive: "inconclusivo" };
+
+/**
+ * The open watch's phase from its progress, pt-BR: `implantando`, `observando · faltam 7m`,
+ * `observando · janela fechada`, `veredito vermelho` (the run still responds). `short` drops the
+ * words a pipe node has no room for (`faltam 7m`, `observando`). Null without progress or once the
+ * release ended.
+ */
+export function watchPhaseLabel(release: Release, now: Date, short = false): string | null {
+  const progress = release.progress;
+  if (!progress || !isActive(release)) return null;
+  if (progress.phase === "deploying") return "implantando";
+  if (progress.phase === "done") {
+    const word = WATCH_VERDICT_LABELS[progress.verdict ?? ""] ?? progress.verdict ?? "pronto";
+    return short ? word : `veredito ${word}`;
+  }
+  const ends = time(progress.windowEndsAt);
+  if (ends === null || ends <= now.getTime()) return short ? "observando" : ends === null ? "observando" : "observando · janela fechada";
+  const left = `faltam ${formatShortDuration(ends - now.getTime())}`;
+  return short ? left : `observando · ${left}`;
+}
+
 /** One line for a release in the "também em andamento" list: `imagens 3/9`, `vigia aberto`, `na fila · atrás de #348`. */
-export function activityLabel(snapshot: ReleaseSnapshot, release: Release): string {
+export function activityLabel(snapshot: ReleaseSnapshot, release: Release, now: Date = new Date()): string {
   const phase = releasePhase(release);
-  if (phase === "watch") return "vigia aberto";
+  if (phase === "watch") return watchPhaseLabel(release, now) ?? "vigia aberto";
   const step = release.current ? stepOf(release, release.current) : null;
   // A job running says more than the wait ahead (`verificação` before `esperando o vigia de #347`).
   const moving = phase === "pipeline" && release.jobs.some((job) => job.state === "running");
@@ -795,9 +909,14 @@ export function stepLabel(step: Step): string {
   return step.total !== null && step.total > 0 ? `${label} ${step.done ?? 0}/${step.total}` : label;
 }
 
-/** Composer pill text: `#172 27/10 11:24 · imagens 3/9` while active, `#172 27/10 11:24 · verde` after. */
-export function pillLabel(release: Release): string {
+/**
+ * Composer pill text: `#172 27/10 11:24 · imagens 3/9` while active, `#172 27/10 11:24 · observando ·
+ * faltam 7m` while the watch reports, `#172 27/10 11:24 · verde` after.
+ */
+export function pillLabel(release: Release, now: Date = new Date()): string {
   if (isActive(release)) {
+    const watching = release.current === "watch" ? watchPhaseLabel(release, now) : null;
+    if (watching) return `${releaseLabel(release)} · ${watching}`;
     const step = release.current ? stepOf(release, release.current) : null;
     return step ? `${releaseLabel(release)} · ${stepLabel(step)}` : releaseLabel(release);
   }

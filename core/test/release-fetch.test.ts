@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createReleaseSource, createReleaseTracker, FORCE_THROTTLE_MS, IDLE_EVERY_TICKS, previousTag, tagNumbers } from "../release-fetch.ts";
+import {
+  createReleaseSource,
+  createReleaseTracker,
+  FORCE_THROTTLE_MS,
+  IDLE_EVERY_TICKS,
+  previousTag,
+  tagNumbers,
+  WATCH_CHECK,
+  watchCheckRun,
+} from "../release-fetch.ts";
 import { WATCH_DISPATCH_GRACE_MS, type GitHubJob, type GitHubRun } from "../release-status.ts";
 import type { Note } from "../types.ts";
 import { fakeApi, fixedClock, NOW, quietLog, type ApiReply } from "./fakes.ts";
@@ -243,4 +252,69 @@ test("lookup: release fora do snapshot pela página do histórico", async () => 
   assert.equal((await source.lookup({ token: "t", notes: NOTES, number: 171 }))?.verdict, "green");
   assert.equal((await source.lookup({ token: "t", notes: NOTES, number: 60 }))?.number, 60);
   assert.equal(await source.lookup({ token: "t", notes: NOTES, number: 999 }), null);
+});
+
+/** The check run `release-watch` as the watch publishes it, linked to its watch run. */
+function checkRunOf(watch: GitHubRun, phase: string, verdict: string | null, id = 7) {
+  const view = { schema: 1, phase, verdict, sources: [{ name: "deployment", outcome: phase === "deploying" ? "pending" : "green" }] };
+  return { id, details_url: watch.html_url, output: { text: "```json\n" + JSON.stringify(view) + "\n```" } };
+}
+
+test("progresso do vigia: lido com o run aberto, uma última vez ao fechar, nunca de vigia que não vimos aberto", async () => {
+  const { state } = fixture();
+  const open = watchRun(171, "running")!;
+  state.jobs.set(171, { jobs: released("success", 171).jobs, watch: open });
+  const checks = `repos/dboltbr/dbolt/commits/${open.run.head_sha}/check-runs?check_name=${WATCH_CHECK}`;
+  let check: { status?: number; body: unknown; etag: string } = {
+    body: { check_runs: [checkRunOf(open.run, "observing", "pending")] },
+    etag: '"check-1"',
+  };
+  const github = api(state);
+  const fetch: typeof github.fetch = async (url, init) => {
+    if (!url.endsWith(checks)) return github.fetch(url, init);
+    const ifNoneMatch = ((init?.headers ?? {}) as Record<string, string>)["If-None-Match"];
+    if (check.status) return new Response(null, { status: check.status });
+    return ifNoneMatch === check.etag ? new Response(null, { status: 304 }) : new Response(JSON.stringify(check.body), { status: 200, headers: { etag: check.etag } });
+  };
+  let asked = 0;
+  const counting: typeof fetch = async (url, init) => {
+    if (url.endsWith(checks)) asked++;
+    return fetch(url, init);
+  };
+  const source = createReleaseSource({ fetch: counting, clock: fixedClock(), log: quietLog });
+  let snapshot = await source.load({ token: "t", notes: NOTES });
+  assert.equal(snapshot.releases[1]!.progress?.phase, "observing");
+  assert.deepEqual(snapshot.releases[0]!.progress, null, "172 ainda não tem vigia");
+
+  // A failed read keeps what was seen.
+  check = { ...check, status: 502 };
+  snapshot = await source.load({ token: "t", notes: NOTES });
+  assert.equal(snapshot.releases[1]!.progress?.phase, "observing");
+
+  // The watch run closes: one last read brings the verdict, then nothing more.
+  const closed = { ...open, run: { ...open.run, status: "completed", conclusion: "success" } };
+  state.jobs.set(171, { jobs: released("success", 171).jobs, watch: closed });
+  check = { body: { check_runs: [checkRunOf(open.run, "done", "green")] }, etag: '"check-2"' };
+  assert.equal(asked, 2);
+  // Never seen open by this source: a closed watch costs no read.
+  await createReleaseSource({ fetch: counting, clock: fixedClock(), log: quietLog }).load({ token: "t", notes: NOTES });
+  assert.equal(asked, 2);
+
+  snapshot = await source.load({ token: "t", notes: NOTES });
+  assert.equal(snapshot.releases[1]!.status, "completed");
+  assert.deepEqual([snapshot.releases[1]!.progress?.phase, snapshot.releases[1]!.progress?.verdict], ["done", "green"]);
+  assert.equal(asked, 3);
+  snapshot = await source.load({ token: "t", notes: NOTES });
+  assert.equal(asked, 3, "depois da última leitura, nada mais é pedido");
+  assert.equal(snapshot.releases[1]!.progress?.verdict, "green");
+});
+
+test("watchCheckRun: o check run do próprio run do vigia, senão o mais novo", () => {
+  const own = watchRun(171, "running")!.run;
+  const other = watchRun(170, "success")!.run;
+  const mine = checkRunOf(own, "observing", null, 3);
+  const newer = checkRunOf(other, "done", "green", 9);
+  assert.equal(watchCheckRun([newer, mine], own.id), mine);
+  assert.equal(watchCheckRun([mine, newer], 1), newer);
+  assert.equal(watchCheckRun([], own.id), null);
 });

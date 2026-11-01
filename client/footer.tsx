@@ -4,7 +4,7 @@
 import type { PluginPopoverProps, PluginSidebarItemProps } from "@getpaseo/plugin/client";
 import { SidebarRow } from "@getpaseo/plugin/client/ui";
 import { watchTone } from "../shared/release-copy.ts";
-import { footerRelease, isActive, otherActive, releaseLabel, type Release } from "../shared/release-status.ts";
+import { footerRelease, isActive, otherActive, releaseLabel, watchPhaseLabel, type Release } from "../shared/release-status.ts";
 import type { ReleaseView } from "../shared/rpc.ts";
 import { useNow, useReleaseState } from "./data.ts";
 import { SegBar } from "./kit.tsx";
@@ -42,9 +42,12 @@ export function ReleaseFooterItem({ theme, currentScreen, openScreen, openPopove
   if (!release) {
     return <SidebarRow icon="Rocket" label="Releases" active={onScreen} onPress={() => openScreen({ screenId: RELEASES_SCREEN })} />;
   }
+  // `#356 01/11 14:02 · faltam 7m`: the open watch's phase, short.
+  const phase = watchPhaseLabel(release, now, true);
+  const label = phase ? `${releaseLabel(release)} · ${phase}` : releaseLabel(release);
   return (
     <SidebarRow
-      label={others ? `${releaseLabel(release)} +${others}` : releaseLabel(release)}
+      label={others ? `${label} +${others}` : label}
       active={onScreen}
       onPress={() => openPopover(FooterPopover)}
       trailing={<SegBar theme={theme} steps={release.steps} watchTone={isActive(release) ? null : watchTone(release)} />}

@@ -24,6 +24,7 @@ import {
   trippedSignals,
   VERDICT_LABELS,
   verdictDetail,
+  watchPhaseLabel,
   type Job,
   type Release,
   type ReleaseSnapshot,
@@ -123,7 +124,7 @@ export function stepDuration(step: Step, now: Date): string {
 }
 
 /** Second line of each step in the rail panel. */
-export function stepDetail(release: Release, step: Step, waiting: string | null = null): string {
+export function stepDetail(release: Release, step: Step, waiting: string | null = null, now: Date = new Date()): string {
   switch (step.id) {
     case "deploy":
       if (step.state === "pending" && waiting?.startsWith("esperando")) return waiting;
@@ -135,13 +136,16 @@ export function stepDetail(release: Release, step: Step, waiting: string | null 
     case "tag":
       return release.tag ?? release.name;
     case "watch":
-      return "sinais do blast radius → veredito";
+      return watchPhaseLabel(release, now) ?? "sinais do blast radius → veredito";
   }
 }
 
 /** Status-strip and history copy: the running step while active, the verdict detail after. */
-export function headline(release: Release): string {
+export function headline(release: Release, now: Date = new Date()): string {
   if (isActive(release)) {
+    // `observando · faltam 7m` while the watch reports its progress.
+    const watching = release.current === "watch" ? watchPhaseLabel(release, now) : null;
+    if (watching) return watching;
     const step = currentStep(release);
     return step ? stepLabel(step) : statusLabel(release);
   }

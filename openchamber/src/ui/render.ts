@@ -9,13 +9,14 @@ import {
   releaseLabel,
   STEP_LABELS,
   stepLabel,
-  trippedSignals,
   waitingFor,
   type Job,
   type Release,
   type ReleaseSnapshot,
+  type Signal,
   type Step,
 } from "../../../core/release-status.ts";
+import { liveSources, signalOutcome } from "../../../core/release-copy.ts";
 import { h, icon, ring, spinner, type IconName } from "./dom.ts";
 import type { WatchLink } from "./sessions.ts";
 import {
@@ -179,7 +180,7 @@ export function stepsList(snapshot: ReleaseSnapshot, release: Release, now: Date
   const queue = queueView(snapshot);
   for (const step of release.steps) {
     const detail = h("div", { class: "sd" });
-    const text = stepDetail(release, step, waitingFor(snapshot, release));
+    const text = stepDetail(release, step, waitingFor(snapshot, release), now);
     if (step.id === "tag") detail.append(h("span", { class: "mono" }, text));
     else if (text) detail.append(text);
     if (step.id === "images" && step.state !== "pending" && step.state !== "skipped") {
@@ -188,6 +189,8 @@ export function stepsList(snapshot: ReleaseSnapshot, release: Release, now: Date
       if (step.state === "running" && queue.line) detail.append(h("div", { class: "note tx-warn" }, icon("clock", 12), queue.line));
     }
     if (step.failedJob) detail.append(h("div", { class: "note tx-bad" }, icon("x", 12), `${step.failedJob} falhou`));
+    const live = step.id === "watch" ? signalRows(liveSources(release), true) : null;
+    if (live) detail.append(live);
     const buttons = step.id === "watch" ? watchButtons(watch) : null;
     if (buttons) detail.append(buttons);
     const name = h("div", { class: "sn" }, STEP_LABELS[step.id]);
@@ -231,18 +234,27 @@ export function outcomeBanner(release: Release, actions: Actions): HTMLElement |
 }
 
 export function signalsList(release: Release): HTMLElement | null {
-  if (release.signals.length === 0) return null;
-  const tripped = new Set(trippedSignals(release));
+  return signalRows(release.signals);
+}
+
+/** One row per health source; `live`: the open watch's sources, still being measured (a spinner). */
+export function signalRows(signals: readonly Signal[], live = false): HTMLElement | null {
+  if (signals.length === 0) return null;
+  const mark = (signal: Signal) => {
+    if (signal.outcome === "red") return icon("alert", 13, "t-warn");
+    if (live && signal.outcome === "pending") return spinner(12);
+    return icon("check", 13, signal.outcome === "green" ? "t-ok" : "t-mut", 2.5);
+  };
   return h(
     "div",
     null,
-    ...release.signals.map((signal) =>
+    ...signals.map((signal) =>
       h(
         "div",
         { class: "sig" },
-        tripped.has(signal) ? icon("alert", 13, "t-warn") : icon("check", 13, signal.outcome === "green" ? "t-ok" : "t-mut", 2.5),
+        mark(signal),
         h("span", { class: "ellipsis", title: signal.reason ?? "" }, h("b", null, signal.label), signal.reason ? ` · ${signal.reason}` : ""),
-        h("span", null, signal.outcome),
+        h("span", null, live ? signalOutcome(signal, true).label : signal.outcome),
       ),
     ),
   );

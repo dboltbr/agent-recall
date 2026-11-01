@@ -39,7 +39,7 @@ import type { ReleaseView } from "../shared/rpc.ts";
 import { refreshReleases, retryReleases, useNow, useReleaseState } from "./data.ts";
 import { Badge, LinkText, MONO, PressText, Sha, Tint, toneColor } from "./kit.tsx";
 import { takeHop, watchLinks, type OpenAgent } from "./navigate.ts";
-import { CommitLine, Pipe, PusherLine, QueueLine, ReleaseHeader, RunnerQueue, SectionLabel, Signals, Spin } from "./release-parts.tsx";
+import { CommitLine, LiveWatch, Pipe, PusherLine, QueueLine, ReleaseHeader, RunnerQueue, SectionLabel, Signals, Spin } from "./release-parts.tsx";
 import { pusherTitle, VerdictBanner } from "./release-popover.tsx";
 
 const BADGE_ICONS: Record<string, string | undefined> = { ok: "Check", bad: "X", warn: "Undo2", muted: "CircleHelp" };
@@ -202,6 +202,7 @@ function RunPanel({
           </View>
         </>
       ) : null}
+      {active ? <LiveWatch theme={theme} release={release} now={now} /> : null}
       <VerdictBanner theme={theme} release={release} />
       {release.verdict === "reverted" || release.verdict === "red" ? <Signals theme={theme} release={release} /> : null}
       <View style={{ flexDirection: "row", gap: 14, marginTop: 12 }}>

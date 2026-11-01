@@ -22,6 +22,7 @@ import {
   QueueLine,
   ReleaseHeader,
   ReleaseLine,
+  LiveWatch,
   Signals,
   StepList,
   SupersededLine,
@@ -111,6 +112,7 @@ function ReleaseDetails({
       </View>
       {active && images?.state === "running" ? <ImageChips theme={theme} release={release} /> : null}
       {active && queue ? <QueueLine theme={theme} text={queue} /> : null}
+      {active && !steps ? <LiveWatch theme={theme} release={release} now={now} /> : null}
       <VerdictBanner theme={theme} release={release} />
       {release.verdict === "reverted" || release.verdict === "red" ? <Signals theme={theme} release={release} /> : null}
       {steps ? (

@@ -64,7 +64,7 @@ function strip(release: Release, now: Date, onOpen: () => void, onLink: (url: st
         "div",
         { class: "ws-row" },
         h("span", { class: "t" }, releaseLabel(release)),
-        h("span", { class: "dim ellipsis hl" }, `· ${headline(release)}`),
+        h("span", { class: "dim ellipsis hl" }, `· ${headline(release, now)}`),
         h("span", { class: "dim" }, running ? elapsedLabel(release, now) : formatAgo(release.completedAt ?? release.updatedAt, now)),
       ),
       segBar(release),

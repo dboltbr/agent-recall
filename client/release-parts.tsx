@@ -7,6 +7,7 @@ import { useEffect, useRef, type ReactNode } from "react";
 import { Animated, Easing, Platform, Pressable, Text, View } from "react-native";
 import {
   imageChips,
+  liveSources,
   pipeMeta,
   pusherLine,
   releaseBadge,
@@ -31,8 +32,10 @@ import {
   otherActive,
   releaseDurationMs,
   releaseLabel,
+  watchPhaseLabel,
   type Release,
   type ReleaseSnapshot,
+  type Signal,
   type Step,
 } from "../shared/release-status.ts";
 import { Badge, MONO, Sha, StepMark, Tint, toneColor } from "./kit.tsx";
@@ -364,7 +367,7 @@ export function StepList({
       {release.steps.map((step, index) => {
         const pending = step.state === "pending" || step.state === "skipped";
         const duration = stepDurationMs(step, now);
-        const detail = stepDetail(release, step, waiting);
+        const detail = stepDetail(release, step, waiting, now);
         const markTone = stepMarkTone(release, step);
         return (
           <View key={step.id} style={{ flexDirection: "row", gap: 10, paddingVertical: 4, alignItems: "flex-start" }}>
@@ -402,6 +405,7 @@ export function StepList({
                   {detail}
                 </Text>
               ) : null}
+              {step.id === "watch" ? <SignalRows theme={theme} signals={liveSources(release)} live /> : null}
               {step.id === "watch" && watch ? <WatchLinks theme={theme} watch={watch} /> : null}
             </View>
             <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11.5, fontVariant: ["tabular-nums"] }}>
@@ -530,25 +534,54 @@ export function RunnerQueue({ theme, snapshot }: { theme: PluginTheme; snapshot:
   );
 }
 
+/** One row per health source; `live`: the open watch's sources, still being measured. */
+export function SignalRows({ theme, signals, live = false }: { theme: PluginTheme; signals: readonly Signal[]; live?: boolean }) {
+  if (!signals.length) return null;
+  return (
+    <View style={live ? { marginTop: 3 } : undefined}>
+      {signals.map((signal) => {
+        const outcome = signalOutcome(signal, live);
+        const color = toneColor(theme, outcome.tone);
+        return (
+          <View key={signal.source} style={{ flexDirection: "row", alignItems: "center", gap: 8, paddingVertical: live ? 2 : 3 }}>
+            {outcome.tone === "run" ? (
+              <Spin color={color} size={13} />
+            ) : (
+              <Icon name={outcome.tone === "bad" ? "CircleX" : outcome.tone === "ok" ? "CircleCheck" : "CircleDashed"} size={13} color={color} />
+            )}
+            <Text numberOfLines={2} style={{ color: theme.colors.foreground, fontSize: live ? 11.5 : 12, flex: 1 }}>
+              {signalText(signal)}
+            </Text>
+            <Text style={{ color: outcome.tone === "bad" || outcome.tone === "run" ? color : theme.colors.foregroundMuted, fontSize: live ? 11.5 : 12 }}>
+              {outcome.label}
+            </Text>
+          </View>
+        );
+      })}
+    </View>
+  );
+}
+
 /** "Sinais do blast radius" (mock p4b revert card). */
 export function Signals({ theme, release }: { theme: PluginTheme; release: Release }) {
   if (!release.signals.length) return null;
   return (
     <View>
       <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11.5, marginTop: 10, marginBottom: 2 }}>Sinais do blast radius</Text>
-      {release.signals.map((signal) => {
-        const outcome = signalOutcome(signal);
-        const color = toneColor(theme, outcome.tone);
-        return (
-          <View key={signal.source} style={{ flexDirection: "row", alignItems: "center", gap: 8, paddingVertical: 3 }}>
-            <Icon name={outcome.tone === "bad" ? "CircleX" : outcome.tone === "ok" ? "CircleCheck" : "CircleDashed"} size={13} color={color} />
-            <Text numberOfLines={2} style={{ color: theme.colors.foreground, fontSize: 12, flex: 1 }}>
-              {signalText(signal)}
-            </Text>
-            <Text style={{ color: outcome.tone === "bad" ? color : theme.colors.foregroundMuted, fontSize: 12 }}>{outcome.label}</Text>
-          </View>
-        );
-      })}
+      <SignalRows theme={theme} signals={release.signals} />
+    </View>
+  );
+}
+
+/** The open watch under the pipe: its phase (`observando · faltam 7m`) and each source as it is measured. */
+export function LiveWatch({ theme, release, now }: { theme: PluginTheme; release: Release; now: Date }) {
+  const sources = liveSources(release);
+  const phase = watchPhaseLabel(release, now);
+  if (!phase) return null;
+  return (
+    <View style={{ marginTop: 10 }}>
+      <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11.5, marginBottom: 2 }}>{`Vigia · ${phase}`}</Text>
+      <SignalRows theme={theme} signals={sources} live />
     </View>
   );
 }
