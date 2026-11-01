@@ -147,6 +147,18 @@ test("falhou: a etapa que falhou, as seguintes puladas, mesmo nome `#N` dos outr
   assert.equal(verdictDetail(release), "verify-production / check falhou");
 });
 
+test("nova tentativa conta só os jobs executados nela, preservando os reaproveitados", () => {
+  const jobs = [
+    job("verify-production / qlty", "success", [23, 22]),
+    job("verify-production / check", "failure", [10, 1]),
+  ];
+  const release = completed(305, jobs, null, { conclusion: "failure", run_attempt: 2, run_started_at: minutesAgo(11) });
+  const verify = stepOf(release, "verify");
+  assert.equal(verify.durationMs, 9 * 60_000);
+  assert.equal(verify.state, "failed");
+  assert.deepEqual(stepJobNames(release, "verify"), ["qlty", "check"]);
+});
+
 test("revertido: nota `reverted` com os commits, sinais disparados primeiro", () => {
   const note = redNote({ state: "reverted", revert: { commits: ["a", "b", "c"], commit: "r3v", reason: "reverted" } });
   const release = completed(172, finished("failure"), note);

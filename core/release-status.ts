@@ -307,11 +307,18 @@ function time(value: string | null): number | null {
 }
 
 /** One step from its jobs. `runDone`: a step with no job left to appear is skipped, not pending. */
-export function buildStep(id: StepId, jobs: readonly Job[], runDone: boolean, now: Date): Step {
+export function buildStep(id: StepId, jobs: readonly Job[], runDone: boolean, now: Date, attemptStart: string | null = null): Step {
   const live = jobs.filter((job) => job.step === id && job.state !== "skipped");
   const failed = live.find((job) => job.state === "failure");
+  // GitHub retains successful jobs from earlier attempts when rerunning failures.
+  const attemptMs = time(attemptStart);
+  const current = attemptMs === null ? live : live.filter((job) => {
+    const start = time(job.startedAt);
+    return start !== null && start >= attemptMs;
+  });
+  const timed = current.length ? current : live;
   // A queued job's `started_at` is when it was queued: only jobs that ran start the step.
-  const starts = live
+  const starts = timed
     .filter((job) => job.state !== "queued")
     .map((job) => time(job.startedAt))
     .filter((ms): ms is number => ms !== null);
@@ -325,7 +332,7 @@ export function buildStep(id: StepId, jobs: readonly Job[], runDone: boolean, no
   else if (live.some((job) => job.state === "cancelled")) state = "cancelled";
   else state = runDone ? "cancelled" : "pending";
   const finished = state === "done" || state === "failed" || state === "cancelled";
-  const ends = live.map((job) => time(job.completedAt)).filter((ms): ms is number => ms !== null);
+  const ends = timed.map((job) => time(job.completedAt)).filter((ms): ms is number => ms !== null);
   const completedMs = finished && ends.length ? Math.max(...ends) : null;
   const images = id === "images";
   return {
@@ -461,7 +468,7 @@ export function buildRelease(input: ReleaseInput): Release {
   const { run, note, now } = input;
   const jobs = input.jobs.map(toJob);
   const completed = run.status === "completed";
-  const steps = STEP_IDS.map((id) => buildStep(id, jobs, completed, now));
+  const steps = STEP_IDS.map((id) => buildStep(id, jobs, completed, now, (run.run_attempt ?? 1) > 1 ? run.run_started_at ?? null : null));
   const verdict = watchVerdict({ completed, conclusion: run.conclusion, steps, jobs, note });
   const failed = jobs.find((job) => job.step !== null && job.step !== "watch" && job.state === "failure");
   const tagged = input.tagged === true || jobs.some((job) => job.step === "tag" && job.state === "success");
