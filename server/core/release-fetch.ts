@@ -163,11 +163,17 @@ interface CheckRunsPage {
   readonly check_runs: readonly GitHubCheckRun[];
 }
 
-/** The watch run's check run: the one whose details link is that run, else the newest. */
+/**
+ * The watch run's check run: the newest whose details link is that run (a rerun keeps the run id
+ * and publishes a new check run). Another run's check run is never this watch's progress.
+ */
 export function watchCheckRun(checkRuns: readonly GitHubCheckRun[], watchRunId: number): GitHubCheckRun | null {
   const own = checkRuns.filter((check) => (check.details_url ?? "").endsWith(`/actions/runs/${watchRunId}`));
-  return [...(own.length ? own : checkRuns)].sort((a, b) => b.id - a.id)[0] ?? null;
+  return own.sort((a, b) => b.id - a.id)[0] ?? null;
 }
+
+/** A watch run attempt: a rerun reuses the run id. */
+const attemptKey = (run: GitHubRun) => `${run.id}:${run.run_attempt}`;
 
 export function createReleaseSource(options: ReleaseSourceOptions): ReleaseSource {
   const repository = options.repository ?? RELEASE_REPOSITORY;
@@ -184,9 +190,9 @@ export function createReleaseSource(options: ReleaseSourceOptions): ReleaseSourc
   let loadedRuns: unknown = null;
   /** Watch runs of the last load by release number. */
   let watchRuns = new Map<number, GitHubRun>();
-  /** Progress by watch run id, read while the run is open; `settled` ones had their last read after it closed. */
-  const progress = new Map<number, WatchProgress | null>();
-  const settled = new Set<number>();
+  /** Progress by watch run attempt (`attemptKey`), read while it is open; `settled` ones had their last read after it closed. */
+  const progress = new Map<string, WatchProgress | null>();
+  const settled = new Set<string>();
 
   const runsPath = (perPage: number, page = 1, name = workflow) =>
     `repos/${repository}/actions/workflows/${name}.yml/runs?per_page=${perPage}&page=${page}`;
@@ -230,22 +236,24 @@ export function createReleaseSource(options: ReleaseSourceOptions): ReleaseSourc
   }
 
   /**
-   * The open watch's check run, one conditional GET per load (304 while it does not move). A run
-   * seen open gets one last read after it closes; a run never seen open costs nothing.
+   * The open watch's check run on the release commit, one conditional GET per load (304 while it
+   * does not move). An attempt seen open gets one last read after it closes; an attempt never seen
+   * open costs nothing.
    */
-  async function progressOf(run: GitHubRun, token: string): Promise<WatchProgress | null> {
-    const known = progress.get(run.id) ?? null;
-    if (run.status === "completed" && (settled.has(run.id) || !progress.has(run.id))) return known;
+  async function progressOf(run: GitHubRun, releaseSha: string, token: string): Promise<WatchProgress | null> {
+    const key = attemptKey(run);
+    const known = progress.get(key) ?? null;
+    if (run.status === "completed" && (settled.has(key) || !progress.has(key))) return known;
     try {
-      const body = await get<CheckRunsPage>(`repos/${repository}/commits/${run.head_sha}/check-runs?check_name=${WATCH_CHECK}`, token);
+      const body = await get<CheckRunsPage>(`repos/${repository}/commits/${releaseSha}/check-runs?check_name=${WATCH_CHECK}`, token);
       const check = watchCheckRun(body.check_runs, run.id);
       const next = check ? parseWatchProgress(check) : null;
-      progress.set(run.id, next);
-      if (run.status === "completed") settled.add(run.id);
+      progress.set(key, next);
+      if (run.status === "completed") settled.add(key);
       return next;
     } catch (error) {
       options.log.warn(`progresso do vigia de ${releaseNameOf(watchRunNumber(run) ?? run.run_number)}: ${describe(error)}`);
-      progress.set(run.id, known);
+      progress.set(key, known);
       return known;
     }
   }
@@ -265,7 +273,7 @@ export function createReleaseSource(options: ReleaseSourceOptions): ReleaseSourc
     const [jobs, watchJobs, watchProgress, commits] = await Promise.all([
       jobsOf(run, token),
       watchRun ? jobsOf(watchRun, token) : Promise.resolve(null),
-      watchRun ? progressOf(watchRun, token) : Promise.resolve(null),
+      watchRun ? progressOf(watchRun, run.head_sha, token) : Promise.resolve(null),
       commitsOf(run, tags, token).catch((error) => {
         options.log.warn(`faixa de ${releaseNameOf(run.run_number)}: ${describe(error)}`);
         return null;
@@ -304,11 +312,11 @@ export function createReleaseSource(options: ReleaseSourceOptions): ReleaseSourc
       loadedRuns = page;
       watchRuns = watches;
       // Progress of watch runs that left the page is never drawn again.
-      const listed = new Set([...watches.values()].map((watch) => watch.id));
-      for (const id of progress.keys()) {
-        if (!listed.has(id)) {
-          progress.delete(id);
-          settled.delete(id);
+      const listed = new Set([...watches.values()].map(attemptKey));
+      for (const key of progress.keys()) {
+        if (!listed.has(key)) {
+          progress.delete(key);
+          settled.delete(key);
         }
       }
       const previous = new Map((snapshot?.releases ?? []).map((release) => [release.runId, release]));

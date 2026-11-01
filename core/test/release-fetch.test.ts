@@ -261,10 +261,11 @@ function checkRunOf(watch: GitHubRun, phase: string, verdict: string | null, id 
 }
 
 test("progresso do vigia: lido com o run aberto, uma última vez ao fechar, nunca de vigia que não vimos aberto", async () => {
-  const { state } = fixture();
+  const { state, done } = fixture();
   const open = watchRun(171, "running")!;
   state.jobs.set(171, { jobs: released("success", 171).jobs, watch: open });
-  const checks = `repos/dboltbr/dbolt/commits/${open.run.head_sha}/check-runs?check_name=${WATCH_CHECK}`;
+  // The check run lives on the release commit.
+  const checks = `repos/dboltbr/dbolt/commits/${done.head_sha}/check-runs?check_name=${WATCH_CHECK}`;
   let check: { status?: number; body: unknown; etag: string } = {
     body: { check_runs: [checkRunOf(open.run, "observing", "pending")] },
     etag: '"check-1"',
@@ -307,14 +308,26 @@ test("progresso do vigia: lido com o run aberto, uma última vez ao fechar, nunc
   snapshot = await source.load({ token: "t", notes: NOTES });
   assert.equal(asked, 3, "depois da última leitura, nada mais é pedido");
   assert.equal(snapshot.releases[1]!.progress?.verdict, "green");
+
+  // A rerun keeps the run id: the new attempt is read while open and once more when it closes.
+  const rerun = { ...open, run: { ...open.run, run_attempt: 2 } };
+  state.jobs.set(171, { jobs: released("success", 171).jobs, watch: rerun });
+  check = { body: { check_runs: [checkRunOf(open.run, "done", "green", 7), checkRunOf(open.run, "deploying", null, 8)] }, etag: '"check-3"' };
+  snapshot = await source.load({ token: "t", notes: NOTES });
+  assert.equal(asked, 4);
+  assert.equal(snapshot.releases[1]!.progress?.phase, "deploying", "o check run mais novo do run");
+  state.jobs.set(171, { jobs: released("success", 171).jobs, watch: { ...rerun, run: { ...rerun.run, status: "completed", conclusion: "success" } } });
+  await source.load({ token: "t", notes: NOTES });
+  await source.load({ token: "t", notes: NOTES });
+  assert.equal(asked, 5);
 });
 
-test("watchCheckRun: o check run do próprio run do vigia, senão o mais novo", () => {
+test("watchCheckRun: o check run do próprio run do vigia; o de outro run nunca", () => {
   const own = watchRun(171, "running")!.run;
   const other = watchRun(170, "success")!.run;
   const mine = checkRunOf(own, "observing", null, 3);
   const newer = checkRunOf(other, "done", "green", 9);
   assert.equal(watchCheckRun([newer, mine], own.id), mine);
-  assert.equal(watchCheckRun([mine, newer], 1), newer);
+  assert.equal(watchCheckRun([mine, newer], 1), null);
   assert.equal(watchCheckRun([], own.id), null);
 });
