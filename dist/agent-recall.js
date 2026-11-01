@@ -19800,7 +19800,7 @@ var RECENT_VERDICT_MS = 2 * 60 * 60 * 1e3;
 var STEP_IDS = ["verify", "images", "deploy", "tag", "watch"];
 var StepIdSchema = external_exports.enum(STEP_IDS);
 var StepStateSchema = external_exports.enum(["pending", "running", "done", "failed", "cancelled", "skipped"]);
-var JobStateSchema = external_exports.enum(["queued", "running", "success", "failure", "cancelled", "skipped"]);
+var JobStateSchema = external_exports.enum(["queued", "waiting", "running", "success", "failure", "cancelled", "skipped"]);
 var VerdictSchema = external_exports.enum(["green", "reverted", "red", "inconclusive", "failed", "cancelled", "none"]);
 var SessionSchema = external_exports.object({
   harness: external_exports.enum(["paseo", "opencode"]),
@@ -19838,12 +19838,12 @@ var SignalSchema = external_exports.object({
   outcome: external_exports.string(),
   reason: external_exports.string().nullable()
 });
-var HANDOFF_ROLES = ["investigate", "fix", "remind", "owner", "blocked"];
+var HANDOFF_ROLES = ["owner", "notified", "blocked"];
 var HandoffRoleSchema = external_exports.enum(HANDOFF_ROLES);
 var HandoffSchema = external_exports.object({
   role: HandoffRoleSchema,
   session: SessionSchema,
-  /** When this host delivered the call; null for what only the note says (owner, fix session). */
+  /** When this host delivered the call; null for what only the note says (owner, notified). */
   at: external_exports.string().nullable()
 });
 var ReleaseSchema = external_exports.object({
@@ -19872,8 +19872,12 @@ var ReleaseSchema = external_exports.object({
   failedJob: external_exports.object({ name: external_exports.string(), url: external_exports.string().nullable() }).nullable(),
   revert: external_exports.object({ commits: external_exports.array(external_exports.string()), commit: external_exports.string().nullable() }).nullable(),
   signals: external_exports.array(SignalSchema),
-  /** `state` of the release-watch incident note, when there is one (red releases only). */
-  noteState: external_exports.string().nullable(),
+  /**
+   * The watch's rollback from the incident note (red releases only): `outcome` (`pending`,
+   * `reverted`, `blocked`, `failed`, `none`), `target` (`dbolt-deploy` or `main`) and whether the
+   * note freezes main (not resolved, not a drill). Defaults so older timeline cards still render.
+   */
+  rollback: external_exports.object({ outcome: external_exports.string(), target: external_exports.string().nullable(), frozen: external_exports.boolean() }).nullable().default(null),
   /** The note carries a `recall` failure: no agent could be told. */
   recallFailed: external_exports.boolean(),
   /** Session that pushed the head commit (newest trailer of the range as fallback). */
@@ -19882,7 +19886,7 @@ var ReleaseSchema = external_exports.object({
   sessions: external_exports.array(SessionSchema),
   /**
    * Where the incident went: the calls this host's harnesses delivered (local record), then the
-   * note's owner and fix session. Empty without an incident. Defaults so timeline cards written
+   * note's owner and notified sessions. Empty without an incident. Defaults so timeline cards written
    * before the field still render.
    */
   handoffs: external_exports.array(HandoffSchema).default([]),
@@ -19926,10 +19930,16 @@ function classifyJob(name) {
   const [prefix, rest] = splitJobName(name);
   if (prefix === "verify-production") return "verify";
   if (prefix.startsWith("images-")) return rest !== null && /^build-push/.test(rest) ? "images" : null;
-  if (DEPLOY_TIERS.has(prefix) || name === "flags") return "deploy";
-  if (name === "release-tag") return "tag";
-  if (name === "watch") return "watch";
+  if (DEPLOY_TIERS.has(prefix) || name === "flags" || name === PREVIOUS_WATCH) return "deploy";
+  if (name === "release-tag" || name === WATCH_DISPATCH) return "tag";
   return null;
+}
+var PREVIOUS_WATCH = "previous-watch";
+var WATCH_DISPATCH = "watch";
+var WATCH_WORKFLOW = "release-watch";
+function watchRunNumber(run) {
+  const match = /^watch release-(\d+)$/.exec((run.display_title ?? run.name ?? "").trim());
+  return match ? Number(match[1]) : null;
 }
 function imageName(name) {
   const [prefix, rest] = splitJobName(name);
@@ -19944,17 +19954,19 @@ function splitJobName(name) {
   return at < 0 ? [name.trim(), null] : [name.slice(0, at).trim(), name.slice(at + 3).trim()];
 }
 function jobState(job) {
-  if (job.status !== "completed") return job.status === "in_progress" ? "running" : "queued";
+  if (job.status === "in_progress") return "running";
+  if (job.status === "pending" || job.status === "waiting") return "waiting";
+  if (job.status !== "completed") return "queued";
   if (job.conclusion === "success" || job.conclusion === "neutral") return "success";
   if (job.conclusion === "skipped") return "skipped";
   if (job.conclusion === "cancelled") return "cancelled";
   return "failure";
 }
-function toJob(job) {
+function toJob(job, run = "release") {
   return {
     id: job.id,
     name: job.name,
-    step: classifyJob(job.name),
+    step: run === "watch" ? "watch" : classifyJob(job.name),
     image: imageName(job.name),
     state: jobState(job),
     runner: job.runner_name || null,
@@ -19972,10 +19984,20 @@ function time3(value) {
   const ms = Date.parse(value);
   return Number.isNaN(ms) ? null : ms;
 }
-function buildStep(id, jobs, runDone, now) {
+function latest(a, b) {
+  const later = time3(b);
+  return later !== null && later > (time3(a) ?? -Infinity) ? b : a;
+}
+function buildStep(id, jobs, runDone, now, attemptStart = null) {
   const live = jobs.filter((job) => job.step === id && job.state !== "skipped");
   const failed = live.find((job) => job.state === "failure");
-  const starts = live.filter((job) => job.state !== "queued").map((job) => time3(job.startedAt)).filter((ms) => ms !== null);
+  const attemptMs = time3(attemptStart);
+  const current = attemptMs === null ? live : live.filter((job) => {
+    const start = time3(job.startedAt);
+    return start !== null && start >= attemptMs;
+  });
+  const timed = current.length ? current : live;
+  const starts = timed.filter((job) => job.state !== "queued" && job.state !== "waiting").map((job) => time3(job.startedAt)).filter((ms) => ms !== null);
   const startedMs = starts.length ? Math.min(...starts) : null;
   let state;
   if (live.length === 0) state = runDone ? "skipped" : "pending";
@@ -19986,7 +20008,7 @@ function buildStep(id, jobs, runDone, now) {
   else if (live.some((job) => job.state === "cancelled")) state = "cancelled";
   else state = runDone ? "cancelled" : "pending";
   const finished = state === "done" || state === "failed" || state === "cancelled";
-  const ends = live.map((job) => time3(job.completedAt)).filter((ms) => ms !== null);
+  const ends = timed.map((job) => time3(job.completedAt)).filter((ms) => ms !== null);
   const completedMs = finished && ends.length ? Math.max(...ends) : null;
   const images = id === "images";
   return {
@@ -20000,7 +20022,6 @@ function buildStep(id, jobs, runDone, now) {
     failedJob: failed?.name ?? null
   };
 }
-var SHIPPED_REVERT = /* @__PURE__ */ new Set(["reverted", "already-reverted"]);
 function record2(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : null;
 }
@@ -20008,14 +20029,20 @@ function strings(value) {
   return Array.isArray(value) ? value.filter((item) => typeof item === "string") : [];
 }
 function noteRevert(note) {
-  const revert = record2(note.revert);
-  const decision = record2(note.decision);
-  const reverted = note.state === "reverted" || note.state === "escalated" && SHIPPED_REVERT.has(String(revert?.["reason"])) || decision?.["action"] === "revert";
-  if (!reverted) return null;
-  const commits = strings(revert?.["commits"]);
+  const rollback = record2(note.rollback);
+  if (rollback?.["outcome"] !== "reverted") return null;
   return {
-    commits: commits.length ? commits : strings(decision?.["commits"]),
-    commit: typeof revert?.["commit"] === "string" ? revert["commit"] : null
+    commits: strings(rollback["commits"]),
+    commit: typeof rollback["commit"] === "string" ? rollback["commit"] : null
+  };
+}
+function noteRollback(note) {
+  const rollback = record2(note.rollback);
+  if (!rollback) return null;
+  return {
+    outcome: typeof rollback["outcome"] === "string" ? rollback["outcome"] : "pending",
+    target: typeof rollback["target"] === "string" ? rollback["target"] : null,
+    frozen: !note.resolvedBy && note.drill !== true
   };
 }
 function noteSignals(note) {
@@ -20038,7 +20065,8 @@ function watchVerdict(input2) {
   if (input2.steps.some((step) => step.id !== "watch" && step.state === "failed")) return "failed";
   const watch = input2.jobs.find((job) => job.step === "watch" && job.state !== "skipped");
   if (watch?.state === "success") return "green";
-  if (watch?.state === "failure") return "inconclusive";
+  if (watch?.state === "failure" || watch?.state === "cancelled") return "inconclusive";
+  if (!watch && input2.jobs.some((job) => job.name === WATCH_DISPATCH && job.step === "tag" && job.state === "success")) return "inconclusive";
   if (input2.conclusion === "cancelled") return "cancelled";
   if (!input2.jobs.some((job) => job.step !== null && job.state !== "skipped")) return "none";
   return input2.conclusion === "success" ? "none" : watch ? "inconclusive" : "failed";
@@ -20052,6 +20080,8 @@ function firstLine(message) {
 function toSession(ref) {
   return { harness: ref.harness, host: ref.host, id: ref.id };
 }
+var WATCH_DISPATCH_GRACE_MS = 10 * 60 * 1e3;
+var NOT_STARTED = /* @__PURE__ */ new Set(["queued", "waiting"]);
 function releaseHandoffs(note, delivered) {
   if (!note) return delivered.filter((handoff2) => handoff2.role === "blocked");
   const out = [];
@@ -20060,15 +20090,21 @@ function releaseHandoffs(note, delivered) {
   };
   const ordered = [...delivered].sort((a, b) => (time3(a.at) ?? 0) - (time3(b.at) ?? 0));
   for (const handoff2 of ordered) add(handoff2.role, handoff2.session, handoff2.at);
-  add("owner", parseSessionValue(note.owner), null);
-  add("fix", parseSessionValue(note.fix?.session), null);
+  add("owner", toSessionRef(note.owner), null);
+  for (const entry of Array.isArray(note.notified) ? note.notified : []) add("notified", toSessionRef(entry), null);
   return out;
 }
 function buildRelease(input2) {
   const { run, note, now } = input2;
-  const jobs = input2.jobs.map(toJob);
-  const completed = run.status === "completed";
-  const steps = STEP_IDS.map((id) => buildStep(id, jobs, completed, now));
+  const watchRun = input2.watch?.run ?? null;
+  const jobs = [...input2.jobs.map((job) => toJob(job)), ...(input2.watch?.jobs ?? []).map((job) => toJob(job, "watch"))];
+  const dispatch = jobs.find((job) => job.name === WATCH_DISPATCH && job.step === "tag");
+  const dispatchedAt = time3(dispatch?.state === "success" ? dispatch.completedAt : null);
+  const watchOpen = watchRun ? watchRun.status !== "completed" : dispatchedAt !== null && now.getTime() - dispatchedAt < WATCH_DISPATCH_GRACE_MS;
+  const completed = run.status === "completed" && !watchOpen;
+  const started = run.status === "in_progress" || watchOpen || jobs.some((job) => !NOT_STARTED.has(job.state));
+  const attemptStart = (run.run_attempt ?? 1) > 1 ? run.run_started_at ?? null : null;
+  const steps = STEP_IDS.map((id) => buildStep(id, jobs, id === "watch" ? completed : run.status === "completed", now, attemptStart));
   const verdict = watchVerdict({ completed, conclusion: run.conclusion, steps, jobs, note });
   const failed = jobs.find((job) => job.step !== null && job.step !== "watch" && job.state === "failure");
   const tagged = input2.tagged === true || jobs.some((job) => job.step === "tag" && job.state === "success");
@@ -20078,7 +20114,6 @@ function buildRelease(input2) {
   };
   const trailers = (input2.commits ?? []).map((commit) => parseAgentSession(commit.commit.message));
   for (const ref of trailers) add(ref);
-  for (const value of note?.sessions ?? []) add(toSessionRef(value));
   const head = run.head_commit?.message ?? "";
   const pusher = parseAgentSession(head) ?? [...trailers].reverse().find((ref) => ref !== null) ?? null;
   add(pusher);
@@ -20089,7 +20124,7 @@ function buildRelease(input2) {
     runId: run.id,
     attempt: run.run_attempt ?? 1,
     url: run.html_url,
-    status: completed ? "completed" : run.status === "in_progress" ? "running" : "queued",
+    status: completed ? "completed" : started ? "running" : "queued",
     conclusion: run.conclusion,
     event: run.event,
     headSha: run.head_sha,
@@ -20097,7 +20132,7 @@ function buildRelease(input2) {
     createdAt: run.created_at,
     updatedAt: run.updated_at,
     startedAt: run.run_started_at ?? null,
-    completedAt: completed ? run.updated_at : null,
+    completedAt: completed ? latest(run.updated_at, watchRun?.updated_at ?? null) : null,
     steps,
     current,
     verdict,
@@ -20105,7 +20140,7 @@ function buildRelease(input2) {
     failedJob: failed ? { name: failed.name, url: failed.url } : null,
     revert: note ? noteRevert(note) : null,
     signals: note ? noteSignals(note) : [],
-    noteState: note?.state ?? null,
+    rollback: note ? noteRollback(note) : null,
     recallFailed: note ? record2(note.recall) !== null : false,
     pusher: pusher ? toSession(pusher) : null,
     sessions,
@@ -20173,7 +20208,6 @@ async function loadConfig(path = configPath()) {
   if (!instance) throw new Error(`${path} sem "instance"`);
   return {
     instance,
-    incidentHost: value["incidentHost"] === true,
     repository: text("repository", "dboltbr/dbolt"),
     notesRef: text("notesRef", "refs/notes/release-watch")
   };
@@ -20366,9 +20400,7 @@ ${result.stderr}`;
 }
 
 // opencode/poller.ts
-import { existsSync as existsSync2 } from "node:fs";
 import { mkdir as mkdir3, readFile as readFile3, rename as rename3, writeFile as writeFile3 } from "node:fs/promises";
-import { homedir as homedir2 } from "node:os";
 import { join as join4 } from "node:path";
 
 // core/notes.ts
@@ -20480,9 +20512,7 @@ function parseNote(raw) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const note = value;
   const release = note["release"];
-  if (typeof release !== "string" && typeof release !== "number" || typeof note["state"] !== "string") {
-    return null;
-  }
+  if (typeof release !== "string" && typeof release !== "number") return null;
   if (typeof note["updatedAt"] !== "string") return null;
   return value;
 }
@@ -20559,6 +20589,7 @@ function notesByRelease(notes) {
 function createReleaseSource(options) {
   const repository = options.repository ?? RELEASE_REPOSITORY;
   const workflow = options.workflow ?? RELEASE_WORKFLOW;
+  const watchWorkflow = options.watchWorkflow ?? WATCH_WORKFLOW;
   const org = options.org ?? RUNNER_ORG;
   const get = createGitHubClient(options.fetch);
   const finishedJobs = /* @__PURE__ */ new Map();
@@ -20566,7 +20597,18 @@ function createReleaseSource(options) {
   let snapshot = null;
   let runners = [];
   let loadedRuns = null;
-  const runsPath = (perPage, page = 1) => `repos/${repository}/actions/workflows/${workflow}.yml/runs?per_page=${perPage}&page=${page}`;
+  let watchRuns = /* @__PURE__ */ new Map();
+  const runsPath = (perPage, page = 1, name = workflow) => `repos/${repository}/actions/workflows/${name}.yml/runs?per_page=${perPage}&page=${page}`;
+  async function watchPage(perPage, token) {
+    const body = await get(runsPath(perPage, 1, watchWorkflow), token);
+    const byNumber = /* @__PURE__ */ new Map();
+    for (const run of body.workflow_runs) {
+      const number4 = watchRunNumber(run);
+      const known = number4 === null ? void 0 : byNumber.get(number4);
+      if (number4 !== null && (!known || run.id > known.id)) byNumber.set(number4, run);
+    }
+    return byNumber;
+  }
   async function jobsOf(run, token) {
     const key = `${run.id}:${run.run_attempt ?? 1}`;
     const done = finishedJobs.get(key);
@@ -20594,9 +20636,11 @@ function createReleaseSource(options) {
   async function tagList(token) {
     return tagNumbers(await get(`repos/${repository}/git/matching-refs/tags/release-`, token));
   }
-  async function build(run, tags, notes, token) {
-    const [jobs, commits] = await Promise.all([
+  async function build(run, tags, notes, watches, token) {
+    const watchRun = watches.get(run.run_number) ?? null;
+    const [jobs, watchJobs, commits] = await Promise.all([
       jobsOf(run, token),
+      watchRun ? jobsOf(watchRun, token) : Promise.resolve(null),
       commitsOf(run, tags, token).catch((error62) => {
         options.log.warn(`faixa de ${releaseNameOf(run.run_number)}: ${describe3(error62)}`);
         return null;
@@ -20612,6 +20656,7 @@ function createReleaseSource(options) {
       commits,
       tagged: tags.includes(run.run_number),
       handoffs,
+      watch: watchRun && watchJobs ? { run: watchRun, jobs: watchJobs } : null,
       now: options.clock.now()
     });
   }
@@ -20619,12 +20664,21 @@ function createReleaseSource(options) {
     const now = options.clock.now();
     const notes = notesByRelease(input2.notes);
     try {
-      const [page, tags] = await Promise.all([get(runsPath(RELEASE_HISTORY), input2.token), tagList(input2.token)]);
+      const [page, tags, watches] = await Promise.all([
+        get(runsPath(RELEASE_HISTORY), input2.token),
+        tagList(input2.token),
+        // Room for re-dispatched watches; a failure keeps the last watch runs instead of the whole load.
+        watchPage(RELEASE_HISTORY * 2, input2.token).catch((error62) => {
+          options.log.warn(`runs do vigia: ${describe3(error62)}`);
+          return watchRuns;
+        })
+      ]);
       loadedRuns = page;
+      watchRuns = watches;
       const previous = new Map((snapshot?.releases ?? []).map((release) => [release.runId, release]));
       const releases = await pool(
         page.workflow_runs,
-        (run) => build(run, tags, notes, input2.token).catch((error62) => {
+        (run) => build(run, tags, notes, watches, input2.token).catch((error62) => {
           const kept = previous.get(run.id);
           if (!kept) throw error62;
           options.log.warn(`${releaseNameOf(run.run_number)}: ${describe3(error62)}`);
@@ -20648,13 +20702,18 @@ function createReleaseSource(options) {
   async function lookup(input2) {
     const known = snapshot?.releases.find((release) => release.number === input2.number);
     if (known) return known;
-    const latest = snapshot?.releases[0]?.number ?? (await get(runsPath(1), input2.token)).workflow_runs[0]?.run_number;
-    if (latest === void 0 || input2.number > latest || input2.number < 1) return null;
-    const guess = Math.floor((latest - input2.number) / 100) + 1;
+    const latest2 = snapshot?.releases[0]?.number ?? (await get(runsPath(1), input2.token)).workflow_runs[0]?.run_number;
+    if (latest2 === void 0 || input2.number > latest2 || input2.number < 1) return null;
+    const guess = Math.floor((latest2 - input2.number) / 100) + 1;
     for (const page of [guess, guess + 1, guess - 1].filter((value) => value >= 1)) {
       const body = await get(runsPath(100, page), input2.token);
       const run = body.workflow_runs.find((candidate) => candidate.run_number === input2.number);
-      if (run) return build(run, await tagList(input2.token), notesByRelease(input2.notes), input2.token);
+      if (!run) continue;
+      const watches = watchRuns.has(run.run_number) ? watchRuns : await watchPage(100, input2.token).catch((error62) => {
+        options.log.warn(`runs do vigia: ${describe3(error62)}`);
+        return /* @__PURE__ */ new Map();
+      });
+      return build(run, await tagList(input2.token), notesByRelease(input2.notes), watches, input2.token);
     }
     return null;
   }
@@ -20708,28 +20767,19 @@ import { join as join3 } from "node:path";
 
 // core/route.ts
 var CATCH_UP_MS = 8 * 60 * 60 * 1e3;
-var FIX_FORWARD_MS = 30 * 60 * 1e3;
-var FIX_STATES = /* @__PURE__ */ new Set(["reverted", "fix-pending"]);
-function rangeSessions(note) {
-  const out = [];
-  for (const entry of note.sessions ?? []) {
-    const ref = toSessionRef(entry);
-    if (ref && !out.some((seen) => sameSession(seen, ref))) out.push(ref);
-  }
-  return out;
-}
+var ROLLBACK_WAIT_MS = 10 * 60 * 1e3;
 function mine(ref, me) {
   return ref.harness === me.harness && ref.host === me.host;
 }
-function culpritSessions(note) {
-  const suspects = (note.assessment?.suspects ?? []).map((suspect) => suspect?.commit).filter((commit) => typeof commit === "string" && commit.length >= 7);
-  if (suspects.length === 0) return [];
+function noteOwner(note) {
+  return toSessionRef(note.owner);
+}
+function notifiedSessions(note) {
+  const owner = noteOwner(note);
   const out = [];
-  for (const entry of note.sessions ?? []) {
+  for (const entry of Array.isArray(note.notified) ? note.notified : []) {
     const ref = toSessionRef(entry);
-    const commits = entry.commits ?? [];
-    const wrote = commits.some((commit) => suspects.some((s) => commit.startsWith(s) || s.startsWith(commit)));
-    if (ref && wrote && !out.some((seen) => sameSession(seen, ref))) out.push(ref);
+    if (ref && !(owner && sameSession(owner, ref)) && !out.some((seen) => sameSession(seen, ref))) out.push(ref);
   }
   return out;
 }
@@ -20737,24 +20787,22 @@ function isRecent(note, now) {
   const at = Date.parse(note.updatedAt);
   return Number.isFinite(at) && now.getTime() - at <= CATCH_UP_MS;
 }
-function route(note, me) {
+function rollbackSettled(note, now) {
+  if (note.rollback?.outcome !== "pending") return true;
+  const verdictAt = note.verdict?.at;
+  const at = Date.parse(typeof verdictAt === "string" ? verdictAt : note.updatedAt);
+  return !Number.isFinite(at) || now.getTime() - at >= ROLLBACK_WAIT_MS;
+}
+function route(note, me, now) {
+  const owner = noteOwner(note);
+  if (!owner || note.resolvedBy) return [];
   const release = releaseName(note);
   const actions = [];
-  if (note.state === "red") {
-    const sessions = rangeSessions(note);
-    if (sessions.length === 1) {
-      const target = sessions[0];
-      if (mine(target, me)) actions.push({ kind: "recall", release, role: "investigate", target, lock: target.id });
-    } else if (sessions.length > 1 && me.incidentHost) {
-      actions.push({ kind: "investigation", release, lock: "investigation" });
-    }
+  if (mine(owner, me) && rollbackSettled(note, now)) {
+    actions.push({ kind: "recall", release, role: "owner", target: owner, lock: `${owner.id}.owner` });
   }
-  if (FIX_STATES.has(note.state)) {
-    const owner = parseSessionValue(note.owner);
-    for (const target of culpritSessions(note)) {
-      if (!mine(target, me) || owner && sameSession(owner, target)) continue;
-      actions.push({ kind: "recall", release, role: "fix", target, lock: `${target.id}.fix` });
-    }
+  for (const target of notifiedSessions(note)) {
+    if (mine(target, me)) actions.push({ kind: "recall", release, role: "notified", target, lock: `${target.id}.notified` });
   }
   return actions;
 }
@@ -20772,55 +20820,81 @@ function blockedRecalls(releases, me, now) {
   }
   return actions;
 }
-function dueReminder(note, me, now) {
-  if (note.state !== "fix-pending" || note.fix?.readyAt) return null;
-  const owner = parseSessionValue(note.owner);
-  const at = Date.parse(note.assessment?.at ?? "");
-  if (!owner || !mine(owner, me) || !Number.isFinite(at)) return null;
-  if (now.getTime() - at < FIX_FORWARD_MS) return null;
-  return { kind: "remind", release: releaseName(note), target: owner, lock: `${owner.id}.remind` };
-}
 function roleOf(action) {
-  switch (action.kind) {
-    case "recall":
-      return action.role;
-    case "investigation":
-      return "investigate";
-    case "remind":
-      return "remind";
-    case "blocked":
-      return "blocked";
-  }
+  return action.kind === "recall" ? action.role : "blocked";
 }
 function describeAction(action) {
   switch (action.kind) {
     case "recall":
       return `${action.release} ${action.role} \u2192 ${formatSession(action.target)}`;
-    case "investigation":
-      return `${action.release} investigate \u2192 nova sess\xE3o`;
-    case "remind":
-      return `${action.release} lembrete 30 min \u2192 ${formatSession(action.target)}`;
     case "blocked":
       return `${action.release} barrada antes da produ\xE7\xE3o \u2192 ${formatSession(action.target)}`;
   }
 }
 
 // core/deliver.ts
-function recallPrompt(release, role, note) {
-  return `Incidente ${release}: carregue a skill dbolt-release-incident. Papel: ${role}. Nota: ${JSON.stringify(note)}`;
+var ROLLBACK_REASONS = {
+  "dlc-rollback-missing": "sem o artefato dlc-rollback do run da release",
+  "dlc-rollback-invalid": "artefato dlc-rollback ileg\xEDvel",
+  "dlc-rollback-range-mismatch": "dlc-rollback de outra faixa",
+  "unsafe-migration": "a imagem anterior n\xE3o aguenta o banco depois da faixa",
+  conflict: "o revert conflita com o HEAD",
+  "deploy-error": "o dbolt-deploy recusou o revert",
+  "push-failed": "o push do revert na main falhou",
+  "push-rejected": "o push do revert na main foi recusado 3 vezes",
+  "range-too-large": "a faixa \xE9 grande demais para reverter",
+  "nothing-to-revert": "a faixa n\xE3o tem commit de flags revert\xEDvel",
+  "already-reverted": "a main j\xE1 desfez as flags da faixa",
+  drill: "ensaio"
+};
+function reasonText(reason) {
+  if (!reason) return "sem motivo na nota";
+  const text = ROLLBACK_REASONS[reason];
+  return text ? `${text} (${reason})` : reason;
 }
-function reminderPrompt(release, note) {
-  return `Lembrete: o fix-forward da ${release} passou de 30 min sem fix.readyAt; pela skill dbolt-release-incident (Prazos) o owner reverte agora e segue corrigindo. ` + recallPrompt(release, "investigate", note);
+function redReasons(note) {
+  const red = noteSignals(note).filter((signal) => signal.outcome === "red");
+  return red.length ? red.map((signal) => signal.reason ? `${signal.label}: ${signal.reason}` : signal.label).join("; ") : "vigia vermelho";
+}
+function rollbackLine(release, note) {
+  const rollback = note.rollback;
+  const commit = typeof rollback?.commit === "string" ? ` (commit ${rollback.commit.slice(0, 12)})` : "";
+  switch (rollback?.outcome) {
+    case "reverted": {
+      const what = rollback.target === "main" ? "reverteu as flags da faixa na main" : `reverteu a ${release} no dbolt-deploy`;
+      const applied = rollback.applied ? "o Flux aplicou: produ\xE7\xE3o voltou \xE0 release anterior" : "o Flux N\xC3O aplicou em 5 min: confira o Flux antes de contar com a release anterior";
+      return `o vigia ${what}${commit}; ${applied}.`;
+    }
+    case "blocked": {
+      const findings = rollback.findings?.length ? `, ${rollback.findings.length} achado(s) em findings` : "";
+      return `impedido: ${reasonText(rollback.reason)}${findings}. Produ\xE7\xE3o segue na ${release}; o caminho \xE9 Fixes-Release.`;
+    }
+    case "failed": {
+      const detail = rollback.detail ? `: ${rollback.detail}` : "";
+      return `falhou: ${reasonText(rollback.reason)}${detail}. Produ\xE7\xE3o segue na ${release}.`;
+    }
+    case "none":
+      return `nada revertido: ${reasonText(rollback.reason)}.`;
+    case "pending":
+      return "pendente: o vigia n\xE3o gravou o desfecho do rollback; leia a nota antes de agir.";
+    default:
+      return "a nota n\xE3o traz rollback.";
+  }
+}
+function freezeLine(release, note) {
+  if (note.drill) return "Ensaio: nada foi revertido nem congelado.";
+  return `A main est\xE1 congelada para c\xF3digo at\xE9 ficar verde uma release com Fixes-Release: ${release} (com o "ship" do respons\xE1vel) ou Reverts-Release: ${release}; Break-Glass s\xF3 por decis\xE3o do respons\xE1vel.`;
+}
+function ownerPrompt(release, note) {
+  return `Incidente ${release}: carregue a skill dbolt-release-incident. Papel: owner. A sua sess\xE3o \xE9 a dona da ${release}, vermelha no vigia: investigue e corrija com Fixes-Release ou reverta com Reverts-Release. Motivo: ${redReasons(note)}. Rollback: ${rollbackLine(release, note)} ${freezeLine(release, note)} Nota: ${JSON.stringify(note)}`;
+}
+function notifiedPrompt(release, note) {
+  const owner = noteOwner(note);
+  const push = note.drill ? "Ensaio: a main n\xE3o fica congelada." : "O seu pr\xF3ximo push de c\xF3digo para a main ser\xE1 recusado at\xE9 a corre\xE7\xE3o verde.";
+  return `Incidente ${release}: carregue a skill dbolt-release-incident. Papel: notified. Aviso, sem pedido de a\xE7\xE3o: um commit seu est\xE1 na faixa da ${release}, vermelha no vigia (motivo: ${redReasons(note)}). Quem age \xE9 a dona, ${owner ? formatSession(owner) : "sem dono"}; investigar, corrigir e reverter cabem a ela. ${push} Nota: ${JSON.stringify(note)}`;
 }
 function promptFor(action, note) {
-  switch (action.kind) {
-    case "recall":
-      return recallPrompt(action.release, action.role, note);
-    case "investigation":
-      return recallPrompt(action.release, "investigate", note);
-    case "remind":
-      return reminderPrompt(action.release, note);
-  }
+  return action.role === "owner" ? ownerPrompt(action.release, note) : notifiedPrompt(action.release, note);
 }
 function blockedPrompt(release) {
   const snapshot = {
@@ -20836,33 +20910,23 @@ function blockedPrompt(release) {
 async function deliver(input2) {
   const { action, text, title, delivery, log: log2 } = input2;
   const failures = [];
-  if (action.kind === "investigation") {
-    try {
-      const id = await delivery.create(text, title);
-      log2.info(`${action.release}: sess\xE3o de investiga\xE7\xE3o ${id} criada`);
-      return { outcome: "created", session: id };
-    } catch (error62) {
-      failures.push(`criar sess\xE3o: ${describe3(error62)}`);
-    }
-  } else {
-    try {
-      await delivery.prompt(action.target, text);
-      return { outcome: "prompt", session: action.target.id };
-    } catch (error62) {
-      failures.push(`prompt: ${describe3(error62)}`);
-    }
-    try {
-      const id = await delivery.fallback(action.target, text, title);
-      log2.warn(`${action.release}: ${formatSession(action.target)} recusou o prompt; chamado foi para ${id}`);
-      return { outcome: "fallback", session: id };
-    } catch (error62) {
-      failures.push(`fallback: ${describe3(error62)}`);
-    }
+  try {
+    await delivery.prompt(action.target, text);
+    return { outcome: "prompt", session: action.target.id };
+  } catch (error62) {
+    failures.push(`prompt: ${describe3(error62)}`);
   }
-  const target = action.kind === "investigation" ? void 0 : formatSession(action.target);
+  try {
+    const id = await delivery.fallback(action.target, text, title);
+    log2.warn(`${action.release}: ${formatSession(action.target)} recusou o prompt; chamado foi para ${id}`);
+    return { outcome: "fallback", session: id };
+  } catch (error62) {
+    failures.push(`fallback: ${describe3(error62)}`);
+  }
+  const target = formatSession(action.target);
   const role = roleOf(action);
   const reason = failures.join("; ");
-  log2.error(`${input2.drill ? "[ensaio] " : ""}n\xE3o consegui chamar ${target ?? "nova sess\xE3o de investiga\xE7\xE3o"} para ${action.release} (${role}): ${reason}`);
+  log2.error(`${input2.drill ? "[ensaio] " : ""}n\xE3o consegui chamar ${target} para ${action.release} (${role}): ${reason}`);
   if (!input2.recordFailure) return { outcome: "failed", session: null };
   try {
     if (await input2.recordFailure({ role, target, reason })) return { outcome: "recorded", session: null };
@@ -20921,7 +20985,12 @@ function createWatcher(options) {
           notesRef: config2.notesRef,
           token: auth,
           key,
-          recall: { ...failure2, failedAt: clock.now().toISOString(), by: `${me.harness}/${me.host}`, state: note.state }
+          recall: {
+            ...failure2,
+            failedAt: clock.now().toISOString(),
+            by: `${me.harness}/${me.host}`,
+            rollback: note.rollback?.outcome ?? null
+          }
         })
       },
       me
@@ -20943,7 +21012,7 @@ function createWatcher(options) {
       seen.clear();
       notes.clear();
     }
-    const me = { harness: options.harness, host: options.host(config2), incidentHost: config2.incidentHost };
+    const me = { harness: options.harness, host: options.host(config2) };
     let auth;
     try {
       auth = await getToken();
@@ -20965,6 +21034,8 @@ function createWatcher(options) {
     } else if (poll.kind === "missing") {
       etag = null;
       caughtUp = true;
+      notes.clear();
+      seen.clear();
     } else if (poll.kind === "changed") {
       let fetchedNotes = null;
       try {
@@ -20983,24 +21054,22 @@ function createWatcher(options) {
         etag = poll.etag;
         if (!caughtUp) log2.info(`recupera\xE7\xE3o: ${fetchedNotes.length} nota(s), janela de 8 h`);
         caughtUp = true;
+        const present = new Set(fetchedNotes.map((fetched2) => fetched2.key));
+        for (const key of [...notes.keys()]) if (!present.has(key)) notes.delete(key);
+        for (const key of [...seen.keys()]) if (!present.has(key)) seen.delete(key);
         for (const { key, raw, note } of fetchedNotes) {
           if (!note || seen.get(key) === raw) continue;
           seen.set(key, raw);
           notes.set(key, note);
-          if (!isRecent(note, now)) continue;
-          for (const action of route(note, me)) {
-            const done = await act(action, key, note, config2, me, auth);
-            if (done) handled.push(done);
-          }
         }
       }
     }
     for (const [key, note] of notes) {
       if (!isRecent(note, now)) continue;
-      const reminder = dueReminder(note, me, now);
-      if (!reminder) continue;
-      const done = await act(reminder, key, note, config2, me, auth);
-      if (done) handled.push(done);
+      for (const action of route(note, me, now)) {
+        const done = await act(action, key, note, config2, me, auth);
+        if (done) handled.push(done);
+      }
     }
     if (options.release) {
       await options.release.tick({ token: auth, notes, notesChanged: fetched }).catch((error62) => log2.warn(`release: ${describe3(error62)}`));
@@ -21080,11 +21149,6 @@ async function claimPoller(stateDir, pid) {
   await rename3(tmp, path);
   return await readHolder(path).catch(() => 0) === pid;
 }
-async function originMatches(exec, cwd, repository) {
-  if (!existsSync2(cwd)) return false;
-  const origin = await exec("git", ["-C", cwd, "remote", "get-url", "origin"], { timeoutMs: 1e4 });
-  return origin.code === 0 && new RegExp(`[/:]${repository}(\\.git)?$`).test(origin.stdout.trim());
-}
 function within(promise2, ms, timer2, what) {
   return new Promise((resolve, reject) => {
     const handle = timer2.set(() => reject(new Error(`${what}: sem resposta em ${ms} ms`)), ms);
@@ -21100,7 +21164,7 @@ function within(promise2, ms, timer2, what) {
     );
   });
 }
-function createDelivery(registry3, exec, config2) {
+function createDelivery(registry3) {
   const context = () => {
     if (!registry3.ctx) throw new Error("nenhum contexto OpenCode carregado");
     return registry3.ctx;
@@ -21119,27 +21183,11 @@ function createDelivery(registry3, exec, config2) {
       const directory = original.location?.directory;
       if (!directory) throw new Error(`sess\xE3o ${target.id} sem diret\xF3rio`);
       return promptNew(await ctx.session.create({ title, parentID: target.id, location: { directory } }), text);
-    },
-    async create(text, title) {
-      const { repository } = config2();
-      const ctx = context();
-      const candidates = [join4(homedir2(), "dev", "dbolt")];
-      const listed = await ctx.session.list({ limit: 50, order: "desc" }).catch(() => []);
-      const sessions = Array.isArray(listed) ? listed : listed.data ?? [];
-      for (const session of sessions) if (session.location?.directory) candidates.push(session.location.directory);
-      if (ctx.location?.directory) candidates.push(ctx.location.directory);
-      for (const directory of [...new Set(candidates)]) {
-        if (await originMatches(exec, directory, repository)) {
-          return promptNew(await ctx.session.create({ title, location: { directory } }), text);
-        }
-      }
-      throw new Error(`nenhum checkout de ${repository} neste host`);
     }
   };
 }
 function startPoller(registry3, deps, handover) {
   const { log: log2, timer: timer2 } = deps;
-  let current = null;
   let watcher = null;
   let holding = false;
   let ready = null;
@@ -21165,14 +21213,14 @@ function startPoller(registry3, deps, handover) {
     watcher ??= createWatcher({
       harness: "opencode",
       host: (config2) => config2.instance,
-      loadConfig: async () => current = await deps.loadConfig(),
+      loadConfig: deps.loadConfig,
       stateDir: deps.stateDir,
       sha: deps.sha,
       pid: deps.pid,
       clock: deps.clock,
       fetch: deps.fetch,
       exec: deps.exec,
-      delivery: createDelivery(registry3, deps.exec, () => current),
+      delivery: createDelivery(registry3),
       log: log2,
       // No release UI here: the status only tells which pushes failed before the tag.
       release: createReleaseTracker({
@@ -21226,7 +21274,7 @@ var index_default = {
   // No dispose: the poller and the newest context outlive location eviction (see ./poller.ts).
   setup(ctx) {
     attach(registry2, ctx, {
-      sha: true ? "10d7ea0b5a0ea0f178a9a2be33193bf888ed2c9a" : "unknown",
+      sha: true ? "f6ccc4867f3cd9452fe3490d2957441751f92f44" : "unknown",
       stateDir: stateDirectory(),
       pid: process.pid,
       clock: { now: () => /* @__PURE__ */ new Date() },

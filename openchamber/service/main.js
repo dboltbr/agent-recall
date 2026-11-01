@@ -6003,7 +6003,7 @@ var RECENT_VERDICT_MS = 2 * 60 * 60 * 1e3;
 var STEP_IDS = ["verify", "images", "deploy", "tag", "watch"];
 var StepIdSchema = z.enum(STEP_IDS);
 var StepStateSchema = z.enum(["pending", "running", "done", "failed", "cancelled", "skipped"]);
-var JobStateSchema = z.enum(["queued", "running", "success", "failure", "cancelled", "skipped"]);
+var JobStateSchema = z.enum(["queued", "waiting", "running", "success", "failure", "cancelled", "skipped"]);
 var VerdictSchema = z.enum(["green", "reverted", "red", "inconclusive", "failed", "cancelled", "none"]);
 var SessionSchema = z.object({
   harness: z.enum(["paseo", "opencode"]),
@@ -6041,12 +6041,12 @@ var SignalSchema = z.object({
   outcome: z.string(),
   reason: z.string().nullable()
 });
-var HANDOFF_ROLES = ["investigate", "fix", "remind", "owner", "blocked"];
+var HANDOFF_ROLES = ["owner", "notified", "blocked"];
 var HandoffRoleSchema = z.enum(HANDOFF_ROLES);
 var HandoffSchema = z.object({
   role: HandoffRoleSchema,
   session: SessionSchema,
-  /** When this host delivered the call; null for what only the note says (owner, fix session). */
+  /** When this host delivered the call; null for what only the note says (owner, notified). */
   at: z.string().nullable()
 });
 var ReleaseSchema = z.object({
@@ -6075,8 +6075,12 @@ var ReleaseSchema = z.object({
   failedJob: z.object({ name: z.string(), url: z.string().nullable() }).nullable(),
   revert: z.object({ commits: z.array(z.string()), commit: z.string().nullable() }).nullable(),
   signals: z.array(SignalSchema),
-  /** `state` of the release-watch incident note, when there is one (red releases only). */
-  noteState: z.string().nullable(),
+  /**
+   * The watch's rollback from the incident note (red releases only): `outcome` (`pending`,
+   * `reverted`, `blocked`, `failed`, `none`), `target` (`dbolt-deploy` or `main`) and whether the
+   * note freezes main (not resolved, not a drill). Defaults so older timeline cards still render.
+   */
+  rollback: z.object({ outcome: z.string(), target: z.string().nullable(), frozen: z.boolean() }).nullable().default(null),
   /** The note carries a `recall` failure: no agent could be told. */
   recallFailed: z.boolean(),
   /** Session that pushed the head commit (newest trailer of the range as fallback). */
@@ -6085,7 +6089,7 @@ var ReleaseSchema = z.object({
   sessions: z.array(SessionSchema),
   /**
    * Where the incident went: the calls this host's harnesses delivered (local record), then the
-   * note's owner and fix session. Empty without an incident. Defaults so timeline cards written
+   * note's owner and notified sessions. Empty without an incident. Defaults so timeline cards written
    * before the field still render.
    */
   handoffs: z.array(HandoffSchema).default([]),
@@ -6129,10 +6133,16 @@ function classifyJob(name) {
   const [prefix, rest] = splitJobName(name);
   if (prefix === "verify-production") return "verify";
   if (prefix.startsWith("images-")) return rest !== null && /^build-push/.test(rest) ? "images" : null;
-  if (DEPLOY_TIERS.has(prefix) || name === "flags") return "deploy";
-  if (name === "release-tag") return "tag";
-  if (name === "watch") return "watch";
+  if (DEPLOY_TIERS.has(prefix) || name === "flags" || name === PREVIOUS_WATCH) return "deploy";
+  if (name === "release-tag" || name === WATCH_DISPATCH) return "tag";
   return null;
+}
+var PREVIOUS_WATCH = "previous-watch";
+var WATCH_DISPATCH = "watch";
+var WATCH_WORKFLOW = "release-watch";
+function watchRunNumber(run) {
+  const match = /^watch release-(\d+)$/.exec((run.display_title ?? run.name ?? "").trim());
+  return match ? Number(match[1]) : null;
 }
 function imageName(name) {
   const [prefix, rest] = splitJobName(name);
@@ -6147,17 +6157,19 @@ function splitJobName(name) {
   return at < 0 ? [name.trim(), null] : [name.slice(0, at).trim(), name.slice(at + 3).trim()];
 }
 function jobState(job) {
-  if (job.status !== "completed") return job.status === "in_progress" ? "running" : "queued";
+  if (job.status === "in_progress") return "running";
+  if (job.status === "pending" || job.status === "waiting") return "waiting";
+  if (job.status !== "completed") return "queued";
   if (job.conclusion === "success" || job.conclusion === "neutral") return "success";
   if (job.conclusion === "skipped") return "skipped";
   if (job.conclusion === "cancelled") return "cancelled";
   return "failure";
 }
-function toJob(job) {
+function toJob(job, run = "release") {
   return {
     id: job.id,
     name: job.name,
-    step: classifyJob(job.name),
+    step: run === "watch" ? "watch" : classifyJob(job.name),
     image: imageName(job.name),
     state: jobState(job),
     runner: job.runner_name || null,
@@ -6175,10 +6187,20 @@ function time2(value) {
   const ms = Date.parse(value);
   return Number.isNaN(ms) ? null : ms;
 }
-function buildStep(id, jobs, runDone, now) {
+function latest(a, b) {
+  const later = time2(b);
+  return later !== null && later > (time2(a) ?? -Infinity) ? b : a;
+}
+function buildStep(id, jobs, runDone, now, attemptStart = null) {
   const live = jobs.filter((job) => job.step === id && job.state !== "skipped");
   const failed = live.find((job) => job.state === "failure");
-  const starts = live.filter((job) => job.state !== "queued").map((job) => time2(job.startedAt)).filter((ms) => ms !== null);
+  const attemptMs = time2(attemptStart);
+  const current = attemptMs === null ? live : live.filter((job) => {
+    const start = time2(job.startedAt);
+    return start !== null && start >= attemptMs;
+  });
+  const timed = current.length ? current : live;
+  const starts = timed.filter((job) => job.state !== "queued" && job.state !== "waiting").map((job) => time2(job.startedAt)).filter((ms) => ms !== null);
   const startedMs = starts.length ? Math.min(...starts) : null;
   let state;
   if (live.length === 0) state = runDone ? "skipped" : "pending";
@@ -6189,7 +6211,7 @@ function buildStep(id, jobs, runDone, now) {
   else if (live.some((job) => job.state === "cancelled")) state = "cancelled";
   else state = runDone ? "cancelled" : "pending";
   const finished = state === "done" || state === "failed" || state === "cancelled";
-  const ends = live.map((job) => time2(job.completedAt)).filter((ms) => ms !== null);
+  const ends = timed.map((job) => time2(job.completedAt)).filter((ms) => ms !== null);
   const completedMs = finished && ends.length ? Math.max(...ends) : null;
   const images = id === "images";
   return {
@@ -6203,7 +6225,6 @@ function buildStep(id, jobs, runDone, now) {
     failedJob: failed?.name ?? null
   };
 }
-var SHIPPED_REVERT = /* @__PURE__ */ new Set(["reverted", "already-reverted"]);
 function record(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : null;
 }
@@ -6211,14 +6232,20 @@ function strings(value) {
   return Array.isArray(value) ? value.filter((item) => typeof item === "string") : [];
 }
 function noteRevert(note) {
-  const revert = record(note.revert);
-  const decision = record(note.decision);
-  const reverted = note.state === "reverted" || note.state === "escalated" && SHIPPED_REVERT.has(String(revert?.["reason"])) || decision?.["action"] === "revert";
-  if (!reverted) return null;
-  const commits = strings(revert?.["commits"]);
+  const rollback = record(note.rollback);
+  if (rollback?.["outcome"] !== "reverted") return null;
   return {
-    commits: commits.length ? commits : strings(decision?.["commits"]),
-    commit: typeof revert?.["commit"] === "string" ? revert["commit"] : null
+    commits: strings(rollback["commits"]),
+    commit: typeof rollback["commit"] === "string" ? rollback["commit"] : null
+  };
+}
+function noteRollback(note) {
+  const rollback = record(note.rollback);
+  if (!rollback) return null;
+  return {
+    outcome: typeof rollback["outcome"] === "string" ? rollback["outcome"] : "pending",
+    target: typeof rollback["target"] === "string" ? rollback["target"] : null,
+    frozen: !note.resolvedBy && note.drill !== true
   };
 }
 function noteSignals(note) {
@@ -6241,7 +6268,8 @@ function watchVerdict(input) {
   if (input.steps.some((step) => step.id !== "watch" && step.state === "failed")) return "failed";
   const watch = input.jobs.find((job) => job.step === "watch" && job.state !== "skipped");
   if (watch?.state === "success") return "green";
-  if (watch?.state === "failure") return "inconclusive";
+  if (watch?.state === "failure" || watch?.state === "cancelled") return "inconclusive";
+  if (!watch && input.jobs.some((job) => job.name === WATCH_DISPATCH && job.step === "tag" && job.state === "success")) return "inconclusive";
   if (input.conclusion === "cancelled") return "cancelled";
   if (!input.jobs.some((job) => job.step !== null && job.state !== "skipped")) return "none";
   return input.conclusion === "success" ? "none" : watch ? "inconclusive" : "failed";
@@ -6255,6 +6283,8 @@ function firstLine(message) {
 function toSession(ref) {
   return { harness: ref.harness, host: ref.host, id: ref.id };
 }
+var WATCH_DISPATCH_GRACE_MS = 10 * 60 * 1e3;
+var NOT_STARTED = /* @__PURE__ */ new Set(["queued", "waiting"]);
 function releaseHandoffs(note, delivered) {
   if (!note) return delivered.filter((handoff2) => handoff2.role === "blocked");
   const out = [];
@@ -6263,15 +6293,21 @@ function releaseHandoffs(note, delivered) {
   };
   const ordered = [...delivered].sort((a, b) => (time2(a.at) ?? 0) - (time2(b.at) ?? 0));
   for (const handoff2 of ordered) add(handoff2.role, handoff2.session, handoff2.at);
-  add("owner", parseSessionValue(note.owner), null);
-  add("fix", parseSessionValue(note.fix?.session), null);
+  add("owner", toSessionRef(note.owner), null);
+  for (const entry of Array.isArray(note.notified) ? note.notified : []) add("notified", toSessionRef(entry), null);
   return out;
 }
 function buildRelease(input) {
   const { run, note, now } = input;
-  const jobs = input.jobs.map(toJob);
-  const completed = run.status === "completed";
-  const steps = STEP_IDS.map((id) => buildStep(id, jobs, completed, now));
+  const watchRun = input.watch?.run ?? null;
+  const jobs = [...input.jobs.map((job) => toJob(job)), ...(input.watch?.jobs ?? []).map((job) => toJob(job, "watch"))];
+  const dispatch = jobs.find((job) => job.name === WATCH_DISPATCH && job.step === "tag");
+  const dispatchedAt = time2(dispatch?.state === "success" ? dispatch.completedAt : null);
+  const watchOpen = watchRun ? watchRun.status !== "completed" : dispatchedAt !== null && now.getTime() - dispatchedAt < WATCH_DISPATCH_GRACE_MS;
+  const completed = run.status === "completed" && !watchOpen;
+  const started = run.status === "in_progress" || watchOpen || jobs.some((job) => !NOT_STARTED.has(job.state));
+  const attemptStart = (run.run_attempt ?? 1) > 1 ? run.run_started_at ?? null : null;
+  const steps = STEP_IDS.map((id) => buildStep(id, jobs, id === "watch" ? completed : run.status === "completed", now, attemptStart));
   const verdict = watchVerdict({ completed, conclusion: run.conclusion, steps, jobs, note });
   const failed = jobs.find((job) => job.step !== null && job.step !== "watch" && job.state === "failure");
   const tagged = input.tagged === true || jobs.some((job) => job.step === "tag" && job.state === "success");
@@ -6281,7 +6317,6 @@ function buildRelease(input) {
   };
   const trailers = (input.commits ?? []).map((commit) => parseAgentSession(commit.commit.message));
   for (const ref of trailers) add(ref);
-  for (const value of note?.sessions ?? []) add(toSessionRef(value));
   const head = run.head_commit?.message ?? "";
   const pusher = parseAgentSession(head) ?? [...trailers].reverse().find((ref) => ref !== null) ?? null;
   add(pusher);
@@ -6292,7 +6327,7 @@ function buildRelease(input) {
     runId: run.id,
     attempt: run.run_attempt ?? 1,
     url: run.html_url,
-    status: completed ? "completed" : run.status === "in_progress" ? "running" : "queued",
+    status: completed ? "completed" : started ? "running" : "queued",
     conclusion: run.conclusion,
     event: run.event,
     headSha: run.head_sha,
@@ -6300,7 +6335,7 @@ function buildRelease(input) {
     createdAt: run.created_at,
     updatedAt: run.updated_at,
     startedAt: run.run_started_at ?? null,
-    completedAt: completed ? run.updated_at : null,
+    completedAt: completed ? latest(run.updated_at, watchRun?.updated_at ?? null) : null,
     steps,
     current,
     verdict,
@@ -6308,7 +6343,7 @@ function buildRelease(input) {
     failedJob: failed ? { name: failed.name, url: failed.url } : null,
     revert: note ? noteRevert(note) : null,
     signals: note ? noteSignals(note) : [],
-    noteState: note?.state ?? null,
+    rollback: note ? noteRollback(note) : null,
     recallFailed: note ? record(note.recall) !== null : false,
     pusher: pusher ? toSession(pusher) : null,
     sessions,
@@ -6346,9 +6381,13 @@ function buildSnapshot(input) {
 function isActive(release) {
   return release.status !== "completed";
 }
+function releasePhase(release) {
+  if (release.status === "queued") return "queued";
+  return release.current === "watch" ? "watch" : "pipeline";
+}
+var PHASE_ORDER = { pipeline: 0, watch: 1, queued: 2 };
 function activeReleases(snapshot) {
-  const active = snapshot.releases.filter(isActive);
-  return [...active.filter((release) => release.status === "running"), ...active.filter((release) => release.status !== "running")];
+  return snapshot.releases.filter(isActive).sort((a, b) => PHASE_ORDER[releasePhase(a)] - PHASE_ORDER[releasePhase(b)] || a.number - b.number);
 }
 var RELEASE_TIME_ZONE_OFFSET_MS = -3 * 60 * 60 * 1e3;
 
@@ -6453,9 +6492,7 @@ function parseNote(raw) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const note = value;
   const release = note["release"];
-  if (typeof release !== "string" && typeof release !== "number" || typeof note["state"] !== "string") {
-    return null;
-  }
+  if (typeof release !== "string" && typeof release !== "number") return null;
   if (typeof note["updatedAt"] !== "string") return null;
   return value;
 }
@@ -6545,6 +6582,7 @@ function notesByRelease(notes) {
 function createReleaseSource(options) {
   const repository = options.repository ?? RELEASE_REPOSITORY;
   const workflow = options.workflow ?? RELEASE_WORKFLOW;
+  const watchWorkflow = options.watchWorkflow ?? WATCH_WORKFLOW;
   const org = options.org ?? RUNNER_ORG;
   const get = createGitHubClient(options.fetch);
   const finishedJobs = /* @__PURE__ */ new Map();
@@ -6552,7 +6590,18 @@ function createReleaseSource(options) {
   let snapshot = null;
   let runners = [];
   let loadedRuns = null;
-  const runsPath = (perPage, page = 1) => `repos/${repository}/actions/workflows/${workflow}.yml/runs?per_page=${perPage}&page=${page}`;
+  let watchRuns = /* @__PURE__ */ new Map();
+  const runsPath = (perPage, page = 1, name = workflow) => `repos/${repository}/actions/workflows/${name}.yml/runs?per_page=${perPage}&page=${page}`;
+  async function watchPage(perPage, token) {
+    const body = await get(runsPath(perPage, 1, watchWorkflow), token);
+    const byNumber = /* @__PURE__ */ new Map();
+    for (const run of body.workflow_runs) {
+      const number3 = watchRunNumber(run);
+      const known = number3 === null ? void 0 : byNumber.get(number3);
+      if (number3 !== null && (!known || run.id > known.id)) byNumber.set(number3, run);
+    }
+    return byNumber;
+  }
   async function jobsOf(run, token) {
     const key = `${run.id}:${run.run_attempt ?? 1}`;
     const done = finishedJobs.get(key);
@@ -6580,9 +6629,11 @@ function createReleaseSource(options) {
   async function tagList(token) {
     return tagNumbers(await get(`repos/${repository}/git/matching-refs/tags/release-`, token));
   }
-  async function build(run, tags, notes, token) {
-    const [jobs, commits] = await Promise.all([
+  async function build(run, tags, notes, watches, token) {
+    const watchRun = watches.get(run.run_number) ?? null;
+    const [jobs, watchJobs, commits] = await Promise.all([
       jobsOf(run, token),
+      watchRun ? jobsOf(watchRun, token) : Promise.resolve(null),
       commitsOf(run, tags, token).catch((error2) => {
         options.log.warn(`faixa de ${releaseNameOf(run.run_number)}: ${describe2(error2)}`);
         return null;
@@ -6598,6 +6649,7 @@ function createReleaseSource(options) {
       commits,
       tagged: tags.includes(run.run_number),
       handoffs,
+      watch: watchRun && watchJobs ? { run: watchRun, jobs: watchJobs } : null,
       now: options.clock.now()
     });
   }
@@ -6605,12 +6657,21 @@ function createReleaseSource(options) {
     const now = options.clock.now();
     const notes = notesByRelease(input.notes);
     try {
-      const [page, tags] = await Promise.all([get(runsPath(RELEASE_HISTORY), input.token), tagList(input.token)]);
+      const [page, tags, watches] = await Promise.all([
+        get(runsPath(RELEASE_HISTORY), input.token),
+        tagList(input.token),
+        // Room for re-dispatched watches; a failure keeps the last watch runs instead of the whole load.
+        watchPage(RELEASE_HISTORY * 2, input.token).catch((error2) => {
+          options.log.warn(`runs do vigia: ${describe2(error2)}`);
+          return watchRuns;
+        })
+      ]);
       loadedRuns = page;
+      watchRuns = watches;
       const previous = new Map((snapshot?.releases ?? []).map((release) => [release.runId, release]));
       const releases = await pool(
         page.workflow_runs,
-        (run) => build(run, tags, notes, input.token).catch((error2) => {
+        (run) => build(run, tags, notes, watches, input.token).catch((error2) => {
           const kept = previous.get(run.id);
           if (!kept) throw error2;
           options.log.warn(`${releaseNameOf(run.run_number)}: ${describe2(error2)}`);
@@ -6634,13 +6695,18 @@ function createReleaseSource(options) {
   async function lookup(input) {
     const known = snapshot?.releases.find((release) => release.number === input.number);
     if (known) return known;
-    const latest = snapshot?.releases[0]?.number ?? (await get(runsPath(1), input.token)).workflow_runs[0]?.run_number;
-    if (latest === void 0 || input.number > latest || input.number < 1) return null;
-    const guess = Math.floor((latest - input.number) / 100) + 1;
+    const latest2 = snapshot?.releases[0]?.number ?? (await get(runsPath(1), input.token)).workflow_runs[0]?.run_number;
+    if (latest2 === void 0 || input.number > latest2 || input.number < 1) return null;
+    const guess = Math.floor((latest2 - input.number) / 100) + 1;
     for (const page of [guess, guess + 1, guess - 1].filter((value) => value >= 1)) {
       const body = await get(runsPath(100, page), input.token);
       const run = body.workflow_runs.find((candidate) => candidate.run_number === input.number);
-      if (run) return build(run, await tagList(input.token), notesByRelease(input.notes), input.token);
+      if (!run) continue;
+      const watches = watchRuns.has(run.run_number) ? watchRuns : await watchPage(100, input.token).catch((error2) => {
+        options.log.warn(`runs do vigia: ${describe2(error2)}`);
+        return /* @__PURE__ */ new Map();
+      });
+      return build(run, await tagList(input.token), notesByRelease(input.notes), watches, input.token);
     }
     return null;
   }
