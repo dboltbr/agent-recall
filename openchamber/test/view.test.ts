@@ -30,7 +30,7 @@ test("headline e statusLabel: etapa em curso enquanto ativo, veredito depois", (
   assert.equal(headline(running), "imagens 3/9");
   assert.equal(statusLabel(running), "em andamento");
   assert.equal(headline(failed), "verify-production / check falhou");
-  assert.deepEqual(revertParts(reverted), { what: "vigia reverteu no dbolt-deploy · main congelada", notice: "agente avisado" });
+  assert.deepEqual(revertParts(reverted), { what: "vigia reverteu no dbolt-deploy · main congelada", notice: "dona ses_culp" });
   assert.equal(revertParts(green), null);
   assert.equal(releaseColumn(failed), "#169 27/10 06:26");
   assert.equal(releaseColumn(green), "#171 27/10 10:00");

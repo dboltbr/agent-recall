@@ -282,6 +282,22 @@ test("rollback que fica pendente (vigia morreu): o dono é chamado aos 10 min, s
   assert.match(delivery.recorded.prompts[0]!.text, /Rollback: pendente: o vigia não gravou o desfecho do rollback/);
 });
 
+test("nota removida antes do desfecho sai do cache: o dono não é chamado aos 10 min", async () => {
+  const stuck = note({
+    release: "release-96",
+    owner: session("opencode", "archdev", "ses_owner"),
+    rollback: { outcome: "pending" },
+    verdict: { verdict: "red", sources: {}, at: hoursAgo(0.1) },
+  });
+  const notes: Record<string, Note> = { t: stuck };
+  const { watcher, delivery, clock } = await setup({ notes, refs: [{ status: 200, etag: '"e1"' }, { status: 200, etag: '"e2"' }] });
+  await watcher.tick();
+  delete notes["t"];
+  clock.set(new Date(NOW.getTime() + 4 * 60_000));
+  await watcher.tick();
+  assert.equal(delivery.recorded.prompts.length, 0);
+});
+
 test("credencial recusada (401) não grava heartbeat", async () => {
   const { watcher, stateDir } = await setup({ notes: {}, refs: [{ status: 401 }] });
   const report = await watcher.tick();

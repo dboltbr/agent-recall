@@ -33,7 +33,7 @@ export function noteOwner(note: Note): SessionRef | null {
 export function notifiedSessions(note: Note): SessionRef[] {
   const owner = noteOwner(note);
   const out: SessionRef[] = [];
-  for (const entry of note.notified ?? []) {
+  for (const entry of Array.isArray(note.notified) ? note.notified : []) {
     const ref = toSessionRef(entry);
     if (ref && !(owner && sameSession(owner, ref)) && !out.some((seen) => sameSession(seen, ref))) out.push(ref);
   }

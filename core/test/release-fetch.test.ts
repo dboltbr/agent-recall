@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createReleaseSource, createReleaseTracker, FORCE_THROTTLE_MS, IDLE_EVERY_TICKS, previousTag, tagNumbers } from "../release-fetch.ts";
-import type { GitHubJob, GitHubRun } from "../release-status.ts";
+import { WATCH_DISPATCH_GRACE_MS, type GitHubJob, type GitHubRun } from "../release-status.ts";
 import type { Note } from "../types.ts";
 import { fakeApi, fixedClock, NOW, quietLog, type ApiReply } from "./fakes.ts";
 import { commit, jobsInput, released, midImages, run, RUNNERS, watchRun, type Released } from "./releases.ts";
@@ -28,7 +28,7 @@ function api(state: State) {
     return { body: { total_count: runs.length, workflow_runs: runs }, etag: `"watch-${runs.map((r) => `${r.id}${r.status}`).join()}"` };
   };
   const routes: Record<string, ApiReply | (() => ApiReply)> = {
-    [WATCH_RUNS(15)]: watchList,
+    [WATCH_RUNS(30)]: watchList,
     [WATCH_RUNS(100)]: watchList,
     [RUNS]: () => ({ status: state.runsStatus ?? 200, body: { total_count: state.runs.length, workflow_runs: state.runs }, etag: state.runsEtag ?? '"runs-1"' }),
     [TAGS]: { body: [{ ref: "refs/tags/release-170" }, { ref: "refs/tags/release-171" }], etag: '"tags"' },
@@ -76,6 +76,28 @@ test("tags e tag anterior", () => {
   assert.equal(previousTag(tags, 182), "release-171");
   assert.equal(previousTag(tags, 171), "release-51");
   assert.equal(previousTag(tags, 51), null);
+});
+
+test("runs do vigia fora do ar: o snapshot carrega o resto, sem vigia", async () => {
+  const { state } = fixture();
+  const github = api(state);
+  const fetch: typeof github.fetch = async (url, init) =>
+    url.includes("release-watch.yml/runs") ? new Response(null, { status: 502 }) : github.fetch(url, init);
+  const clock = fixedClock();
+  const source = createReleaseSource({ fetch, clock, log: quietLog });
+  const snapshot = await source.load({ token: "t", notes: NOTES });
+  assert.equal(snapshot.error, null);
+  assert.deepEqual(
+    snapshot.releases.map((release) => [release.number, release.status]),
+    [
+      [172, "running"],
+      [171, "running"],
+    ],
+    "171 despachou o vigia há 2 min: segue aberta na folga",
+  );
+  clock.set(new Date(NOW.getTime() + WATCH_DISPATCH_GRACE_MS));
+  const later = await source.load({ token: "t", notes: NOTES });
+  assert.equal(later.releases[1]!.verdict, "inconclusive");
 });
 
 test("load: snapshot das runs, jobs, faixa e runners; depois só pergunta com ETag", async () => {

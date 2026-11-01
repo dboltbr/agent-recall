@@ -155,6 +155,8 @@ export function createWatcher(options: WatcherOptions): Watcher {
     } else if (poll.kind === "missing") {
       etag = null;
       caughtUp = true;
+      notes.clear();
+      seen.clear();
     } else if (poll.kind === "changed") {
       let fetchedNotes: FetchedNote[] | null = null;
       try {
@@ -173,6 +175,10 @@ export function createWatcher(options: WatcherOptions): Watcher {
         etag = poll.etag;
         if (!caughtUp) log.info(`recuperação: ${fetchedNotes.length} nota(s), janela de 8 h`);
         caughtUp = true;
+        // The fetch is the whole note set: a removed note leaves the map, so it is never routed again.
+        const present = new Set(fetchedNotes.map((fetched) => fetched.key));
+        for (const key of [...notes.keys()]) if (!present.has(key)) notes.delete(key);
+        for (const key of [...seen.keys()]) if (!present.has(key)) seen.delete(key);
         for (const { key, raw, note } of fetchedNotes) {
           if (!note || seen.get(key) === raw) continue;
           seen.set(key, raw);

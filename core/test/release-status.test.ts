@@ -167,7 +167,16 @@ test("revertido: rollback `reverted` no dbolt-deploy, main congelada, sinais dis
   assert.equal(release.verdict, "reverted");
   assert.deepEqual(release.revert, { commits: ["a", "b", "c"], commit: "r3v" });
   assert.deepEqual(release.rollback, { outcome: "reverted", target: "dbolt-deploy", frozen: true });
-  assert.equal(revertSummary(release), "vigia reverteu no dbolt-deploy · main congelada · agente avisado");
+  assert.equal(revertSummary(release), "vigia reverteu no dbolt-deploy · main congelada · dona ses_culp", "sem entrega deste host: só o nome");
+  const told = buildRelease({
+    run: run({ run_number: 172, status: "completed", conclusion: "success" }),
+    ...released("failure"),
+    note,
+    commits: null,
+    handoffs: [{ role: "owner", session: { harness: "opencode", host: "archdev", id: "ses_culprit" }, at: minutesAgo(0.5) }],
+    now: NOW,
+  });
+  assert.equal(revertSummary(told), "vigia reverteu no dbolt-deploy · main congelada · agente avisado");
   assert.deepEqual(
     release.signals.map((signal) => [signal.label, signal.outcome]),
     [

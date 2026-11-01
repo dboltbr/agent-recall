@@ -82,6 +82,24 @@ test("despachado e ainda fora da lista: aberta por até 10 min, depois termina s
   assert.equal(fresh.current, "watch");
   const late = release(347, ended, input, at(WATCH_DISPATCH_GRACE_MS));
   assert.equal(late.status, "completed");
+  assert.equal(late.verdict, "inconclusive", "publicada e nunca julgada: não é release vazia");
+});
+
+test("só flags, vigia na fila: etapas sem job já acabaram com o run da release, a atual é o vigia", () => {
+  const jobs: GitHubJob[] = [
+    job("plan", "success", [6, 5.8]),
+    job("verify-production / check", "success", [5.5, 3]),
+    job("flags", "success", [3, 2.5]),
+    job("release-tag", "success", [2.5, 2.4]),
+    job("watch", "success", [2.4, 2.3]),
+  ];
+  const queuedWatch = watchRun(351, "running");
+  const watch = { run: { ...queuedWatch!.run, status: "queued" }, jobs: [job("watch", "queued")] };
+  const flags = release(351, { status: "completed", conclusion: "success" }, { jobs, watch });
+  assert.equal(flags.status, "running");
+  assert.equal(stepOf(flags, "images").state, "skipped");
+  assert.equal(flags.current, "watch");
+  assert.equal(releasePhase(flags), "watch");
 });
 
 test("run pendente com job andando está em andamento; sem job nenhum está na fila", () => {

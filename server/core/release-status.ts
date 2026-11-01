@@ -7,6 +7,8 @@ import { parseAgentSession, sameSession, toSessionRef } from "./trailer.ts";
 import type { Note, SessionRef } from "./types.ts";
 
 export const RELEASE_REPOSITORY = "dboltbr/dbolt";
+/** Where the watch reverts a release's pin (`rollback.target` `dbolt-deploy`). */
+export const DEPLOY_REPOSITORY = "dboltbr/dbolt-deploy";
 export const RELEASE_WORKFLOW = "release";
 export const RUNNER_ORG = "dboltbr";
 /** How many workflow runs the snapshot keeps (active and completed, newest first). */
@@ -451,6 +453,8 @@ export function watchVerdict(input: VerdictInput): Verdict | null {
   if (watch?.state === "success") return "green";
   // Published but not judged: a failed watch without a note, or a cancelled one.
   if (watch?.state === "failure" || watch?.state === "cancelled") return "inconclusive";
+  // Dispatched, but no watch run showed up within the grace window: published, never judged.
+  if (!watch && input.jobs.some((job) => job.name === WATCH_DISPATCH && job.step === "tag" && job.state === "success")) return "inconclusive";
   if (input.conclusion === "cancelled") return "cancelled";
   if (!input.jobs.some((job) => job.step !== null && job.state !== "skipped")) return "none";
   return input.conclusion === "success" ? "none" : watch ? "inconclusive" : "failed";
@@ -505,7 +509,7 @@ export function releaseHandoffs(note: Note | null, delivered: readonly Handoff[]
   const ordered = [...delivered].sort((a, b) => (time(a.at) ?? 0) - (time(b.at) ?? 0));
   for (const handoff of ordered) add(handoff.role, handoff.session, handoff.at);
   add("owner", toSessionRef(note.owner), null);
-  for (const entry of note.notified ?? []) add("notified", toSessionRef(entry), null);
+  for (const entry of Array.isArray(note.notified) ? note.notified : []) add("notified", toSessionRef(entry), null);
   return out;
 }
 
@@ -521,7 +525,9 @@ export function buildRelease(input: ReleaseInput): Release {
     : dispatchedAt !== null && now.getTime() - dispatchedAt < WATCH_DISPATCH_GRACE_MS;
   const completed = run.status === "completed" && !watchOpen;
   const started = run.status === "in_progress" || watchOpen || jobs.some((job) => !NOT_STARTED.has(job.state));
-  const steps = STEP_IDS.map((id) => buildStep(id, jobs, completed, now, (run.run_attempt ?? 1) > 1 ? run.run_started_at ?? null : null));
+  // verify→tag end with the release run; only the watch step waits for the watch run.
+  const attemptStart = (run.run_attempt ?? 1) > 1 ? (run.run_started_at ?? null) : null;
+  const steps = STEP_IDS.map((id) => buildStep(id, jobs, id === "watch" ? completed : run.status === "completed", now, attemptStart));
   const verdict = watchVerdict({ completed, conclusion: run.conclusion, steps, jobs, note });
   const failed = jobs.find((job) => job.step !== null && job.step !== "watch" && job.state === "failure");
   const tagged = input.tagged === true || jobs.some((job) => job.step === "tag" && job.state === "success");
@@ -897,7 +903,10 @@ export function freezeLabel(release: Release): string | null {
 /** Whether the incident's owner was told: `agente avisado`, `aviso ao agente falhou`, `sem dono`. */
 function noticeLabel(release: Release): string {
   if (release.recallFailed) return "aviso ao agente falhou";
-  return release.handoffs.some((handoff) => handoff.role === "owner") ? "agente avisado" : "sem dono";
+  // Only this host's delivery is known: an owner handled elsewhere (or not yet) is named, not claimed told.
+  if (release.handoffs.some((handoff) => handoff.role === "owner" && handoff.at !== null)) return "agente avisado";
+  const owner = release.handoffs.find((handoff) => handoff.role === "owner");
+  return owner ? `dona ${owner.session.id.slice(0, 8)}` : "sem dono";
 }
 
 /** `vigia reverteu no dbolt-deploy · main congelada · agente avisado` for reverted releases. */

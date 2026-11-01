@@ -1,5 +1,6 @@
 // DOM pieces shared by the panel, the page and the status strip.
 import {
+  DEPLOY_REPOSITORY,
   formatAgo,
   formatDuration,
   imageJobs,
@@ -210,7 +211,7 @@ export function outcomeBanner(release: Release, actions: Actions): HTMLElement |
     const revertCommit = release.revert?.commit ?? null;
     // The pin revert lives in dbolt-deploy; only a flags revert is a commit of this repository.
     const openRevert = (sha: string) =>
-      release.rollback?.target === "main" ? actions.openCommit(sha) : actions.openUrl(`https://github.com/dboltbr/dbolt-deploy/commit/${sha}`);
+      release.rollback?.target === "main" ? actions.openCommit(sha) : actions.openUrl(`https://github.com/${DEPLOY_REPOSITORY}/commit/${sha}`);
     return h(
       "div",
       { class: "rl-banner warn" },

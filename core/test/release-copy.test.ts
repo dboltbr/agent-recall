@@ -166,7 +166,7 @@ test("vereditos e reversões: só runs terminados com palavra do vigia", () => {
   );
   assert.deepEqual(verdictBanner(reverted(170)), {
     tone: "warn",
-    text: "vigia reverteu no dbolt-deploy · main congelada · agente avisado",
+    text: "vigia reverteu no dbolt-deploy · main congelada · dona ses_push",
     link: "signals",
   });
   const blocked = { ...reverted(170), verdict: "red" as const, rollback: { outcome: "blocked", target: "dbolt-deploy", frozen: true } };
@@ -186,7 +186,7 @@ test("freshness: idade do snapshot e a falha do GitHub", () => {
 });
 
 test("verdictSignals: a célula de sinais da tabela de vereditos", () => {
-  assert.deepEqual(verdictSignals(reverted(170)), { text: "vigia reverteu no dbolt-deploy · main congelada · agente avisado", tone: "warn" });
+  assert.deepEqual(verdictSignals(reverted(170)), { text: "vigia reverteu no dbolt-deploy · main congelada · dona ses_push", tone: "warn" });
   assert.deepEqual(verdictSignals(done(171)), { text: "sem regressão", tone: "muted" });
   const failed = done(4818, [job("verify-production / check", "failure", [20, 1])], null, "failure");
   assert.deepEqual(verdictSignals(failed), { text: "verify-production / check falhou", tone: "bad" });

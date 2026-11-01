@@ -254,7 +254,11 @@ export function createReleaseSource(options: ReleaseSourceOptions): ReleaseSourc
       const [page, tags, watches] = await Promise.all([
         get<RunsPage>(runsPath(RELEASE_HISTORY), input.token),
         tagList(input.token),
-        watchPage(RELEASE_HISTORY, input.token),
+        // Room for re-dispatched watches; a failure keeps the last watch runs instead of the whole load.
+        watchPage(RELEASE_HISTORY * 2, input.token).catch((error) => {
+          options.log.warn(`runs do vigia: ${describe(error)}`);
+          return watchRuns;
+        }),
       ]);
       loadedRuns = page;
       watchRuns = watches;
@@ -297,7 +301,12 @@ export function createReleaseSource(options: ReleaseSourceOptions): ReleaseSourc
       const body = await get<RunsPage>(runsPath(100, page), input.token);
       const run = body.workflow_runs.find((candidate) => candidate.run_number === input.number);
       if (!run) continue;
-      const watches = watchRuns.has(run.run_number) ? watchRuns : await watchPage(100, input.token);
+      const watches = watchRuns.has(run.run_number)
+        ? watchRuns
+        : await watchPage(100, input.token).catch((error) => {
+            options.log.warn(`runs do vigia: ${describe(error)}`);
+            return new Map<number, GitHubRun>();
+          });
       return build(run, await tagList(input.token), notesByRelease(input.notes), watches, input.token);
     }
     return null;
