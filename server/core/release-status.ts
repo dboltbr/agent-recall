@@ -304,12 +304,15 @@ const DEPLOY_TIERS = new Set(["wall", "console", "desktop", "marketing", "infras
 export function classifyJob(name: string): StepId | null {
   const [prefix, rest] = splitJobName(name);
   if (prefix === "verify-production") return "verify";
+  if (prefix === "images") return rest !== null && /^shard \d+$/.test(rest) ? "images" : null;
   if (prefix.startsWith("images-")) return rest !== null && /^build-push/.test(rest) ? "images" : null;
-  if (DEPLOY_TIERS.has(prefix) || name === "flags" || name === PREVIOUS_WATCH) return "deploy";
+  if (DEPLOY_TIERS.has(prefix) || name === "flags" || name === PINS || name === PREVIOUS_WATCH) return "deploy";
   if (name === "release-tag" || name === WATCH_DISPATCH) return "tag";
   return null;
 }
 
+/** The release run's job that writes the image digests to dbolt-deploy (what Flux runs). */
+export const PINS = "pins";
 /** The release run's job that waits for the previous release's watch (concurrency release-watch). */
 export const PREVIOUS_WATCH = "previous-watch";
 /** The release run's job that dispatches the watch run. */
@@ -323,9 +326,14 @@ export function watchRunNumber(run: Pick<GitHubRun, "display_title"> & { readonl
   return match ? Number(match[1]) : null;
 }
 
-/** `images-vms / build-push (vms-api, …)` → `vms-api`; `build-push-api` → `api`; else the workflow. */
+/**
+ * `images / shard 1` → `shard 1` (images.yml splits the plan's images across three runners; the
+ * job name does not say which); `images-vms / build-push (vms-api, …)` → `vms-api`;
+ * `build-push-api` → `api`; else the workflow.
+ */
 export function imageName(name: string): string | null {
   const [prefix, rest] = splitJobName(name);
+  if (prefix === "images" && rest !== null && /^shard \d+$/.test(rest)) return rest;
   if (!prefix.startsWith("images-") || rest === null || !/^build-push/.test(rest)) return null;
   const argument = /\(([^,)]+)/.exec(rest)?.[1]?.trim();
   if (argument) return argument;
@@ -392,8 +400,11 @@ export function buildStep(id: StepId, jobs: readonly Job[], runDone: boolean, no
   });
   const timed = current.length ? current : live;
   // A queued or waiting job's `started_at` is when it was queued: only jobs that ran start the step.
-  const starts = timed
-    .filter((job) => job.state !== "queued" && job.state !== "waiting")
+  const ran = timed.filter((job) => job.state !== "queued" && job.state !== "waiting");
+  // previous-watch runs at the start of the run, beside verify: once a tier or the pins ran, the
+  // deploy starts with them (release-380 counted 24m from previous-watch for ~6m of deploy).
+  const publishing = ran.filter((job) => job.name !== PREVIOUS_WATCH);
+  const starts = (publishing.length ? publishing : ran)
     .map((job) => time(job.startedAt))
     .filter((ms): ms is number => ms !== null);
   const startedMs = starts.length ? Math.min(...starts) : null;
@@ -482,7 +493,16 @@ const CheckSnapshotSchema = z.object({
   verdict: z.string().nullish(),
   windowEndsAt: z.string().nullish(),
   deadline: z.string().nullish(),
-  sources: z.array(z.object({ name: z.string(), outcome: z.string(), reason: z.string().nullish(), issues: z.number().optional() })),
+  sources: z.array(
+    z.object({
+      name: z.string(),
+      outcome: z.string(),
+      reason: z.string().nullish(),
+      /** pt-BR: what holds the source (a workload short of the new digest, a pod stuck on a dead node). */
+      detail: z.string().nullish(),
+      issues: z.number().optional(),
+    }),
+  ),
 });
 
 const plural = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`;
@@ -514,7 +534,7 @@ export function parseWatchProgress(checkRun: GitHubCheckRun): WatchProgress | nu
         label: sourceLabel(source.name),
         outcome: source.outcome,
         reason:
-          [source.reason, source.issues !== undefined ? plural(source.issues, "issue nova", "issues novas") : null]
+          [source.detail || source.reason, source.issues ? plural(source.issues, "issue nova", "issues novas") : null]
             .filter(Boolean)
             .join(" · ") || null,
       })),
@@ -656,7 +676,8 @@ export function buildRelease(input: ReleaseInput): Release {
     tag: tagged ? releaseNameOf(run.run_number) : null,
     failedJob: failed ? { name: failed.name, url: failed.url } : null,
     revert: note ? noteRevert(note) : null,
-    signals: note ? noteSignals(note) : [],
+    // Only a red release writes a note; an inconclusive one says what was missing in its check run.
+    signals: note ? noteSignals(note) : input.progress?.phase === "done" ? input.progress.sources : [],
     rollback: note ? noteRollback(note) : null,
     recallFailed: note ? record(note.recall) !== null : false,
     pusher: pusher ? toSession(pusher) : null,
@@ -1044,6 +1065,30 @@ export function trippedSignals(release: Release): Signal[] {
   return release.signals.filter((signal) => signal.outcome === "red");
 }
 
+/** The watch's reason codes in pt-BR; a `detail` the watch wrote is pt-BR already. */
+export const REASON_LABELS: Readonly<Record<string, string>> = {
+  "flux-candidate-convergence": "o Flux não aplicou a release",
+  "deployment-evidence": "a implantação não convergiu",
+  "publication-pending": "a publicação não terminou",
+  "publication-evidence-pending": "sem registro da publicação",
+  "release-pins-missing": "pins não escritos",
+  "sentry-window-open": "a janela do Sentry não fechou",
+  "signals-missing": "sem arquivo de sinais",
+};
+
+/**
+ * What an inconclusive watch lacked, pt-BR: `implantação (o Flux não aplicou a release) · Sentry
+ * (a janela do Sentry não fechou)`. Null when the release carries no open source.
+ */
+export function missingEvidence(release: Release): string | null {
+  const open = release.signals.filter((signal) => !["green", "red", "not-applicable"].includes(signal.outcome));
+  const parts = open.map((signal) => {
+    const reason = signal.reason ? (REASON_LABELS[signal.reason] ?? signal.reason) : null;
+    return reason ? `${signal.label} (${reason})` : signal.label;
+  });
+  return parts.length ? parts.join(" · ") : null;
+}
+
 /** pt-BR detail line for a finished release (history table, banners). */
 export function verdictDetail(release: Release): string {
   switch (release.verdict) {
@@ -1058,8 +1103,10 @@ export function verdictDetail(release: Release): string {
       return release.failedJob ? `${release.failedJob.name} falhou` : "falhou";
     case "green":
       return "vigia sem regressão";
-    case "inconclusive":
-      return "vigia sem veredito";
+    case "inconclusive": {
+      const missing = missingEvidence(release);
+      return missing ? `inconclusivo · faltou ${missing}` : "inconclusivo";
+    }
     case "cancelled":
       return "cancelado (substituído por um push mais novo)";
     case "none":

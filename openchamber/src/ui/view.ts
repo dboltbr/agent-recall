@@ -136,6 +136,8 @@ export function stepDetail(release: Release, step: Step, waiting: string | null 
     case "tag":
       return release.tag ?? release.name;
     case "watch":
+      // A finished watch reads its verdict (an inconclusive one says what was missing).
+      if (!isActive(release)) return verdictDetail(release);
       return watchPhaseLabel(release, now) ?? "sinais do blast radius → veredito";
   }
 }

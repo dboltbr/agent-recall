@@ -113,3 +113,13 @@ test("headline e stepDetail: com o vigia publicando, a fase e a contagem regress
   assert.equal(stepDetail(old, stepOf(old, "watch"), null, FIXTURE_NOW), "sinais do blast radius → veredito");
   assert.notEqual(headline(old, FIXTURE_NOW), "observando · faltam 7m");
 });
+
+test("stepDetail: vigia terminado mostra o veredito, o inconclusivo com o que faltou", () => {
+  assert.equal(stepDetail(green, stepOf(green, "watch")), "vigia sem regressão");
+  const held = {
+    ...inconclusive,
+    signals: [{ source: "deployment", label: "implantação", outcome: "inconclusive", reason: "flux-candidate-convergence" }],
+  };
+  assert.equal(stepDetail(held, stepOf(held, "watch")), "inconclusivo · faltou implantação (o Flux não aplicou a release)");
+  assert.equal(headline(held), "inconclusivo · faltou implantação (o Flux não aplicou a release)");
+});

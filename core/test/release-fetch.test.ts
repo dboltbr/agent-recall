@@ -306,9 +306,17 @@ test("progresso do vigia: lido com o run aberto, uma última vez ao fechar, nunc
   state.jobs.set(171, { jobs: released("success", 171).jobs, watch: closed });
   check = { body: { check_runs: [checkRunOf(done, open.run, "done", "green")] }, etag: '"check-2"' };
   assert.equal(asked, 2);
-  // Never seen open by this source: a closed watch costs no read.
+  // Never seen open by this source: a watch that passed costs no read.
   await createReleaseSource({ fetch: counting, clock: fixedClock(), log: quietLog }).load({ token: "t", notes: NOTES });
   assert.equal(asked, 2);
+  // One that did not pass is read once: an inconclusive verdict writes no note, only its check run says what was missing.
+  state.jobs.set(171, { jobs: released("success", 171).jobs, watch: { ...closed, run: { ...closed.run, conclusion: "failure" } } });
+  const fresh = createReleaseSource({ fetch: counting, clock: fixedClock(), log: quietLog });
+  assert.equal((await fresh.load({ token: "t", notes: NOTES })).releases[1]!.progress?.verdict, "green");
+  await fresh.load({ token: "t", notes: NOTES });
+  assert.equal(asked, 3, "uma leitura só");
+  asked = 2;
+  state.jobs.set(171, { jobs: released("success", 171).jobs, watch: closed });
 
   snapshot = await source.load({ token: "t", notes: NOTES });
   assert.equal(snapshot.releases[1]!.status, "completed");

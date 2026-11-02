@@ -248,13 +248,14 @@ export function createReleaseSource(options: ReleaseSourceOptions): ReleaseSourc
 
   /**
    * The open watch's check run on the release commit, one conditional GET per load (304 while it
-   * does not move). An attempt seen open gets one last read after it closes; an attempt never seen
-   * open costs nothing.
+   * does not move). An attempt seen open gets one last read after it closes. A closed attempt never
+   * seen open is read once when it did not pass: its snapshot says what an inconclusive verdict
+   * lacked (no note is written for it); a passed one costs nothing.
    */
   async function progressOf(run: GitHubRun, release: GitHubRun, token: string): Promise<WatchProgress | null> {
     const key = attemptKey(run);
     const known = progress.get(key) ?? null;
-    if (run.status === "completed" && (settled.has(key) || !progress.has(key))) return known;
+    if (run.status === "completed" && (settled.has(key) || (!progress.has(key) && run.conclusion === "success"))) return known;
     try {
       const body = await get<CheckRunsPage>(`repos/${repository}/commits/${release.head_sha}/check-runs?check_name=${WATCH_CHECK}&filter=all&per_page=100`, token);
       const check = watchCheckRun(body.check_runs, release, run);

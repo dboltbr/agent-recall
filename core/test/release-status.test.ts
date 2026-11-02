@@ -19,6 +19,7 @@ import {
   revertSummary,
   stepJobNames,
   stepOf,
+  parseWatchProgress,
   trippedSignals,
   verdictDetail,
   type GitHubJob,
@@ -72,7 +73,12 @@ test("classifyJob: o mapeamento job → etapa do workflow release", () => {
     ["images-command / build-push-api", "images"],
     ["images-vms / build-push (vms-api, vms/api/Dockerfile, 9f99af52)", "images"],
     ["images-command / build-push-supporting (command-worker, command/worker/Dockerfile, 2698…", "images"],
+    // images.yml: the plan's images split across three runners.
+    ["images / shard 0", "images"],
+    ["images / shard 2", "images"],
+    ["images / announcement", null],
     ["flags", "deploy"],
+    ["pins", "deploy"],
     ["wall / meta", "deploy"],
     ["console / deploy", "deploy"],
     ["desktop / package", "deploy"],
@@ -93,6 +99,61 @@ test("imageName: argumento entre parênteses, sufixo build-push-<x>, senão o wo
   assert.equal(imageName("images-rtpengine / build-push"), "rtpengine");
   assert.equal(imageName("images-rtpengine / changes"), null);
   assert.equal(imageName("console / build"), null);
+  assert.equal(imageName("images / shard 1"), "shard 1");
+});
+
+test("release-380: shards são as imagens, pins é implantação, o deploy conta do primeiro tier e não do previous-watch", () => {
+  const jobs = [
+    ...VERIFY_DONE,
+    job("previous-watch", "success", [25, 24.6]),
+    job("images / shard 0", "success", [12.5, 6.5]),
+    job("images / shard 1", "success", [12.4, 9]),
+    job("images / shard 2", "success", [12.5, 9.2]),
+    job("pins", "success", [6.4, 6.1]),
+    job("infrastructure / check", "success", [6.3, 4]),
+    job("desktop / package", "success", [6, 0.5]),
+  ];
+  const release = buildRelease({ run: run({ run_number: 380 }), jobs, note: null, commits: null, now: NOW });
+  assert.deepEqual([stepOf(release, "images").state, stepOf(release, "images").done, stepOf(release, "images").total], ["done", 3, 3]);
+  assert.deepEqual(stepJobNames(release, "images"), ["shard 0", "shard 1", "shard 2"]);
+  assert.equal(stepOf(release, "deploy").durationMs, (6.4 - 0.5) * 60_000);
+  assert.deepEqual(stepJobNames(release, "deploy"), ["pins", "infrastructure", "desktop"]);
+  // Only previous-watch ran so far: the deploy step is its wait.
+  const waiting = buildRelease({ run: run({ run_number: 381 }), jobs: [...VERIFY_DONE, job("previous-watch", "success", [3, 2])], note: null, commits: null, now: NOW });
+  assert.equal(stepOf(waiting, "deploy").durationMs, 60_000);
+});
+
+test("inconclusivo diz o que faltou, do check run do vigia (sem nota)", () => {
+  const view = {
+    schema: 1,
+    phase: "done",
+    verdict: "inconclusive",
+    deadline: "2026-11-02T21:19:15Z",
+    windowEndsAt: null,
+    sources: [
+      { name: "deployment", outcome: "inconclusive", reason: "deployment-evidence", detail: "bouncer 2/3 com o digest novo; pod bouncer-9bchs preso terminando no nó fdx-krl-vm desde 20:43 UTC (nó fora do ar?)" },
+      { name: "sentry", outcome: "inconclusive", reason: "sentry-window-open", issues: 0 },
+    ],
+  };
+  const check = { id: 1, external_id: "1:1", started_at: minutesAgo(30), output: { text: "```json\n" + JSON.stringify(view) + "\n```" } };
+  const progress = parseWatchProgress(check as Parameters<typeof parseWatchProgress>[0]);
+  const release = buildRelease({
+    run: run({ run_number: 380, status: "completed", conclusion: "success", updated_at: minutesAgo(0.5) }),
+    ...jobsInput(released("failure", 380)),
+    note: null,
+    commits: null,
+    progress,
+    now: NOW,
+  });
+  assert.equal(release.verdict, "inconclusive");
+  assert.equal(
+    verdictDetail(release),
+    "inconclusivo · faltou implantação (bouncer 2/3 com o digest novo; pod bouncer-9bchs preso terminando no nó fdx-krl-vm desde 20:43 UTC (nó fora do ar?)) · Sentry (a janela do Sentry não fechou)",
+  );
+  // A snapshot written before `detail` existed reads its reason code in pt-BR.
+  const old = { ...release, signals: [{ source: "deployment", label: "implantação", outcome: "inconclusive", reason: "flux-candidate-convergence" }] };
+  assert.equal(verdictDetail(old), "inconclusivo · faltou implantação (o Flux não aplicou a release)");
+  assert.equal(verdictDetail({ ...release, signals: [] }), "inconclusivo");
 });
 
 test("release em andamento: verificação feita, imagens 3/9, resto pendente", () => {

@@ -187,6 +187,25 @@ test("freshness: idade do snapshot e a falha do GitHub", () => {
   });
 });
 
+test("inconclusivo: etapa, banner e tabela dizem o que faltou, nunca o texto de etapa aberta", () => {
+  const release = {
+    ...done(380, released("failure", 380)),
+    signals: [
+      { source: "deployment", label: "implantação", outcome: "inconclusive", reason: "pod x preso terminando no nó fdx-krl-vm" },
+      { source: "sentry", label: "Sentry", outcome: "inconclusive", reason: "sentry-window-open" },
+    ],
+  };
+  const missing = "implantação (pod x preso terminando no nó fdx-krl-vm) · Sentry (a janela do Sentry não fechou)";
+  assert.equal(release.verdict, "inconclusive");
+  assert.equal(stepDetail(release, stepOf(release, "watch")), `faltou ${missing}`);
+  assert.equal(pipeMeta(release, stepOf(release, "watch"), NOW), "inconclusivo");
+  assert.deepEqual(verdictBanner(release), { tone: "muted", text: `vigia inconclusivo · faltou ${missing}`, link: "signals" });
+  assert.deepEqual(verdictSignals(release), { text: `faltou ${missing}`, tone: "muted" });
+  const unknown = { ...release, signals: [] };
+  assert.equal(stepDetail(unknown, stepOf(unknown, "watch")), "sem veredito");
+  assert.deepEqual(verdictBanner(unknown), { tone: "muted", text: "vigia inconclusivo", link: "signals" });
+});
+
 test("verdictSignals: a célula de sinais da tabela de vereditos", () => {
   assert.deepEqual(verdictSignals(reverted(170)), { text: "vigia reverteu no dbolt-deploy · main congelada · dona ses_push", tone: "warn" });
   assert.deepEqual(verdictSignals(done(171)), { text: "sem regressão", tone: "muted" });

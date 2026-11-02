@@ -8,6 +8,7 @@ import {
   HANDOFF_LABELS,
   imageJobs,
   isActive,
+  missingEvidence,
   freezeLabel,
   queueGroups,
   revertSummary,
@@ -147,7 +148,11 @@ export function stepDetail(release: Release, step: Step, waiting: string | null 
     case "watch":
       if (!isActive(release) && release.verdict === "reverted") return revertSummary(release) ?? "";
       if (!isActive(release) && release.verdict === "green") return "sem regressão";
-      return watchPhaseLabel(release, now) ?? "sinais do blast radius → veredito";
+      if (!isActive(release) && release.verdict === "inconclusive") {
+        const missing = missingEvidence(release);
+        return missing ? `faltou ${missing}` : "sem veredito";
+      }
+      return watchPhaseLabel(release, now) ?? (isActive(release) ? "sinais do blast radius → veredito" : "");
   }
 }
 
@@ -156,6 +161,8 @@ export function pipeMeta(release: Release, step: Step, now: Date): string {
   const failedRun = !isActive(release) && release.steps.some((other) => other.state === "failed");
   const duration = stepDurationMs(step, now);
   const short = formatShortDuration(duration);
+  // An inconclusive watch exits non-zero: its node reads the verdict, not "watch falhou".
+  if (step.id === "watch" && !isActive(release) && release.verdict === "inconclusive") return VERDICT_LABELS.inconclusive;
   if (step.state === "failed") return step.failedJob ? `${jobShortName(step.failedJob)} falhou` : "falhou";
   if (failedRun && (step.state === "pending" || step.state === "skipped" || step.state === "cancelled")) return "—";
   switch (step.id) {
@@ -315,8 +322,8 @@ export function verdictSignals(release: Release): { text: string; tone: Tone } {
       return { text: judged.length ? `${ok}/${judged.length} sinais ok` : "sem regressão", tone: "muted" };
     }
     case "inconclusive": {
-      const reasons = release.signals.map((signal) => signal.reason).filter((reason): reason is string => !!reason);
-      return { text: reasons.length ? [...new Set(reasons)].join(" · ") : "sem veredito", tone: "muted" };
+      const missing = missingEvidence(release);
+      return { text: missing ? `faltou ${missing}` : "sem veredito", tone: "muted" };
     }
     default:
       return { text: "", tone: "muted" };
@@ -339,8 +346,10 @@ export function verdictBanner(release: Release): { tone: Tone; text: string; lin
     }
     case "failed":
       return { tone: "bad", text: release.failedJob ? `${release.failedJob.name} falhou` : "o run falhou", link: "log" };
-    case "inconclusive":
-      return { tone: "muted", text: "vigia sem veredito", link: "signals" };
+    case "inconclusive": {
+      const missing = missingEvidence(release);
+      return { tone: "muted", text: missing ? `vigia inconclusivo · faltou ${missing}` : "vigia inconclusivo", link: "signals" };
+    }
     case "cancelled":
       return { tone: "muted", text: "cancelado (substituído por um push mais novo)", link: null };
     default:
