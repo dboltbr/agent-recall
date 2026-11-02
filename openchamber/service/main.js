@@ -6150,11 +6150,13 @@ var DEPLOY_TIERS = /* @__PURE__ */ new Set(["wall", "console", "desktop", "marke
 function classifyJob(name) {
   const [prefix, rest] = splitJobName(name);
   if (prefix === "verify-production") return "verify";
+  if (prefix === "images") return rest !== null && /^shard \d+$/.test(rest) ? "images" : null;
   if (prefix.startsWith("images-")) return rest !== null && /^build-push/.test(rest) ? "images" : null;
-  if (DEPLOY_TIERS.has(prefix) || name === "flags" || name === PREVIOUS_WATCH) return "deploy";
+  if (DEPLOY_TIERS.has(prefix) || name === "flags" || name === PINS || name === PREVIOUS_WATCH) return "deploy";
   if (name === "release-tag" || name === WATCH_DISPATCH) return "tag";
   return null;
 }
+var PINS = "pins";
 var PREVIOUS_WATCH = "previous-watch";
 var WATCH_DISPATCH = "watch";
 var WATCH_WORKFLOW = "release-watch";
@@ -6164,6 +6166,7 @@ function watchRunNumber(run) {
 }
 function imageName(name) {
   const [prefix, rest] = splitJobName(name);
+  if (prefix === "images" && rest !== null && /^shard \d+$/.test(rest)) return rest;
   if (!prefix.startsWith("images-") || rest === null || !/^build-push/.test(rest)) return null;
   const argument = /\(([^,)]+)/.exec(rest)?.[1]?.trim();
   if (argument) return argument;
@@ -6218,7 +6221,9 @@ function buildStep(id, jobs, runDone, now, attemptStart = null) {
     return start !== null && start >= attemptMs;
   });
   const timed = current.length ? current : live;
-  const starts = timed.filter((job) => job.state !== "queued" && job.state !== "waiting").map((job) => time2(job.startedAt)).filter((ms) => ms !== null);
+  const ran = timed.filter((job) => job.state !== "queued" && job.state !== "waiting");
+  const publishing = ran.filter((job) => job.name !== PREVIOUS_WATCH);
+  const starts = (publishing.length ? publishing : ran).map((job) => time2(job.startedAt)).filter((ms) => ms !== null);
   const startedMs = starts.length ? Math.min(...starts) : null;
   let state;
   if (live.length === 0) state = runDone ? "skipped" : "pending";
@@ -6291,7 +6296,16 @@ var CheckSnapshotSchema = z.object({
   verdict: z.string().nullish(),
   windowEndsAt: z.string().nullish(),
   deadline: z.string().nullish(),
-  sources: z.array(z.object({ name: z.string(), outcome: z.string(), reason: z.string().nullish(), issues: z.number().optional() }))
+  sources: z.array(
+    z.object({
+      name: z.string(),
+      outcome: z.string(),
+      reason: z.string().nullish(),
+      /** pt-BR: what holds the source (a workload short of the new digest, a pod stuck on a dead node). */
+      detail: z.string().nullish(),
+      issues: z.number().optional()
+    })
+  )
 });
 var plural = (count, one, many) => `${count} ${count === 1 ? one : many}`;
 function parseWatchProgress(checkRun) {
@@ -6316,7 +6330,7 @@ function parseWatchProgress(checkRun) {
         source: source.name,
         label: sourceLabel(source.name),
         outcome: source.outcome,
-        reason: [source.reason, source.issues !== void 0 ? plural(source.issues, "issue nova", "issues novas") : null].filter(Boolean).join(" \xB7 ") || null
+        reason: [source.detail || source.reason, source.issues ? plural(source.issues, "issue nova", "issues novas") : null].filter(Boolean).join(" \xB7 ") || null
       }))
     )
   };
@@ -6355,6 +6369,11 @@ function releaseHandoffs(note, delivered) {
   add("owner", toSessionRef(note.owner), null);
   for (const entry of Array.isArray(note.notified) ? note.notified : []) add("notified", toSessionRef(entry), null);
   return out;
+}
+function releaseSignals(note, progress) {
+  if (note) return noteSignals(note);
+  if (progress?.phase === "done") return progress.sources;
+  return [];
 }
 function buildRelease(input) {
   const { run, note, now } = input;
@@ -6401,7 +6420,7 @@ function buildRelease(input) {
     tag: tagged ? releaseNameOf(run.run_number) : null,
     failedJob: failed ? { name: failed.name, url: failed.url } : null,
     revert: note ? noteRevert(note) : null,
-    signals: note ? noteSignals(note) : [],
+    signals: releaseSignals(note, input.progress ?? null),
     rollback: note ? noteRollback(note) : null,
     recallFailed: note ? record(note.recall) !== null : false,
     pusher: pusher ? toSession(pusher) : null,
@@ -6700,7 +6719,7 @@ function createReleaseSource(options) {
   async function progressOf(run, release, token) {
     const key = attemptKey(run);
     const known = progress.get(key) ?? null;
-    if (run.status === "completed" && (settled.has(key) || !progress.has(key))) return known;
+    if (run.status === "completed" && (settled.has(key) || !progress.has(key) && run.conclusion === "success")) return known;
     try {
       const body = await get(`repos/${repository}/commits/${release.head_sha}/check-runs?check_name=${WATCH_CHECK}&filter=all&per_page=100`, token);
       const check = watchCheckRun(body.check_runs, release, run);
