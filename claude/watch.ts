@@ -323,7 +323,8 @@ async function readRequest(path: string): Promise<Request | null> {
 
 /**
  * Takes the oldest pending request of a session: the atomic rename to `.picked-<ms>` decides between
- * this watcher and a poller about to fall back, and stamps when the session got it.
+ * this watcher and a poller about to fall back, and stamps when the session got it. A request older
+ * than `CATCH_UP_MS` is removed instead, and the next one is tried.
  */
 export async function pickRequest(stateDir: string, sessionId: string, now: Date): Promise<Request | null> {
   const dir = claudePaths(stateDir).inbox(sessionId);
@@ -337,7 +338,10 @@ export async function pickRequest(stateDir: string, sessionId: string, now: Date
       continue;
     }
     const request = await readRequest(to);
-    if (request) return request;
+    // Older than the catch-up window (a session resumed long after the call): dropped, never woken
+    // with it; the next pending request may still be current.
+    const created = request ? Date.parse(request.createdAt) : NaN;
+    if (request && Number.isFinite(created) && now.getTime() - created <= CATCH_UP_MS) return request;
     await rm(to, { force: true });
   }
   return null;
@@ -661,7 +665,9 @@ export function createClaudeWatcher(deps: ClaudeDeps): ClaudeWatcher {
       const taken = confirmation(request, state, blockedNote, host, at, blockedNote ? shippedSince(blockedNote, releases) : null);
       if (taken === "unknown") continue;
       if (taken === "taken" || taken === "moot") {
-        log.info(`${request.release}: ${taken === "taken" ? `${request.session} ${request.kind === "blocked" ? "assumiu" : "pegou"} o chamado` : `chamado de ${request.session} encerrado`}`);
+        const verb = request.kind === "blocked" ? "assumiu" : "pegou";
+        const outcome = taken === "taken" ? `${request.session} ${verb} o chamado` : `chamado de ${request.session} encerrado`;
+        log.info(`${request.release}: ${outcome}`);
         await rm(path, { force: true });
         continue;
       }

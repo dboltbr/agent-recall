@@ -416,12 +416,19 @@ export function createReleaseTracker(options: TrackerOptions): ReleaseTracker {
   let last: TrackerTickInput | null = null;
   let lastForced = -Infinity;
   let running: Promise<void> | null = null;
+  /**
+   * The idle probe of this tick failed: the snapshot was not refreshed and cannot be told current,
+   * so `current()` carries the failure as `error` (as a failed load does) until the next load or
+   * successful probe. A blocked call is never judged on such a snapshot.
+   */
+  let probeError: string | null = null;
 
   function run(input: TrackerTickInput): Promise<void> {
     if (running) return running;
     running = (async () => {
       const previous = options.source.current();
       const next = await options.source.load(input);
+      probeError = null;
       try {
         await options.onSnapshot?.(next, previous);
       } catch (error) {
@@ -439,10 +446,17 @@ export function createReleaseTracker(options: TrackerOptions): ReleaseTracker {
         ticks++ % IDLE_EVERY_TICKS === 0 || current === null || current.releases.some(isActive) || input.notesChanged;
       const due =
         scheduled ||
-        (await options.source.probe(input.token).catch((error) => {
-          options.log.warn(`release: ${describe(error)}`);
-          return false;
-        }));
+        (await options.source.probe(input.token).then(
+          (moved) => {
+            probeError = null;
+            return moved;
+          },
+          (error) => {
+            probeError = describe(error);
+            options.log.warn(`release: ${probeError}`);
+            return false;
+          },
+        ));
       if (due) await run(input);
     },
     async refresh() {
@@ -452,6 +466,9 @@ export function createReleaseTracker(options: TrackerOptions): ReleaseTracker {
       await run(last);
       return true;
     },
-    current: () => options.source.current(),
+    current: () => {
+      const snapshot = options.source.current();
+      return snapshot && probeError && !snapshot.error ? { ...snapshot, error: probeError } : snapshot;
+    },
   };
 }

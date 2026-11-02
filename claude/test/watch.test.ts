@@ -388,6 +388,20 @@ test("release barrada sem histórico de releases na partida: pedido guardado, se
   assert.deepEqual(await h.inbox(SESSION), [name]);
 });
 
+test("sessão retomada com pedido vencido na caixa: descartado, acorda com o válido", async () => {
+  const h = await host({ notes: {} });
+  const watcher = await h.process(1001, 2001, SESSION);
+  const stale = { release: "release-80", kind: "recall", role: "owner", lock: `${SESSION}.owner`, session: SESSION, text: "Incidente release-80: …", createdAt: hoursAgo(9) } as const;
+  await writeRequest(h.stateDir, stale);
+  assert.deepEqual(await watcher.step(), { kind: "wait" }, "só o vencido: ninguém acorda");
+  assert.deepEqual(await h.inbox(SESSION), []);
+  await writeRequest(h.stateDir, stale);
+  await writeRequest(h.stateDir, { ...stale, release: "release-90", text: "Incidente release-90: …", createdAt: hoursAgo(0.1) });
+  assert.deepEqual(await watcher.step(), { kind: "wake", text: "Incidente release-90: …" });
+  assert.deepEqual(await h.inbox(SESSION), [`release-90.${SESSION}.owner.picked-${NOW.getTime()}`]);
+  await watcher.idle();
+});
+
 test("pedido aparece inteiro para quem lê a caixa durante a escrita", async () => {
   for (let round = 0; round < 20; round++) {
     const stateDir = await tempState();

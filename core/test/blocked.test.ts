@@ -4,11 +4,13 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { loadConfig, readHandoffs } from "../host.ts";
 import { buildRelease, type Release } from "../release-status.ts";
-import { ACK_TIMEOUT_MS, routeBlocked, shippedSince } from "../route.ts";
+import { createReleaseSource, createReleaseTracker, type ReleaseTracker } from "../release-fetch.ts";
+import { ACK_TIMEOUT_MS, blockedConfirmation, blockedCulprits, routeBlocked, shippedSince } from "../route.ts";
 import type { BlockedNote, HostConfig, Me } from "../types.ts";
 import { createWatcher } from "../watcher.ts";
 import {
   config,
+  fakeApi,
   fakeDelivery,
   fakeExec,
   fakeGitHub,
@@ -126,6 +128,8 @@ async function setup(options: {
   blocked: Record<string, BlockedNote>;
   blockedRefs?: RefReply[];
   releases?: Release[] | null;
+  /** A real tracker instead of the fixed history. */
+  tracker?: ReleaseTracker;
   config?: Partial<HostConfig>;
   delivery?: ReturnType<typeof fakeDelivery>;
   harness?: "opencode" | "paseo";
@@ -151,7 +155,7 @@ async function setup(options: {
     exec: git.exec,
     delivery: delivery.delivery,
     log: options.log ?? quietLog,
-    release: releases,
+    release: options.tracker ?? releases,
   });
   const later = (ms: number) => clock.set(new Date(clock.now().getTime() + ms));
   return { watcher, delivery, git, github, clock, later, releases, stateDir };
@@ -417,4 +421,113 @@ test("watcher: trava que lança num culpado não pula os outros nem dá a nota p
   await watcher.tick();
   assert.equal(failures(), 2, "a nota não ficou vista: a volta seguinte tenta de novo");
   assert.deepEqual(delivery.recorded.prompts.map((prompt) => prompt.target.id), ["ses_b"], "a trava segura o que já foi");
+});
+
+test("routeBlocked: coleções malformadas da nota contam como vazias, sem lançar", () => {
+  const bad = (partial: Record<string, unknown>) => blockedNote(partial as Partial<BlockedNote>);
+  assert.deepEqual(routeBlocked(bad({ sessions: {} }), me), []);
+  assert.deepEqual(routeBlocked(bad({ sessions: [null, "x", { harness: "opencode", host: "archdev", id: "ses_c", commits: "abc" }] }), me), [
+    { kind: "blocked", release: "release-292", role: "blocked", target: { harness: "opencode", host: "archdev", id: "ses_c" }, lock: "ses_c.blocked" },
+  ]);
+  const fixPending = bad({ state: "fix-pending", assessment: { suspects: {} } });
+  assert.deepEqual(blockedCulprits(fixPending), []);
+  assert.deepEqual(routeBlocked(fixPending, me), []);
+  assert.deepEqual(blockedCulprits(bad({ state: "fix-pending", assessment: { suspects: [null, 7, { commit: 9 }, { commit: "c0ffee1" }] } })), [
+    { harness: "opencode", host: "archdev", id: "ses_pusher" },
+  ]);
+  assert.deepEqual(routeBlocked(bad({ state: "fix-pending", owner: { not: "a string" }, assessment: { suspects: [{ commit: "c0ffee1" }] } }), me).length, 1);
+});
+
+test("watcher: nota malformada não derruba a volta das outras", async () => {
+  const bad = (partial: Record<string, unknown>) => blockedNote(partial as Partial<BlockedNote>);
+  const { watcher, delivery } = await setup({
+    blocked: {
+      a: bad({ sessions: {} }),
+      b: bad({ sessions: [{ harness: "opencode", host: "archdev", id: "ses_b", commits: "abc" }] }),
+      c: bad({ state: "fix-pending", assessment: { suspects: {} } }),
+      d: blockedNote({ sessions: [session("opencode", "archdev", "ses_d", ["d0d0d0d"])] }),
+    },
+  });
+  await watcher.tick();
+  assert.deepEqual(delivery.recorded.prompts.map((prompt) => prompt.target.id).sort(), ["ses_b", "ses_d"]);
+});
+
+test("blockedConfirmation: chamado de correção cujo culpado saiu da avaliação é encerrado", () => {
+  const target = { harness: "opencode", host: "archdev", id: "ses_b" } as const;
+  const base: BlockedNote = {
+    ...twoSessions,
+    sessions: [session("paseo", "srv_x", "agent-a", ["aaaaaaa1"]), session("opencode", "archdev", "ses_b", ["bbbbbbb2"])],
+    state: "fix-pending",
+    owner: "paseo/srv_x/agent-investigator",
+    assessment: { suspects: [{ commit: "bbbbbbb2" }] },
+    updatedAt: NOW.toISOString(),
+  };
+  assert.equal(blockedConfirmation("fix", target, base, false, NOW), "open");
+  assert.equal(blockedConfirmation("fix", target, { ...base, assessment: { suspects: [{ commit: "aaaaaaa1" }] } }, false, NOW), "moot");
+});
+
+test("watcher: avaliação que troca de culpado encerra a espera do chamado de correção", async () => {
+  const decided: BlockedNote = {
+    ...twoSessions,
+    sessions: [session("paseo", "srv_x", "agent-a", ["aaaaaaa1"]), session("opencode", "archdev", "ses_b", ["bbbbbbb2"])],
+    state: "fix-pending",
+    owner: "paseo/srv_x/agent-investigator",
+    assessment: { suspects: [{ commit: "bbbbbbb2" }] },
+  };
+  const notes: Record<string, BlockedNote> = { [HEAD]: decided };
+  const { watcher, delivery, later } = await setup({
+    blocked: notes,
+    releases: [release(352, "failed")],
+    blockedRefs: [{ status: 200, etag: '"b1"' }, { status: 200, etag: '"b2"' }, { status: 304 }],
+  });
+  await watcher.tick();
+  assert.equal(delivery.recorded.prompts.length, 1);
+  notes[HEAD] = { ...decided, assessment: { suspects: [{ commit: "aaaaaaa1" }] }, updatedAt: NOW.toISOString() };
+  later(60_000);
+  await watcher.tick();
+  later(ACK_TIMEOUT_MS);
+  await watcher.tick();
+  assert.equal(delivery.recorded.fallbacks.length, 0, "ses_b não é mais culpada");
+});
+
+test("shippedSince: release mais velha que a história guardada, sem tag depois dela → ninguém sabe", () => {
+  const recent = [release(300, "failed"), release(299, "failed")];
+  assert.equal(shippedSince(blockedNote(), recent), null, "a release-292 é anterior à run mais velha guardada");
+  assert.equal(shippedSince(blockedNote(), [release(300, "shipped"), release(299, "failed")]), true);
+  assert.equal(shippedSince(blockedNote({ release: "release-299" }), recent), false);
+});
+
+test("watcher: release barrada mais velha que a história guardada → ninguém é chamado", async () => {
+  const { watcher, delivery } = await setup({ blocked: { [HEAD]: blockedNote() }, releases: [release(300, "failed"), release(299, "failed")] });
+  await watcher.tick();
+  assert.equal(delivery.recorded.prompts.length, 0);
+});
+
+test("watcher: sonda ociosa do rastreador que falha adia a cópia nessa volta", async () => {
+  const runs = [
+    run({ run_number: 292, status: "completed", conclusion: "failure", updated_at: minutesAgo(5) }),
+    run({ run_number: 291, status: "completed", conclusion: "success", updated_at: minutesAgo(30) }),
+  ];
+  const probe = { fail: false };
+  const api = fakeApi({
+    "repos/dboltbr/dbolt/actions/workflows/release.yml/runs?per_page=15&page=1": () =>
+      probe.fail ? { status: 502 } : { body: { total_count: runs.length, workflow_runs: runs }, etag: '"r1"' },
+    "repos/dboltbr/dbolt/git/matching-refs/tags/release-": { body: [{ ref: "refs/tags/release-291" }] },
+    "repos/dboltbr/dbolt/actions/runs/40000000292/jobs?per_page=100&page=1": { body: { total_count: 0, jobs: [] } },
+    "repos/dboltbr/dbolt/actions/runs/40000000291/jobs?per_page=100&page=1": { body: { total_count: 0, jobs: [] } },
+  });
+  const clock = fixedClock();
+  const tracker = createReleaseTracker({ source: createReleaseSource({ fetch: api.fetch, clock, log: quietLog }), clock, log: quietLog });
+  const { watcher, delivery, later } = await setup({ blocked: { [HEAD]: blockedNote() }, tracker });
+  await watcher.tick();
+  assert.equal(delivery.recorded.prompts.length, 1, "história carregada: chamada");
+  probe.fail = true;
+  later(ACK_TIMEOUT_MS + 1_000);
+  await watcher.tick();
+  assert.equal(tracker.current()?.error !== null, true, "a sonda falhou nesta volta");
+  assert.equal(delivery.recorded.fallbacks.length, 0, "sem saber se uma release posterior foi, ninguém é copiado");
+  probe.fail = false;
+  later(30_000);
+  await watcher.tick();
+  assert.equal(delivery.recorded.fallbacks.length, 1, "sonda em dia: a espera segue");
 });

@@ -90,13 +90,27 @@ function sameCommit(a: string, b: string): boolean {
   return a.length >= 7 && b.length >= 7 && (a.startsWith(b) || b.startsWith(a));
 }
 
-/** Distinct identified sessions of a blocked note's range, in note order, with their commits. */
+/** The elements of `value` when it is an array; anything else (JSON from another repository) is empty. */
+function list(value: unknown): readonly unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+/** A string field of a JSON value, or null (the blocked note comes from another repository). */
+function text(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+/**
+ * Distinct identified sessions of a blocked note's range, in note order, with their commits. The
+ * note is JSON from another repository: a `sessions` that is not an array, an entry that is not a
+ * session, or `commits` that is not an array of strings counts as empty, never throws.
+ */
 function blockedSessions(note: BlockedNote): { ref: SessionRef; commits: readonly string[] }[] {
   const out: { ref: SessionRef; commits: string[] }[] = [];
-  for (const entry of note.sessions ?? []) {
+  for (const entry of list(note.sessions)) {
     const ref = toSessionRef(entry);
     if (!ref) continue;
-    const commits = (entry.commits ?? []).filter((commit): commit is string => typeof commit === "string");
+    const commits = list((entry as { commits?: unknown }).commits).filter((commit): commit is string => typeof commit === "string");
     const known = out.find((seen) => sameSession(seen.ref, ref));
     if (known) known.commits.push(...commits);
     else out.push({ ref, commits: [...commits] });
@@ -112,14 +126,17 @@ function blockedSessions(note: BlockedNote): { ref: SessionRef; commits: readonl
 export function blockedTarget(note: BlockedNote): SessionRef | null {
   const sessions = blockedSessions(note);
   if (sessions.length === 1) return sessions[0]!.ref;
-  const head = note.range?.to;
+  const head = text((note.range as { to?: unknown } | null | undefined)?.to);
   if (!head) return null;
   return sessions.find((entry) => entry.commits.some((commit) => sameCommit(commit, head)))?.ref ?? null;
 }
 
-/** Sessions that wrote a suspect commit (`assessment.suspects[].commit`), in note order. */
+/** Sessions that wrote a suspect commit (`assessment.suspects[].commit`), in note order; malformed suspects are ignored. */
 export function blockedCulprits(note: BlockedNote): SessionRef[] {
-  const suspects = (note.assessment?.suspects ?? []).map((suspect) => suspect?.commit).filter((commit): commit is string => typeof commit === "string");
+  const assessment = note.assessment as { suspects?: unknown } | null | undefined;
+  const suspects = list(assessment?.suspects)
+    .map((suspect) => (suspect && typeof suspect === "object" ? text((suspect as { commit?: unknown }).commit) : null))
+    .filter((commit): commit is string => commit !== null);
   return blockedSessions(note)
     .filter((entry) => entry.commits.some((commit) => suspects.some((suspect) => sameCommit(commit, suspect))))
     .map((entry) => entry.ref);
@@ -142,7 +159,7 @@ export function routeBlocked(note: BlockedNote, me: Me): BlockedAction[] {
     if (target && mine(target, me)) actions.push({ kind: "blocked", release, role: "blocked", target, lock: `${target.id}.blocked` });
   }
   if (note.state === "fix-pending") {
-    const owner = parseSessionValue(note.owner);
+    const owner = parseSessionValue(text(note.owner));
     for (const target of blockedCulprits(note)) {
       if (!mine(target, me) || (owner && sameSession(owner, target))) continue;
       actions.push({ kind: "blocked", release, role: "fix", target, lock: `${target.id}.blocked-fix` });
@@ -166,21 +183,26 @@ export function releaseHistory(snapshot: ReleaseSnapshot | null): readonly Relea
 
 /**
  * A release with a tag at or after the blocked one carried its range to production (a later push,
- * or a re-run of the same run): the blocked call is closed. Null when the release history is not
- * at hand: nobody can tell, so nobody is called.
+ * or a re-run of the same run): the blocked call is closed. Null when the release history cannot
+ * tell: not at hand, or the blocked release is older than the oldest run it holds (the snapshot
+ * keeps only the latest runs, so a tag in between may be missing) and no tag in it is at or after
+ * it. Nobody is called on null.
  */
 export function shippedSince(note: Pick<BlockedNote, "release">, releases: readonly Release[] | null): boolean | null {
   if (!releases || releases.length === 0) return null;
   const number = releaseNumber(note);
-  return releases.some((release) => release.tag !== null && release.number >= number);
+  if (releases.some((release) => release.tag !== null && release.number >= number)) return true;
+  const oldest = Math.min(...releases.map((release) => release.number));
+  return Number.isFinite(number) && number >= oldest ? false : null;
 }
 
 /**
  * Whether a delivered blocked call was taken: the note names the called session as `owner` or
  * `fix.session`. Moot when the note is gone, closed by a tagged release, out of the 8 h window, or
- * left the state the call was for (someone else took it, the skill escalated). Unknown when it
- * would be open but whether a later release shipped cannot be told (`shipped` null): the caller
- * waits, keeping the call and starting no fallback.
+ * left the state the call was for (someone else took it, the skill escalated, or the assessment no
+ * longer names the fix call's session). Unknown when it would be open but whether a later release
+ * shipped cannot be told (`shipped` null): the caller waits, keeping the call and starting no
+ * fallback.
  */
 export function blockedConfirmation(
   role: "blocked" | "fix",
@@ -191,8 +213,14 @@ export function blockedConfirmation(
 ): "taken" | "open" | "moot" | "unknown" {
   if (!note || shipped === true || !isRecent(note, now)) return "moot";
   const called = formatSession(target);
-  if (note.owner === called || note.fix?.session === called) return "taken";
-  const callable = role === "fix" ? note.state === "fix-pending" : note.state === "red" && !note.owner;
+  const fixSession = text((note.fix as { session?: unknown } | null | undefined)?.session);
+  if (text(note.owner) === called || fixSession === called) return "taken";
+  // A fix call stays open only while its session is still among the note's culprits: an
+  // assessment that moved on to other commits makes it moot.
+  const callable =
+    role === "fix"
+      ? note.state === "fix-pending" && blockedCulprits(note).some((culprit) => sameSession(culprit, target))
+      : note.state === "red" && !note.owner;
   if (!callable) return "moot";
   return shipped === null ? "unknown" : "open";
 }

@@ -206,7 +206,13 @@ export function createWatcher(options: WatcherOptions): Watcher {
     for (const [id, waiting] of awaiting) {
       const { action } = waiting;
       const note = blocked.get(waiting.key)?.note ?? null;
-      const verdict = blockedConfirmation(action.role, action.target, note, note ? shippedSince(note, releases) : null, now);
+      let verdict: ReturnType<typeof blockedConfirmation>;
+      try {
+        verdict = blockedConfirmation(action.role, action.target, note, note ? shippedSince(note, releases) : null, now);
+      } catch (error) {
+        log.error(`${action.release}: conferir o chamado: ${describe(error)}`);
+        continue;
+      }
       if (verdict === "unknown") continue;
       if (verdict !== "open") {
         log.info(`${action.release}: ${verdict === "taken" ? `${formatSession(action.target)} assumiu o chamado` : "chamado da release barrada encerrado"}`);
@@ -391,9 +397,16 @@ export function createWatcher(options: WatcherOptions): Watcher {
     // otherwise the notes wait for the next tick, unseen.
     for (const [key, { raw, note }] of blockedPoll?.fresh ? blocked : []) {
       if (blockedSeen.get(key) === raw) continue;
-      const shipped = shippedSince(note, releases);
-      if (shipped === null) continue;
-      const actions = shipped || !isRecent(note, now) ? [] : routeBlocked(note, me);
+      let actions: BlockedAction[];
+      try {
+        const shipped = shippedSince(note, releases);
+        if (shipped === null) continue;
+        actions = shipped || !isRecent(note, now) ? [] : routeBlocked(note, me);
+      } catch (error) {
+        // A note that cannot be routed (JSON from another repository) never stops the others.
+        log.error(`nota barrada ${key.slice(0, 12)}: ${describe(error)}`);
+        continue;
+      }
       if (await attempt(actions, (action) => actBlocked(action, key, note, config, me, auth), handled)) blockedSeen.set(key, raw);
     }
     if (blockedPoll?.fresh) handled.push(...(await followUp(me, releases)));
