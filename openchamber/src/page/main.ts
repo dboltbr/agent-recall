@@ -1,10 +1,11 @@
 // Full page: the release board, the runner queue, watch reversals and the verdict history.
-import { formatAgo, isActive, pillLabel, releaseLabel, stepOf, type Release, type ReleaseSnapshot } from "../../../core/release-status.ts";
+import { liveSources } from "../../../core/release-copy.ts";
+import { formatAgo, isActive, pillLabel, releaseLabel, stepOf, watchPhaseLabel, type Release, type ReleaseSnapshot } from "../../../core/release-status.ts";
 import { hostActions, hostWatch } from "../ui/actions.ts";
 import { boot, serviceCall, type Host } from "../ui/boot.ts";
 import { h, icon, replaceChildren, spinner } from "../ui/dom.ts";
 import { startFeed, type FeedState } from "../ui/feed.ts";
-import { commitLines, lanes, outcomeBanner, pill, pipeline, releaseHead, runnersList, signalsList, toneText, type Actions, type Watch } from "../ui/render.ts";
+import { commitLines, lanes, outcomeBanner, pill, pipeline, releaseHead, runnersList, signalRows, signalsList, toneText, type Actions, type Watch } from "../ui/render.ts";
 import {
   cancelledCount,
   activityLabel,
@@ -27,6 +28,8 @@ function boardCard(snapshot: ReleaseSnapshot, release: Release, now: Date, actio
   const images = stepOf(release, "images");
   const queue = isActive(release) ? queueView(snapshot) : null;
   const laneBox = lanes(release, now);
+  // The open watch: its phase and each source as it is measured; the note's signals once it ends.
+  const phase = watchPhaseLabel(release, now);
   return h(
     "div",
     { class: "card rl" },
@@ -38,7 +41,7 @@ function boardCard(snapshot: ReleaseSnapshot, release: Release, now: Date, actio
         "div",
         { class: "rl-commit clickable", title: other.title, onClick: () => select(other) },
         icon("clock", 13),
-        h("span", { class: "ellipsis" }, `${releaseLabel(other)} · ${activityLabel(snapshot, other)} · ${other.title || "(sem título)"}`),
+        h("span", { class: "ellipsis" }, `${releaseLabel(other)} · ${activityLabel(snapshot, other, now)} · ${other.title || "(sem título)"}`),
       ),
     ),
     pipeline(release, now, watch),
@@ -53,8 +56,10 @@ function boardCard(snapshot: ReleaseSnapshot, release: Release, now: Date, actio
         )
       : null,
     laneBox,
-    release.signals.length > 0 ? h("div", { class: "rl-sec" }, "Sinais do vigia") : null,
-    signalsList(release),
+    phase ? h("div", { class: "rl-sec" }, `Vigia · ${phase}`) : null,
+    phase ? signalRows(liveSources(release), true) : null,
+    !phase && release.signals.length > 0 ? h("div", { class: "rl-sec" }, "Sinais do vigia") : null,
+    phase ? null : signalsList(release),
     h(
       "div",
       { class: "rl-foot" },

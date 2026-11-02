@@ -794,7 +794,8 @@ export function watchPhaseLabel(release: Release, now: Date, short = false): str
   if (ends === null) return "observando";
   const remaining = ends - now.getTime();
   if (remaining <= 0) return short ? "observando" : "observando · janela fechada";
-  const left = `faltam ${formatShortDuration(remaining)}`;
+  // Whole minutes, rounded up: the surfaces redraw every ~30 s, so seconds would go stale.
+  const left = `faltam ${Math.ceil(remaining / 60_000)}m`;
   return short ? left : `observando · ${left}`;
 }
 

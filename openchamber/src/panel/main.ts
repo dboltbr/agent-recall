@@ -30,7 +30,7 @@ export function releaseView(snapshot: ReleaseSnapshot, release: Release, now: Da
         "div",
         { class: "rl-commit clickable", title: other.title, onClick: () => select(other) },
         icon("clock", 13),
-        h("span", { class: "ellipsis" }, `${releaseLabel(other)} · ${activityLabel(snapshot, other)} · ${other.title || "(sem título)"}`),
+        h("span", { class: "ellipsis" }, `${releaseLabel(other)} · ${activityLabel(snapshot, other, now)} · ${other.title || "(sem título)"}`),
       ),
     ),
     outcomeBanner(release, actions),

@@ -79,7 +79,8 @@ test("fase do vigia: implantando, observando com contagem regressiva, janela fec
   const observing = watching(OBSERVING);
   assert.equal(watchPhaseLabel(observing, NOW), "observando · faltam 7m");
   assert.equal(watchPhaseLabel(observing, NOW, true), "faltam 7m");
-  assert.equal(watchPhaseLabel(observing, later(6.5)), "observando · faltam 30s");
+  assert.equal(watchPhaseLabel(observing, later(6.5)), "observando · faltam 1m", "minutos inteiros, para cima");
+  assert.equal(watchPhaseLabel(observing, later(0.5)), "observando · faltam 7m");
   assert.equal(watchPhaseLabel(observing, later(8)), "observando · janela fechada");
   assert.equal(watchPhaseLabel(observing, later(8), true), "observando");
   const red = watching({ ...OBSERVING, phase: "done", verdict: "red" });
