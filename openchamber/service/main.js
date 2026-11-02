@@ -46,7 +46,7 @@ ${command}: prazo de ${options.timeoutMs} ms estourou` });
 });
 
 // core/host.ts
-import { mkdir, readdir, readFile, rename, writeFile } from "node:fs/promises";
+import { link, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -5970,8 +5970,8 @@ function superRefine(fn, params) {
 var z = { array, boolean: boolean2, enum: _enum, literal, number: number2, object, string: string2 };
 
 // core/trailer.ts
-var HARNESSES = ["paseo", "opencode"];
-var VALUE = /^(paseo|opencode)\/([^/\s]+)\/([^/\s]+)$/;
+var HARNESSES = ["paseo", "opencode", "claude"];
+var VALUE = /^(paseo|opencode|claude)\/([^/\s]+)\/([^/\s]+)$/;
 var LINE = /^Agent-Session:[ \t]*(\S+)[ \t]*$/gm;
 function parseSessionValue(value) {
   const match = VALUE.exec((value ?? "").trim());
@@ -6006,7 +6006,7 @@ var StepStateSchema = z.enum(["pending", "running", "done", "failed", "cancelled
 var JobStateSchema = z.enum(["queued", "waiting", "running", "success", "failure", "cancelled", "skipped"]);
 var VerdictSchema = z.enum(["green", "reverted", "red", "inconclusive", "failed", "cancelled", "none"]);
 var SessionSchema = z.object({
-  harness: z.enum(["paseo", "opencode"]),
+  harness: z.enum(["paseo", "opencode", "claude"]),
   host: z.string(),
   id: z.string()
 });
@@ -6502,7 +6502,7 @@ async function fetchRef(input) {
   );
   if (fetched.code !== 0) throw new Error(`git fetch ${notesRef} falhou: ${fetched.stderr.trim()}`);
 }
-async function fetchNotes(input) {
+async function fetchNotes(input, parse2 = parseNote) {
   const { exec, gitDir, notesRef } = input;
   await fetchRef(input);
   const list = await exec("git", ["--git-dir", gitDir, "notes", "--ref", notesRef, "list"], {
@@ -6520,7 +6520,7 @@ async function fetchNotes(input) {
   const bodies = parseCatFileBatch(batch.stdout);
   return pairs.map(({ blob, key }) => {
     const raw = bodies.get(blob) ?? "";
-    return { key, raw, note: parseNote(raw) };
+    return { key, raw, note: parse2(raw) };
   });
 }
 function parseNotesList(stdout) {

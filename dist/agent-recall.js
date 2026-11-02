@@ -42,7 +42,9 @@ ${command}: prazo de ${options.timeoutMs} ms estourou` });
 });
 
 // core/host.ts
-import { mkdir, readdir, readFile, rename, writeFile } from "node:fs/promises";
+import { createHash, randomBytes } from "node:crypto";
+import { link, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { connect, createServer } from "node:net";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -9396,8 +9398,8 @@ function ko_default() {
 }
 
 // node_modules/zod/v4/locales/lt.js
-var capitalizeFirstCharacter = (text) => {
-  return text.charAt(0).toUpperCase() + text.slice(1);
+var capitalizeFirstCharacter = (text2) => {
+  return text2.charAt(0).toUpperCase() + text2.slice(1);
 };
 function getUnitTypeFromNumber(number4) {
   const abs = Math.abs(number4);
@@ -16251,8 +16253,8 @@ var contributors = {
 function aggregateChecks(schema) {
   const agg = {};
   const def = schema._zod.def;
-  const list = schema._zod.traits.has("$ZodCheck") ? [schema, ...def.checks ?? []] : def.checks ?? [];
-  for (const ch of list)
+  const list2 = schema._zod.traits.has("$ZodCheck") ? [schema, ...def.checks ?? []] : def.checks ?? [];
+  for (const ch of list2)
     contributors[ch._zod.def.check]?.(agg, ch._zod.def);
   const bag = schema._zod.bag;
   if (bag.minimum !== void 0)
@@ -19764,8 +19766,8 @@ function date4(params) {
 }
 
 // core/trailer.ts
-var HARNESSES = ["paseo", "opencode"];
-var VALUE = /^(paseo|opencode)\/([^/\s]+)\/([^/\s]+)$/;
+var HARNESSES = ["paseo", "opencode", "claude"];
+var VALUE = /^(paseo|opencode|claude)\/([^/\s]+)\/([^/\s]+)$/;
 var LINE = /^Agent-Session:[ \t]*(\S+)[ \t]*$/gm;
 function parseSessionValue(value) {
   const match = VALUE.exec((value ?? "").trim());
@@ -19803,7 +19805,7 @@ var StepStateSchema = external_exports.enum(["pending", "running", "done", "fail
 var JobStateSchema = external_exports.enum(["queued", "waiting", "running", "success", "failure", "cancelled", "skipped"]);
 var VerdictSchema = external_exports.enum(["green", "reverted", "red", "inconclusive", "failed", "cancelled", "none"]);
 var SessionSchema = external_exports.object({
-  harness: external_exports.enum(["paseo", "opencode"]),
+  harness: external_exports.enum(["paseo", "opencode", "claude"]),
   host: external_exports.string(),
   id: external_exports.string()
 });
@@ -20260,16 +20262,19 @@ async function loadConfig(path = configPath()) {
   } catch {
     throw new Error(`${path} n\xE3o \xE9 JSON`);
   }
-  const text = (key, fallback) => {
+  const text2 = (key, fallback) => {
     const field = value[key];
     return typeof field === "string" && field.trim() !== "" ? field.trim() : fallback;
   };
-  const instance = text("instance", "");
+  const instance = text2("instance", "");
   if (!instance) throw new Error(`${path} sem "instance"`);
+  const notesRef = text2("notesRef", "refs/notes/release-watch");
   return {
     instance,
-    repository: text("repository", "dboltbr/dbolt"),
-    notesRef: text("notesRef", "refs/notes/release-watch")
+    repository: text2("repository", "dboltbr/dbolt"),
+    notesRef,
+    // A drill reads the drill refs of both kinds unless the config names the blocked one.
+    blockedRef: text2("blockedRef", notesRef.endsWith("-drill") ? "refs/notes/release-blocked-drill" : "refs/notes/release-blocked")
   };
 }
 async function writeHeartbeat(stateDir, harness, beat) {
@@ -20319,14 +20324,87 @@ async function readHandoffs(stateDir, release) {
   }
   return out;
 }
-function isAlive(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error62) {
-    return error62.code === "EPERM";
+var LOCK_PORT_BASE = 2e4;
+var LOCK_PORT_SPAN = 12e3;
+var LOCK_PROBE_MS = 3e3;
+var LOCK_RELEASE_MS = 1e3;
+var LOCK_BANNER = "agent-recall";
+var reportedPorts = /* @__PURE__ */ new Set();
+function lockPort(stateDir, name) {
+  const digest = createHash("sha256").update(`${stateDir}\0${name}`).digest();
+  return LOCK_PORT_BASE + digest.readUInt32BE(0) % LOCK_PORT_SPAN;
+}
+function lockBanner(stateDir, name) {
+  return `${LOCK_BANNER} ${createHash("sha256").update(stateDir).digest("hex").slice(0, 12)} ${name} `;
+}
+function listenOn(port, banner) {
+  return new Promise((resolve) => {
+    const server = createServer((socket) => {
+      socket.on("error", () => void 0);
+      socket.write(`${banner}${process.pid}
+`, () => socket.destroy());
+      socket.setTimeout(LOCK_PROBE_MS, () => socket.destroy());
+    });
+    server.once(
+      "error",
+      (error62) => resolve(error62.code === "EADDRINUSE" ? { kind: "busy" } : { kind: "error", error: error62 })
+    );
+    server.listen({ host: "127.0.0.1", port }, () => {
+      server.unref();
+      resolve({ kind: "held", server });
+    });
+  });
+}
+function probeLock(port, banner) {
+  return new Promise((resolve) => {
+    let data = "";
+    let settled = false;
+    const finish = (verdict2) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer2);
+      socket.destroy();
+      resolve(verdict2);
+    };
+    const socket = connect({ host: "127.0.0.1", port });
+    const timer2 = setTimeout(() => finish("other"), LOCK_PROBE_MS);
+    const verdict = () => data.startsWith(banner) ? "ours" : "other";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk) => {
+      data += chunk;
+      if (data.includes("\n")) finish(verdict());
+    });
+    socket.on("close", () => finish(verdict()));
+    socket.on("error", (error62) => finish(error62.code === "ECONNREFUSED" ? "free" : "other"));
+  });
+}
+function closeWithin(server, ms) {
+  return new Promise((resolve) => {
+    const timer2 = setTimeout(resolve, ms);
+    server.close(() => {
+      clearTimeout(timer2);
+      resolve();
+    });
+  });
+}
+async function acquireHostLock(stateDir, name, log2) {
+  const port = lockPort(stateDir, name);
+  const banner = lockBanner(stateDir, name);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const listened = await listenOn(port, banner);
+    if (listened.kind === "held") {
+      const { server } = listened;
+      return { name, port, release: () => closeWithin(server, LOCK_RELEASE_MS) };
+    }
+    const verdict = listened.kind === "error" ? "other" : await probeLock(port, banner);
+    if (verdict === "ours") return null;
+    if (verdict === "other") {
+      if (!reportedPorts.has(port)) log2?.warn(`porta ${port} ocupada por outro programa: este host n\xE3o consulta`);
+      reportedPorts.add(port);
+      return null;
+    }
   }
+  return null;
 }
 
 // core/poll.ts
@@ -20392,8 +20470,8 @@ function firstIn(scope, key) {
   scope[key] = true;
   return true;
 }
-function lastLine(text) {
-  return text.trim().split("\n").filter(Boolean).pop()?.trim().slice(0, 400) ?? "";
+function lastLine(text2) {
+  return text2.trim().split("\n").filter(Boolean).pop()?.trim().slice(0, 400) ?? "";
 }
 async function openCodeTarget(moduleUrl) {
   let path;
@@ -20459,10 +20537,6 @@ ${result.stderr}`;
   }
 }
 
-// opencode/poller.ts
-import { mkdir as mkdir3, readFile as readFile3, rename as rename3, writeFile as writeFile3 } from "node:fs/promises";
-import { join as join4 } from "node:path";
-
 // core/notes.ts
 import { existsSync } from "node:fs";
 var FETCH_TIMEOUT_MS = 25e3;
@@ -20491,14 +20565,14 @@ async function fetchRef(input2) {
   );
   if (fetched.code !== 0) throw new Error(`git fetch ${notesRef} falhou: ${fetched.stderr.trim()}`);
 }
-async function fetchNotes(input2) {
+async function fetchNotes(input2, parse3 = parseNote) {
   const { exec, gitDir, notesRef } = input2;
   await fetchRef(input2);
-  const list = await exec("git", ["--git-dir", gitDir, "notes", "--ref", notesRef, "list"], {
+  const list2 = await exec("git", ["--git-dir", gitDir, "notes", "--ref", notesRef, "list"], {
     timeoutMs: 1e4
   });
-  if (list.code !== 0) throw new Error(`git notes list falhou: ${list.stderr.trim()}`);
-  const pairs = parseNotesList(list.stdout);
+  if (list2.code !== 0) throw new Error(`git notes list falhou: ${list2.stderr.trim()}`);
+  const pairs = parseNotesList(list2.stdout);
   if (pairs.length === 0) return [];
   const batch = await exec("git", ["--git-dir", gitDir, "cat-file", "--batch"], {
     timeoutMs: 1e4,
@@ -20509,7 +20583,7 @@ async function fetchNotes(input2) {
   const bodies = parseCatFileBatch(batch.stdout);
   return pairs.map(({ blob, key }) => {
     const raw = bodies.get(blob) ?? "";
-    return { key, raw, note: parseNote(raw) };
+    return { key, raw, note: parse3(raw) };
   });
 }
 var PUSH_ATTEMPTS = 3;
@@ -20579,6 +20653,10 @@ function parseNote(raw) {
 function releaseName(note) {
   const value = String(note.release);
   return value.startsWith("release-") ? value : `release-${value}`;
+}
+function parseBlockedNote(raw) {
+  const note = parseNote(raw);
+  return note && typeof note["state"] === "string" ? note : null;
 }
 
 // core/release-fetch.ts
@@ -20824,11 +20902,13 @@ function createReleaseTracker(options) {
   let last = null;
   let lastForced = -Infinity;
   let running = null;
+  let probeError = null;
   function run(input2) {
     if (running) return running;
     running = (async () => {
       const previous = options.source.current();
       const next = await options.source.load(input2);
+      probeError = null;
       try {
         await options.onSnapshot?.(next, previous);
       } catch (error62) {
@@ -20842,10 +20922,17 @@ function createReleaseTracker(options) {
       last = input2;
       const current = options.source.current();
       const scheduled = ticks++ % IDLE_EVERY_TICKS === 0 || current === null || current.releases.some(isActive) || input2.notesChanged;
-      const due = scheduled || await options.source.probe(input2.token).catch((error62) => {
-        options.log.warn(`release: ${describe3(error62)}`);
-        return false;
-      });
+      const due = scheduled || await options.source.probe(input2.token).then(
+        (moved) => {
+          probeError = null;
+          return moved;
+        },
+        (error62) => {
+          probeError = describe3(error62);
+          options.log.warn(`release: ${probeError}`);
+          return false;
+        }
+      );
       if (due) await run(input2);
     },
     async refresh() {
@@ -20855,7 +20942,10 @@ function createReleaseTracker(options) {
       await run(last);
       return true;
     },
-    current: () => options.source.current()
+    current: () => {
+      const snapshot = options.source.current();
+      return snapshot && probeError && !snapshot.error ? { ...snapshot, error: probeError } : snapshot;
+    }
   };
 }
 
@@ -20864,6 +20954,7 @@ import { join as join3 } from "node:path";
 
 // core/route.ts
 var CATCH_UP_MS = 8 * 60 * 60 * 1e3;
+var ACK_TIMEOUT_MS = 2 * 6e4;
 var ROLLBACK_WAIT_MS = 10 * 60 * 1e3;
 function mine(ref, me) {
   return ref.harness === me.harness && ref.host === me.host;
@@ -20903,19 +20994,76 @@ function route(note, me, now) {
   }
   return actions;
 }
-function blockedRecalls(releases, me, now) {
+function sameCommit(a, b) {
+  return a.length >= 7 && b.length >= 7 && (a.startsWith(b) || b.startsWith(a));
+}
+function list(value) {
+  return Array.isArray(value) ? value : [];
+}
+function text(value) {
+  return typeof value === "string" ? value : null;
+}
+function blockedSessions(note) {
+  const out = [];
+  for (const entry of list(note.sessions)) {
+    const ref = toSessionRef(entry);
+    if (!ref) continue;
+    const commits = list(entry.commits).filter((commit) => typeof commit === "string");
+    const known = out.find((seen) => sameSession(seen.ref, ref));
+    if (known) known.commits.push(...commits);
+    else out.push({ ref, commits: [...commits] });
+  }
+  return out;
+}
+function blockedTarget(note) {
+  const sessions = blockedSessions(note);
+  if (sessions.length === 1) return sessions[0].ref;
+  const head = text(note.range?.to);
+  if (!head) return null;
+  return sessions.find((entry) => entry.commits.some((commit) => sameCommit(commit, head)))?.ref ?? null;
+}
+function blockedCulprits(note) {
+  const assessment = note.assessment;
+  const suspects = list(assessment?.suspects).map((suspect) => suspect && typeof suspect === "object" ? text(suspect.commit) : null).filter((commit) => commit !== null);
+  return blockedSessions(note).filter((entry) => entry.commits.some((commit) => suspects.some((suspect) => sameCommit(commit, suspect)))).map((entry) => entry.ref);
+}
+function routeBlocked(note, me) {
+  const release = releaseName(note);
   const actions = [];
-  const shipped = Math.max(-Infinity, ...releases.filter((release) => release.tag !== null).map((release) => release.number));
-  for (const release of releases) {
-    if (release.verdict !== "failed" || release.tag !== null || !release.pusher) continue;
-    if (release.number < shipped) continue;
-    const at = Date.parse(release.completedAt ?? "");
-    if (!Number.isFinite(at) || now.getTime() - at > CATCH_UP_MS) continue;
-    const target = toSessionRef(release.pusher);
-    if (!target || !mine(target, me)) continue;
-    actions.push({ kind: "blocked", release: release.name, target, lock: `${target.id}.blocked` });
+  if (note.state === "red" && !note.owner) {
+    const target = blockedTarget(note);
+    if (target && mine(target, me)) actions.push({ kind: "blocked", release, role: "blocked", target, lock: `${target.id}.blocked` });
+  }
+  if (note.state === "fix-pending") {
+    const owner = parseSessionValue(text(note.owner));
+    for (const target of blockedCulprits(note)) {
+      if (!mine(target, me) || owner && sameSession(owner, target)) continue;
+      actions.push({ kind: "blocked", release, role: "fix", target, lock: `${target.id}.blocked-fix` });
+    }
   }
   return actions;
+}
+function releaseNumber(note) {
+  return Number(/^release-(\d+)$/.exec(releaseName(note))?.[1]);
+}
+function releaseHistory(snapshot) {
+  return snapshot && !snapshot.error ? snapshot.releases : null;
+}
+function shippedSince(note, releases) {
+  if (!releases || releases.length === 0) return null;
+  const number4 = releaseNumber(note);
+  if (releases.some((release) => release.tag !== null && release.number >= number4)) return true;
+  const oldest = Math.min(...releases.map((release) => release.number));
+  return Number.isFinite(number4) && number4 >= oldest ? false : null;
+}
+function blockedConfirmation(role, target, note, shipped, now) {
+  if (!note || shipped === true || !isRecent(note, now)) return "moot";
+  const called = formatSession(target);
+  const fixSession = text(note.fix?.session);
+  if (text(note.owner) === called || fixSession === called) return "taken";
+  const callable = role === "fix" ? note.state === "fix-pending" && blockedCulprits(note).some((culprit) => sameSession(culprit, target)) : note.state === "red" && !note.owner;
+  if (!callable) return "moot";
+  return shipped === null ? "unknown" : "open";
 }
 function roleOf(action) {
   return action.kind === "recall" ? action.role : "blocked";
@@ -20925,7 +21073,7 @@ function describeAction(action) {
     case "recall":
       return `${action.release} ${action.role} \u2192 ${formatSession(action.target)}`;
     case "blocked":
-      return `${action.release} barrada antes da produ\xE7\xE3o \u2192 ${formatSession(action.target)}`;
+      return `${action.release} barrada (${action.role}) \u2192 ${formatSession(action.target)}`;
   }
 }
 
@@ -20946,8 +21094,8 @@ var ROLLBACK_REASONS = {
 };
 function reasonText(reason) {
   if (!reason) return "sem motivo na nota";
-  const text = ROLLBACK_REASONS[reason];
-  return text ? `${text} (${reason})` : reason;
+  const text2 = ROLLBACK_REASONS[reason];
+  return text2 ? `${text2} (${reason})` : reason;
 }
 function redReasons(note) {
   const red = noteSignals(note).filter((signal) => signal.outcome === "red");
@@ -20993,28 +21141,27 @@ function notifiedPrompt(release, note) {
 function promptFor(action, note) {
   return action.role === "owner" ? ownerPrompt(action.release, note) : notifiedPrompt(action.release, note);
 }
-function blockedPrompt(release) {
-  const snapshot = {
-    number: release.number,
-    url: release.url,
-    headSha: release.headSha,
-    title: release.title,
-    failedJob: release.failedJob,
-    sessions: release.sessions.map((session) => `${session.harness}/${session.host}/${session.id}`)
+function blockedPrompt(release, key, note) {
+  const essentials = {
+    number: Number(release.replace(/^release-/, "")),
+    url: note.run?.url ?? null,
+    headSha: key,
+    failedJob: note.run?.failedJob ?? null,
+    state: note.state
   };
-  return `Release barrada ${release.name}: carregue a skill dbolt-release-incident. Papel: blocked. Nada foi \xE0 produ\xE7\xE3o; os pushes seguintes ficam barrados at\xE9 a main passar. Release: ${JSON.stringify(snapshot)}`;
+  return `Release barrada ${release}: carregue a skill dbolt-release-incident. Papel: blocked. Release: ${JSON.stringify(essentials)}`;
 }
 async function deliver(input2) {
-  const { action, text, title, delivery, log: log2 } = input2;
+  const { action, text: text2, title, delivery, log: log2 } = input2;
   const failures = [];
   try {
-    await delivery.prompt(action.target, text);
+    await delivery.prompt(action.target, text2, action);
     return { outcome: "prompt", session: action.target.id };
   } catch (error62) {
     failures.push(`prompt: ${describe3(error62)}`);
   }
   try {
-    const id = await delivery.fallback(action.target, text, title);
+    const id = await delivery.fallback(action.target, text2, title, action);
     log2.warn(`${action.release}: ${formatSession(action.target)} recusou o prompt; chamado foi para ${id}`);
     return { outcome: "fallback", session: id };
   } catch (error62) {
@@ -21024,7 +21171,6 @@ async function deliver(input2) {
   const role = roleOf(action);
   const reason = failures.join("; ");
   log2.error(`${input2.drill ? "[ensaio] " : ""}n\xE3o consegui chamar ${target} para ${action.release} (${role}): ${reason}`);
-  if (!input2.recordFailure) return { outcome: "failed", session: null };
   try {
     if (await input2.recordFailure({ role, target, reason })) return { outcome: "recorded", session: null };
     log2.error(`${action.release}: a falha do chamado n\xE3o entrou na nota`);
@@ -21044,6 +21190,11 @@ function createWatcher(options) {
   let token = null;
   const seen = /* @__PURE__ */ new Map();
   const notes = /* @__PURE__ */ new Map();
+  let blockedEtag = null;
+  let blockedRef = null;
+  const blockedSeen = /* @__PURE__ */ new Map();
+  let blocked = /* @__PURE__ */ new Map();
+  const awaiting = /* @__PURE__ */ new Map();
   async function getToken() {
     const now = clock.now().getTime();
     if (token && now - token.at < TOKEN_TTL_MS) return token.value;
@@ -21054,19 +21205,35 @@ function createWatcher(options) {
     return value;
   }
   async function call(input2, me) {
+    const run = () => deliverOnce(input2, me);
+    return options.guard ? await options.guard(run) ?? null : run();
+  }
+  async function deliverOnce(input2, me) {
     const { action } = input2;
     if (!await acquireLock(options.stateDir, action.release, action.lock)) return null;
     log2.info(`chamando: ${describeAction(action)}`);
     const { outcome, session } = await deliver({ ...input2, delivery: options.delivery, host: me.host, log: log2 });
     log2.info(`${describeAction(action)}: ${outcome}`);
-    if (session && !input2.drill) {
-      await writeHandoff(options.stateDir, action.release, action.lock, {
-        role: roleOf(action),
-        session: { harness: me.harness, host: me.host, id: session },
-        at: clock.now().toISOString()
-      }).catch((error62) => log2.warn(`${action.release}: registrar o chamado: ${describe3(error62)}`));
-    }
+    if (session && !input2.drill) await recordHandoff(action, me, session);
     return { action, outcome, session };
+  }
+  function recordHandoff(action, me, session) {
+    return writeHandoff(options.stateDir, action.release, action.lock, {
+      role: roleOf(action),
+      session: { harness: me.harness, host: me.host, id: session },
+      at: clock.now().toISOString()
+    }).catch((error62) => log2.warn(`${action.release}: registrar o chamado: ${describe3(error62)}`));
+  }
+  function failureRecorder(key, ref, extra, config2, me, auth) {
+    return (failure2) => recordRecallFailure({
+      exec,
+      gitDir: join3(options.stateDir, `${options.harness}.git`),
+      repository: config2.repository,
+      notesRef: ref,
+      token: auth,
+      key,
+      recall: { ...failure2, ...extra, failedAt: clock.now().toISOString(), by: `${me.harness}/${me.host}` }
+    });
   }
   function act(action, key, note, config2, me, auth) {
     return call(
@@ -21075,23 +21242,114 @@ function createWatcher(options) {
         text: promptFor(action, note),
         title: `Incidente ${action.release}${note.drill ? " [ensaio]" : ""}`,
         drill: note.drill === true,
-        recordFailure: (failure2) => recordRecallFailure({
-          exec,
-          gitDir: join3(options.stateDir, `${options.harness}.git`),
-          repository: config2.repository,
-          notesRef: config2.notesRef,
-          token: auth,
-          key,
-          recall: {
-            ...failure2,
-            failedAt: clock.now().toISOString(),
-            by: `${me.harness}/${me.host}`,
-            rollback: note.rollback?.outcome ?? null
-          }
-        })
+        recordFailure: failureRecorder(key, config2.notesRef, { rollback: note.rollback?.outcome ?? null }, config2, me, auth)
       },
       me
     );
+  }
+  async function actBlocked(action, key, note, config2, me, auth) {
+    const input2 = {
+      action,
+      text: blockedPrompt(action.release, key, note),
+      title: `Release barrada ${action.release}${note.drill ? " [ensaio]" : ""}`,
+      drill: note.drill === true,
+      recordFailure: failureRecorder(key, config2.blockedRef, { state: note.state }, config2, me, auth)
+    };
+    const done = await call(input2, me);
+    if (done?.outcome === "prompt" && !options.confirmsCalls) {
+      awaiting.set(`${action.release}/${action.lock}`, { ...input2, action, key, deliveredAt: clock.now().getTime() });
+    }
+    return done;
+  }
+  async function followUp(me, releases) {
+    const handled = [];
+    const now = clock.now();
+    for (const [id, waiting] of awaiting) {
+      const { action } = waiting;
+      const note = blocked.get(waiting.key)?.note ?? null;
+      let verdict;
+      try {
+        verdict = blockedConfirmation(action.role, action.target, note, note ? shippedSince(note, releases) : null, now);
+      } catch (error62) {
+        log2.error(`${action.release}: conferir o chamado: ${describe3(error62)}`);
+        continue;
+      }
+      if (verdict === "unknown") continue;
+      if (verdict !== "open") {
+        log2.info(`${action.release}: ${verdict === "taken" ? `${formatSession(action.target)} assumiu o chamado` : "chamado da release barrada encerrado"}`);
+        awaiting.delete(id);
+        continue;
+      }
+      if (now.getTime() - waiting.deliveredAt < ACK_TIMEOUT_MS) continue;
+      awaiting.delete(id);
+      const done = await fallBack(waiting, action.target, me);
+      if (done) handled.push(done);
+    }
+    return handled;
+  }
+  async function fallBack(waiting, target, me) {
+    const run = async () => {
+      const { action } = waiting;
+      try {
+        const session = await options.delivery.fallback(target, waiting.text, waiting.title, action);
+        log2.warn(`${action.release}: ${formatSession(target)} n\xE3o assumiu em 2 min; chamado foi para ${session}`);
+        if (!waiting.drill) await recordHandoff(action, me, session);
+        return { action, outcome: "fallback", session };
+      } catch (error62) {
+        const reason = `prompt: sem confirma\xE7\xE3o; fallback: ${describe3(error62)}`;
+        log2.error(`${waiting.drill ? "[ensaio] " : ""}n\xE3o consegui chamar ${formatSession(target)} para ${action.release} (${action.role}): ${reason}`);
+        try {
+          if (await waiting.recordFailure({ role: roleOf(action), target: formatSession(target), reason })) {
+            return { action, outcome: "recorded", session: null };
+          }
+          log2.error(`${action.release}: a falha do chamado n\xE3o entrou na nota`);
+        } catch (failure2) {
+          log2.error(`${action.release}: gravar a falha na nota: ${describe3(failure2)}`);
+        }
+        return { action, outcome: "failed", session: null };
+      }
+    };
+    return options.guard ? await options.guard(run) ?? null : run();
+  }
+  async function attempt(actions, run, handled) {
+    let clean = true;
+    for (const action of actions) {
+      try {
+        const done = await run(action);
+        if (done) handled.push(done);
+      } catch (error62) {
+        clean = false;
+        log2.error(`${describeAction(action)}: ${describe3(error62)}`);
+      }
+    }
+    return clean;
+  }
+  async function pollBlocked(config2, auth) {
+    const poll = await pollRef({ fetch: options.fetch, token: auth, repository: config2.repository, notesRef: config2.blockedRef, etag: blockedEtag });
+    if (poll.kind === "error") {
+      log2.warn(`consulta de ${config2.blockedRef}: ${poll.message}`);
+      return { kind: poll.kind, fetched: false, fresh: false };
+    }
+    if (poll.kind === "unchanged") return { kind: poll.kind, fetched: false, fresh: true };
+    if (poll.kind === "missing") {
+      blockedEtag = null;
+      blocked = /* @__PURE__ */ new Map();
+      return { kind: poll.kind, fetched: false, fresh: true };
+    }
+    let fetched;
+    try {
+      fetched = await fetchNotes(
+        { exec, gitDir: join3(options.stateDir, `${options.harness}.git`), repository: config2.repository, notesRef: config2.blockedRef, token: auth },
+        parseBlockedNote
+      );
+    } catch (error62) {
+      log2.warn(describe3(error62));
+      return { kind: poll.kind, fetched: false, fresh: false };
+    }
+    blockedEtag = poll.etag;
+    blocked = /* @__PURE__ */ new Map();
+    for (const { key, raw, note } of fetched) if (note) blocked.set(key, { raw, note });
+    return { kind: poll.kind, fetched: true, fresh: true };
   }
   async function tick() {
     const now = clock.now();
@@ -21100,7 +21358,7 @@ function createWatcher(options) {
       config2 = await options.loadConfig();
     } catch (error62) {
       log2.error(describe3(error62));
-      return { poll: "config-error", fetched: false, handled: [] };
+      return { poll: "config-error", fetched: false, blocked: null, blockedFetched: false, handled: [] };
     }
     if (config2.notesRef !== notesRef) {
       notesRef = config2.notesRef;
@@ -21109,13 +21367,20 @@ function createWatcher(options) {
       seen.clear();
       notes.clear();
     }
+    if (config2.blockedRef !== blockedRef) {
+      blockedRef = config2.blockedRef;
+      blockedEtag = null;
+      blockedSeen.clear();
+      blocked = /* @__PURE__ */ new Map();
+      awaiting.clear();
+    }
     const me = { harness: options.harness, host: options.host(config2) };
     let auth;
     try {
       auth = await getToken();
     } catch (error62) {
       log2.error(describe3(error62));
-      return { poll: "token-error", fetched: false, handled: [] };
+      return { poll: "token-error", fetched: false, blocked: null, blockedFetched: false, handled: [] };
     }
     const poll = await pollRef({ fetch: options.fetch, token: auth, repository: config2.repository, notesRef: config2.notesRef, etag });
     if (poll.kind !== "error" || poll.status !== 401 && poll.status !== 403) {
@@ -21163,27 +21428,26 @@ function createWatcher(options) {
     }
     for (const [key, note] of notes) {
       if (!isRecent(note, now)) continue;
-      for (const action of route(note, me, now)) {
-        const done = await act(action, key, note, config2, me, auth);
-        if (done) handled.push(done);
-      }
+      await attempt(route(note, me, now), (action) => act(action, key, note, config2, me, auth), handled);
     }
-    if (options.release) {
-      await options.release.tick({ token: auth, notes, notesChanged: fetched }).catch((error62) => log2.warn(`release: ${describe3(error62)}`));
-      const releases = options.release.current()?.releases ?? [];
-      for (const action of blockedRecalls(releases, me, now)) {
-        const release = releases.find((candidate) => candidate.name === action.release);
-        const done = await call(
-          { action, text: blockedPrompt(release), title: `Release barrada ${action.release}`, drill: false, recordFailure: null },
-          me
-        ).catch((error62) => {
-          log2.error(`${action.release}: ${describe3(error62)}`);
-          return null;
-        });
-        if (done) handled.push(done);
+    const blockedPoll = poll.kind === "error" && poll.status === 401 ? null : await pollBlocked(config2, auth);
+    await options.release.tick({ token: auth, notes, notesChanged: fetched || blockedPoll?.fetched === true }).catch((error62) => log2.warn(`release: ${describe3(error62)}`));
+    const releases = releaseHistory(options.release.current());
+    for (const [key, { raw, note }] of blockedPoll?.fresh ? blocked : []) {
+      if (blockedSeen.get(key) === raw) continue;
+      let actions;
+      try {
+        const shipped = shippedSince(note, releases);
+        if (shipped === null) continue;
+        actions = shipped || !isRecent(note, now) ? [] : routeBlocked(note, me);
+      } catch (error62) {
+        log2.error(`nota barrada ${key.slice(0, 12)}: ${describe3(error62)}`);
+        continue;
       }
+      if (await attempt(actions, (action) => actBlocked(action, key, note, config2, me, auth), handled)) blockedSeen.set(key, raw);
     }
-    return { poll: poll.kind, fetched, handled };
+    if (blockedPoll?.fresh) handled.push(...await followUp(me, releases));
+    return { poll: poll.kind, fetched, blocked: blockedPoll?.kind ?? null, blockedFetched: blockedPoll?.fetched === true, handled };
   }
   function start(intervalMs = POLL_INTERVAL_MS) {
     let stopped = false;
@@ -21202,7 +21466,12 @@ function createWatcher(options) {
       await running;
     };
   }
-  return { tick, start };
+  return {
+    tick,
+    start,
+    notes: () => notes,
+    blockedNotes: () => new Map([...blocked].map(([key, entry]) => [key, entry.note]))
+  };
 }
 
 // opencode/poller.ts
@@ -21216,36 +21485,7 @@ function attach(registry3, ctx, deps) {
   if (previous) deps.log.info(`SHA ${deps.sha.slice(0, 12)} assume o poller do SHA ${previous.sha.slice(0, 12)}`);
   registry3.poller = startPoller(registry3, deps, previous ? previous.stop() : Promise.resolve());
 }
-function pollerPath(stateDir) {
-  return join4(stateDir, "opencode.poller");
-}
-async function readHolder(path) {
-  const raw = await readFile3(path, "utf8").catch(() => null);
-  if (raw === null) return null;
-  const pid = Number(JSON.parse(raw.trim() || "{}").pid);
-  return Number.isInteger(pid) ? pid : 0;
-}
-async function claimPoller(stateDir, pid) {
-  const path = pollerPath(stateDir);
-  await mkdir3(stateDir, { recursive: true });
-  const body = `${JSON.stringify({ pid })}
-`;
-  const holder = await readHolder(path).catch(() => 0);
-  if (holder === pid) return true;
-  if (holder === null) {
-    try {
-      await writeFile3(path, body, { flag: "wx" });
-      return true;
-    } catch {
-      return false;
-    }
-  }
-  if (isAlive(holder)) return false;
-  const tmp = `${path}.${pid}.tmp`;
-  await writeFile3(tmp, body);
-  await rename3(tmp, path);
-  return await readHolder(path).catch(() => 0) === pid;
-}
+var POLLER_LOCK = "opencode.poller";
 function within(promise2, ms, timer2, what) {
   return new Promise((resolve, reject) => {
     const handle = timer2.set(() => reject(new Error(`${what}: sem resposta em ${ms} ms`)), ms);
@@ -21266,36 +21506,37 @@ function createDelivery(registry3) {
     if (!registry3.ctx) throw new Error("nenhum contexto OpenCode carregado");
     return registry3.ctx;
   };
-  async function promptNew(session, text) {
-    await context().session.prompt({ sessionID: session.id, text });
+  async function promptNew(session, text2) {
+    await context().session.prompt({ sessionID: session.id, text: text2 });
     return session.id;
   }
   return {
-    async prompt(target, text) {
-      await context().session.prompt({ sessionID: target.id, text });
+    async prompt(target, text2) {
+      await context().session.prompt({ sessionID: target.id, text: text2 });
     },
-    async fallback(target, text, title) {
+    async fallback(target, text2, title) {
       const ctx = context();
       const original = await ctx.session.get({ sessionID: target.id });
       const directory = original.location?.directory;
       if (!directory) throw new Error(`sess\xE3o ${target.id} sem diret\xF3rio`);
-      return promptNew(await ctx.session.create({ title, parentID: target.id, location: { directory } }), text);
+      return promptNew(await ctx.session.create({ title, parentID: target.id, location: { directory } }), text2);
     }
   };
 }
 function startPoller(registry3, deps, handover) {
   const { log: log2, timer: timer2 } = deps;
   let watcher = null;
-  let holding = false;
+  let lock = null;
   let ready = null;
   let stopped = false;
   let handle = null;
   let running = Promise.resolve();
   async function cycle() {
-    const own2 = await claimPoller(deps.stateDir, deps.pid);
-    if (own2 !== holding) log2.info(own2 ? `poller do host: pid ${deps.pid}` : "poller do host \xE9 outro processo");
-    holding = own2;
-    if (!own2) return;
+    if (!lock) {
+      lock = await acquireHostLock(deps.stateDir, POLLER_LOCK, log2);
+      if (!lock) return;
+      log2.info(`poller do host: pid ${deps.pid}, porta ${lock.port}`);
+    }
     const ctx = registry3.ctx;
     try {
       if (!ctx) throw new Error("nenhum contexto OpenCode carregado");
@@ -21319,7 +21560,7 @@ function startPoller(registry3, deps, handover) {
       exec: deps.exec,
       delivery: createDelivery(registry3),
       log: log2,
-      // No release UI here: the status only tells which pushes failed before the tag.
+      // No release UI here: the history only tells whether a later release shipped (closes a blocked call).
       release: createReleaseTracker({
         source: createReleaseSource({
           fetch: deps.fetch,
@@ -21350,6 +21591,8 @@ function startPoller(registry3, deps, handover) {
       stopped = true;
       if (handle !== null) timer2.clear(handle);
       await running;
+      await lock?.release();
+      lock = null;
     }
   };
 }
@@ -21371,7 +21614,7 @@ var index_default = {
   // No dispose: the poller and the newest context outlive location eviction (see ./poller.ts).
   setup(ctx) {
     attach(registry2, ctx, {
-      sha: true ? "37bfc2d4c3c0423abdf9bd2765a396bba4a8347b" : "unknown",
+      sha: true ? "2cf71577425bbbf0c00152b2cd825bda425c9df2" : "unknown",
       stateDir: stateDirectory(),
       pid: process.pid,
       clock: { now: () => /* @__PURE__ */ new Date() },
