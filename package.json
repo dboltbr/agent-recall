@@ -21,9 +21,9 @@
     "dist/"
   ],
   "scripts": {
-    "test": "node --test core/test/ opencode/test/ openchamber/test/ client/test/",
+    "test": "node scripts/test.mjs",
     "sync": "node scripts/sync-core.mjs",
-    "bundle": "node scripts/sync-core.mjs && node scripts/build-opencode.mjs && node openchamber/scripts/build.mjs",
+    "bundle": "node scripts/sync-core.mjs && node scripts/build-opencode.mjs && node scripts/build-claude.mjs && node openchamber/scripts/build.mjs",
     "build:openchamber": "node openchamber/scripts/build.mjs",
     "typecheck": "tsc --noEmit"
   },

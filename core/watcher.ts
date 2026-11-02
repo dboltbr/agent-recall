@@ -24,6 +24,12 @@ export interface WatcherOptions {
   readonly log: Logger;
   /** Release status (Paseo UI): rides this poller's token, notes and cadence. */
   readonly release?: ReleaseTracker;
+  /**
+   * Runs each call (lock, delivery, handoff record) as one unit, or refuses to start it (null): a
+   * harness whose process may exit at any moment (Claude Code) admits no new call once it is
+   * leaving and waits for the ones it admitted.
+   */
+  readonly guard?: <T>(call: () => Promise<T>) => Promise<T | null>;
 }
 
 export interface Handled {
@@ -44,6 +50,8 @@ export interface Watcher {
   tick(): Promise<TickReport>;
   /** Ticks now and every 30 s, never overlapping. Returns stop. */
   start(intervalMs?: number): () => Promise<void>;
+  /** The notes read so far, by annotated commit (refreshed when the ref changes). */
+  notes(): ReadonlyMap<string, Note>;
 }
 
 export function createWatcher(options: WatcherOptions): Watcher {
@@ -74,6 +82,11 @@ export function createWatcher(options: WatcherOptions): Watcher {
   }
 
   async function call(input: Call, me: Me): Promise<Handled | null> {
+    const run = () => deliverOnce(input, me);
+    return options.guard ? ((await options.guard(run)) ?? null) : run();
+  }
+
+  async function deliverOnce(input: Call, me: Me): Promise<Handled | null> {
     const { action } = input;
     if (!(await acquireLock(options.stateDir, action.release, action.lock))) return null;
     log.info(`chamando: ${describeAction(action)}`);
@@ -236,5 +249,5 @@ export function createWatcher(options: WatcherOptions): Watcher {
     };
   }
 
-  return { tick, start };
+  return { tick, start, notes: () => notes };
 }

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
@@ -206,4 +206,14 @@ test("arquivo recarregado com outro SHA assume o poller no mesmo processo", asyn
   assert.equal(manual.scheduled(INTERVAL), 1);
   await registry.poller!.stop();
   assert.equal(manual.scheduled(INTERVAL), 0);
+});
+
+test("trava de arquivo da versão anterior, do mesmo processo: o poller recarregado consulta", async () => {
+  const { registry, deps, heartbeat } = await setup([{ status: 404 }], () => ({}));
+  // The previous build held the host poller with a `{ pid }` file and was stopped by the reload.
+  await writeFile(join(deps("x").stateDir, "opencode.poller"), `${JSON.stringify({ pid: process.pid })}\n`);
+  attach(registry, fakeContext("home").ctx, deps("bbbbbbbbbbbb2222"));
+  await registry.poller!.idle();
+  assert.equal((await heartbeat())?.sha, "bbbbbbbbbbbb2222");
+  await registry.poller!.stop();
 });

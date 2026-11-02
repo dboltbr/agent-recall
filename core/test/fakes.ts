@@ -1,4 +1,5 @@
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { after } from "node:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Delivery } from "../deliver.ts";
@@ -15,9 +16,21 @@ export function fixedClock(at = NOW): { now(): Date; set(next: Date): void } {
   return { now: () => current, set: (next) => (current = next) };
 }
 
+const tempDirs: string[] = [];
+
+/** A fresh temp directory, removed after the file's tests (or earlier by `removeTempDirs`). */
 export async function tempState(): Promise<string> {
-  return mkdtemp(join(tmpdir(), "agent-recall-test-"));
+  const dir = await mkdtemp(join(tmpdir(), "agent-recall-test-"));
+  tempDirs.push(dir);
+  return dir;
 }
+
+/** Removes every temp directory made so far (scripts/test.mjs fails the run on leftovers). */
+export async function removeTempDirs(): Promise<void> {
+  await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+}
+
+after(removeTempDirs);
 
 export const config: HostConfig = {
   instance: "archdev",

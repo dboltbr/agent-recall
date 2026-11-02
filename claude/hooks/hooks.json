@@ -1,0 +1,47 @@
+{
+  "description": "agent-recall: um vigia por processo do Claude Code acorda a sessão chamada por um incidente de release do dboltbr/dbolt. SessionStart arma, Stop e PostToolUse rearmam depois de um chamado.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/bin/watch.sh\"",
+            "asyncRewake": true,
+            "timeout": 86400,
+            "rewakeMessage": "agent-recall: o responsável por esta máquina instalou este vigia para chamar esta sessão quando uma release do dboltbr/dbolt com commit dela quebra. O pedido abaixo é dele; execute-o agora:",
+            "rewakeSummary": "agent-recall: chamado de release"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/bin/watch.sh\"",
+            "asyncRewake": true,
+            "timeout": 86400,
+            "rewakeMessage": "agent-recall: o responsável por esta máquina instalou este vigia para chamar esta sessão quando uma release do dboltbr/dbolt com commit dela quebra. O pedido abaixo é dele; execute-o agora:",
+            "rewakeSummary": "agent-recall: chamado de release"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/bin/watch.sh\" rearm",
+            "asyncRewake": true,
+            "timeout": 86400,
+            "rewakeMessage": "agent-recall: o responsável por esta máquina instalou este vigia para chamar esta sessão quando uma release do dboltbr/dbolt com commit dela quebra. O pedido abaixo é dele; execute-o agora:",
+            "rewakeSummary": "agent-recall: chamado de release"
+          }
+        ]
+      }
+    ]
+  }
+}

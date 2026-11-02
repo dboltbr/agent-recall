@@ -1,7 +1,7 @@
 import type { Harness, SessionRef } from "./types.ts";
 
-const HARNESSES: readonly Harness[] = ["paseo", "opencode"];
-const VALUE = /^(paseo|opencode)\/([^/\s]+)\/([^/\s]+)$/;
+const HARNESSES: readonly Harness[] = ["paseo", "opencode", "claude"];
+const VALUE = /^(paseo|opencode|claude)\/([^/\s]+)\/([^/\s]+)$/;
 const LINE = /^Agent-Session:[ \t]*(\S+)[ \t]*$/gm;
 
 /** Parses a trailer value (`paseo/<serverId>/<agentId>`); anything else is null. */

@@ -69,14 +69,15 @@ export function watchTone(release: Release): Tone | null {
 export function pusherLine(release: Release, title: string | null, now: Date): string | null {
   const pusher = release.pusher;
   if (!pusher) return null;
+  const harness = pusher.harness === "claude" ? "Claude Code" : "OpenCode";
   const who =
     pusher.harness === "paseo"
       ? title
         ? `push do agente Paseo “${title}”`
         : `push do agente Paseo ${pusher.id.slice(0, 8)}`
       : title
-        ? `push da sessão OpenCode “${title}”`
-        : `push da sessão OpenCode · ${pusher.host}`;
+        ? `push da sessão ${harness} “${title}”`
+        : `push da sessão ${harness} · ${pusher.host}`;
   const ago = formatAgo(release.createdAt, now);
   return ago ? `${who} · ${ago}` : who;
 }

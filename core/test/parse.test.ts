@@ -5,7 +5,7 @@ import { describe, pollRef } from "../poll.ts";
 import { parseAgentSession, parseSessionValue } from "../trailer.ts";
 import { fakeGitHub, note } from "./fakes.ts";
 
-test("trailer Agent-Session: Paseo, OpenCode e lixo", () => {
+test("trailer Agent-Session: Paseo, OpenCode, Claude Code e lixo", () => {
   const message = "fix: algo\n\nRelease-Note: x\nAgent-Session: paseo/srv_KkHRlgUn9pdj/c257d30e-8e80-4df1-bb9e-f8cbb360d8e7\n";
   assert.deepEqual(parseAgentSession(message), {
     harness: "paseo",
@@ -16,6 +16,11 @@ test("trailer Agent-Session: Paseo, OpenCode e lixo", () => {
     harness: "opencode",
     host: "archdev",
     id: "ses_e817f2a10ffeXW8F6QF1FYbjTU",
+  });
+  assert.deepEqual(parseAgentSession("fix: x\n\nAgent-Session: claude/archdev/86117ef6-50de-42ad-8ffc-a2d6f03df9ec\n"), {
+    harness: "claude",
+    host: "archdev",
+    id: "86117ef6-50de-42ad-8ffc-a2d6f03df9ec",
   });
   assert.equal(parseSessionValue("codex/archdev/x"), null);
   assert.equal(parseSessionValue("opencode/archdev"), null);

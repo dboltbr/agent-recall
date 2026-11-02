@@ -1,0 +1,18 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "agent-recall",
+  "description": "Plugin agent-recall do DBolt para o Claude Code.",
+  "owner": {
+    "name": "DBolt"
+  },
+  "plugins": [
+    {
+      "name": "agent-recall",
+      "description": "Chama de volta a sessão do Claude Code responsável quando uma release do dboltbr/dbolt fica vermelha ou é barrada antes da produção.",
+      "source": "./claude",
+      "author": {
+        "name": "DBolt"
+      }
+    }
+  ]
+}

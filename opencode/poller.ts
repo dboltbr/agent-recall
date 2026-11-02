@@ -6,12 +6,12 @@
 // outlives every dispose and keeps the latest context; a reloaded plugin file (another build SHA)
 // stops the previous poller and takes over in the same process.
 //
-// Only the holder of `~/.local/state/agent-recall/opencode.poller` polls; a dead holder's pid is
-// taken over on the next cycle. The heartbeat is written only after the context answered.
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+// Only the holder of the host lock `opencode.poller` (a TCP listener on 127.0.0.1, freed by the
+// kernel when the process dies and by `stop` on a reload) polls; another process takes it on its
+// next cycle. The heartbeat is written only after the context answered.
 import { join } from "node:path";
 import type { Delivery } from "../core/deliver.ts";
-import { isAlive, readHandoffs } from "../core/host.ts";
+import { acquireHostLock, readHandoffs, type HostLock } from "../core/host.ts";
 import { describe } from "../core/poll.ts";
 import { createReleaseSource, createReleaseTracker } from "../core/release-fetch.ts";
 import type { Clock, Exec, Fetch, HostConfig, Logger, SessionRef } from "../core/types.ts";
@@ -78,39 +78,8 @@ export function attach(registry: Registry, ctx: Context, deps: PollerDeps): void
   registry.poller = startPoller(registry, deps, previous ? previous.stop() : Promise.resolve());
 }
 
-function pollerPath(stateDir: string): string {
-  return join(stateDir, "opencode.poller");
-}
-
-async function readHolder(path: string): Promise<number | null> {
-  const raw = await readFile(path, "utf8").catch(() => null);
-  if (raw === null) return null;
-  const pid = Number((JSON.parse(raw.trim() || "{}") as { pid?: unknown }).pid);
-  return Number.isInteger(pid) ? pid : 0;
-}
-
-/** True when this process holds the host poller lock (keeps it, creates it, or takes a dead one). */
-export async function claimPoller(stateDir: string, pid: number): Promise<boolean> {
-  const path = pollerPath(stateDir);
-  await mkdir(stateDir, { recursive: true });
-  const body = `${JSON.stringify({ pid })}\n`;
-  const holder = await readHolder(path).catch(() => 0);
-  if (holder === pid) return true;
-  if (holder === null) {
-    try {
-      await writeFile(path, body, { flag: "wx" });
-      return true;
-    } catch {
-      return false;
-    }
-  }
-  if (isAlive(holder)) return false;
-  const tmp = `${path}.${pid}.tmp`;
-  await writeFile(tmp, body);
-  await rename(tmp, path);
-  // Two takers can rename at once; the file decides, and the loser yields on this read.
-  return (await readHolder(path).catch(() => 0)) === pid;
-}
+/** Host lock of the OpenCode poller (a TCP listener, `acquireHostLock`). */
+export const POLLER_LOCK = "opencode.poller";
 
 function within<T>(promise: Promise<T>, ms: number, timer: Timer, what: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -158,17 +127,18 @@ export function createDelivery(registry: Registry): Delivery {
 function startPoller(registry: Registry, deps: PollerDeps, handover: Promise<void>): Poller {
   const { log, timer } = deps;
   let watcher: Watcher | null = null;
-  let holding = false;
+  let lock: HostLock | null = null;
   let ready: boolean | null = null;
   let stopped = false;
   let handle: unknown = null;
   let running: Promise<void> = Promise.resolve();
 
   async function cycle(): Promise<void> {
-    const own = await claimPoller(deps.stateDir, deps.pid);
-    if (own !== holding) log.info(own ? `poller do host: pid ${deps.pid}` : "poller do host é outro processo");
-    holding = own;
-    if (!own) return;
+    if (!lock) {
+      lock = await acquireHostLock(deps.stateDir, POLLER_LOCK, log);
+      if (!lock) return;
+      log.info(`poller do host: pid ${deps.pid}, porta ${lock.port}`);
+    }
     const ctx = registry.ctx;
     try {
       if (!ctx) throw new Error("nenhum contexto OpenCode carregado");
@@ -230,6 +200,9 @@ function startPoller(registry: Registry, deps: PollerDeps, handover: Promise<voi
       stopped = true;
       if (handle !== null) timer.clear(handle);
       await running;
+      // An in-process reload starts the next poller right after: it acquires at once.
+      await lock?.release();
+      lock = null;
     },
   };
 }

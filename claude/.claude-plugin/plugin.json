@@ -1,0 +1,10 @@
+{
+  "name": "agent-recall",
+  "description": "Chama de volta a sessão do Claude Code responsável quando uma release do dboltbr/dbolt fica vermelha ou é barrada antes da produção.",
+  "author": {
+    "name": "DBolt"
+  },
+  "homepage": "https://github.com/dboltbr/agent-recall",
+  "repository": "https://github.com/dboltbr/agent-recall",
+  "license": "UNLICENSED"
+}

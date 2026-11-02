@@ -66,12 +66,14 @@ test("releaseBadge: em andamento, verde, revertido, falhou", () => {
   assert.deepEqual(releaseBadge(failed), { label: "falhou", tone: "bad" });
 });
 
-test("pusherLine: agente Paseo com título, sessão OpenCode pelo host", () => {
+test("pusherLine: agente Paseo com título, sessão OpenCode ou Claude Code pelo host", () => {
   const release = active();
   assert.equal(pusherLine(release, null, NOW), "push da sessão OpenCode · archdev · há 36 min");
   const paseo = { ...release, pusher: { harness: "paseo" as const, host: "srv", id: "a1b2c3d4e5" } };
   assert.equal(pusherLine(paseo, "Aviso ao morador: push", NOW), "push do agente Paseo “Aviso ao morador: push” · há 36 min");
   assert.equal(pusherLine(paseo, null, NOW), "push do agente Paseo a1b2c3d4 · há 36 min");
+  const claude = { ...release, pusher: { harness: "claude" as const, host: "archdev", id: "86117ef6" } };
+  assert.equal(pusherLine(claude, null, NOW), "push da sessão Claude Code · archdev · há 36 min");
   assert.equal(pusherLine({ ...release, pusher: null }, null, NOW), null);
 });
 

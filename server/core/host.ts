@@ -1,8 +1,11 @@
-import { mkdir, readdir, readFile, rename, writeFile } from "node:fs/promises";
+import { createHash, randomBytes } from "node:crypto";
+import { existsSync } from "node:fs";
+import { link, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { connect, createServer, type Server } from "node:net";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { HandoffSchema, type Handoff } from "./release-status.ts";
-import type { Harness, HostConfig } from "./types.ts";
+import type { Exec, Harness, HostConfig, Logger } from "./types.ts";
 
 export function stateDirectory(home = homedir()): string {
   return join(home, ".local", "state", "agent-recall");
@@ -58,8 +61,10 @@ export async function writeHeartbeat(stateDir: string, harness: Harness, beat: H
 const SAFE = /[^A-Za-z0-9._-]/g;
 
 /**
- * Atomic `mkdir` of `<stateDir>/<release>/<leaf>`: true for the one caller that created it.
- * Losing the state directory costs at most one repeated recall, which the note already absorbs.
+ * Atomic `mkdir` of `<stateDir>/<release>/<leaf>`: true for the one caller that created it, once.
+ * A poller that dies between taking a call and delivering it loses that call; the release watch
+ * escalates an incident nobody takes within 10 min. Losing the state directory costs at most one
+ * repeated recall, which the note already absorbs.
  */
 export async function acquireLock(stateDir: string, release: string, leaf: string): Promise<boolean> {
   const parent = join(stateDir, release.replace(SAFE, "_"));
@@ -116,4 +121,144 @@ export function isAlive(pid: number): boolean {
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === "EPERM";
   }
+}
+
+/** `link` publishes a complete file at `path` only when nothing is there: false when something was. */
+export async function publishExclusive(path: string, body: string): Promise<boolean> {
+  const tmp = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+  await writeFile(tmp, body, "utf8");
+  try {
+    await link(tmp, path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+    throw error;
+  } finally {
+    await rm(tmp, { force: true });
+  }
+}
+
+/*
+ * Host locks are TCP listeners on 127.0.0.1: the kernel frees the port when the holder dies, even
+ * by SIGKILL, and `release` frees it for an in-process reload. Nothing on disk can go stale. One
+ * port per lock, from a hash of the state directory and the lock name, in 20000–31999 (below the
+ * Linux and macOS ephemeral ranges). The holder writes `agent-recall <state dir hash> <name> <pid>`
+ * to every connection and closes it. A port held by anything that does not answer that line
+ * (another program, or silence) means this host does not take the lock at all: no second port.
+ */
+const LOCK_PORT_BASE = 20_000;
+const LOCK_PORT_SPAN = 12_000;
+const LOCK_PROBE_MS = 3_000;
+const LOCK_RELEASE_MS = 1_000;
+const LOCK_BANNER = "agent-recall";
+/** Ports already reported as taken by another program, so each watcher logs it once. */
+const reportedPorts = new Set<number>();
+
+export interface HostLock {
+  readonly name: string;
+  readonly port: number;
+  /** Frees the port (the next contender acquires at once); bounded by a short deadline. */
+  release(): Promise<void>;
+}
+
+/** The port of a lock. */
+export function lockPort(stateDir: string, name: string): number {
+  const digest = createHash("sha256").update(`${stateDir}\0${name}`).digest();
+  return LOCK_PORT_BASE + (digest.readUInt32BE(0) % LOCK_PORT_SPAN);
+}
+
+/** What the holder of `name` under `stateDir` answers, up to its pid. */
+function lockBanner(stateDir: string, name: string): string {
+  return `${LOCK_BANNER} ${createHash("sha256").update(stateDir).digest("hex").slice(0, 12)} ${name} `;
+}
+
+type Listen = { kind: "held"; server: Server } | { kind: "busy" } | { kind: "error"; error: NodeJS.ErrnoException };
+
+function listenOn(port: number, banner: string): Promise<Listen> {
+  return new Promise((resolve) => {
+    const server = createServer((socket) => {
+      socket.on("error", () => undefined);
+      socket.write(`${banner}${process.pid}\n`, () => socket.destroy());
+      socket.setTimeout(LOCK_PROBE_MS, () => socket.destroy());
+    });
+    server.once("error", (error: NodeJS.ErrnoException) =>
+      resolve(error.code === "EADDRINUSE" ? { kind: "busy" } : { kind: "error", error }),
+    );
+    server.listen({ host: "127.0.0.1", port }, () => {
+      // The holder must never keep its process alive on its own.
+      server.unref();
+      resolve({ kind: "held", server });
+    });
+  });
+}
+
+/**
+ * Who answers on a port that refused our listen: this lock's holder, nobody (refused: it just
+ * died), or something else (another answer, or silence: under WSL mirrored networking even a free
+ * port can stay silent, so the port is only probed after a refused listen).
+ */
+function probeLock(port: number, banner: string): Promise<"ours" | "free" | "other"> {
+  return new Promise((resolve) => {
+    let data = "";
+    let settled = false;
+    const finish = (verdict: "ours" | "free" | "other") => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      resolve(verdict);
+    };
+    const socket = connect({ host: "127.0.0.1", port });
+    const timer = setTimeout(() => finish("other"), LOCK_PROBE_MS);
+    const verdict = () => (data.startsWith(banner) ? "ours" : "other");
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk: string) => {
+      data += chunk;
+      if (data.includes("\n")) finish(verdict());
+    });
+    socket.on("close", () => finish(verdict()));
+    socket.on("error", (error: NodeJS.ErrnoException) => finish(error.code === "ECONNREFUSED" ? "free" : "other"));
+  });
+}
+
+function closeWithin(server: Server, ms: number): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    server.close(() => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+}
+
+/**
+ * The lock `name` of this host, or null when it is held: by a live holder of this lock, or by
+ * another program on its port (logged once; then this host does not take the lock at all).
+ */
+export async function acquireHostLock(stateDir: string, name: string, log?: Logger): Promise<HostLock | null> {
+  const port = lockPort(stateDir, name);
+  const banner = lockBanner(stateDir, name);
+  // Refused right after a failed listen: the holder just died, so listen again (twice at most).
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const listened = await listenOn(port, banner);
+    if (listened.kind === "held") {
+      const { server } = listened;
+      return { name, port, release: () => closeWithin(server, LOCK_RELEASE_MS) };
+    }
+    const verdict = listened.kind === "error" ? "other" : await probeLock(port, banner);
+    if (verdict === "ours") return null;
+    if (verdict === "other") {
+      if (!reportedPorts.has(port)) log?.warn(`porta ${port} ocupada por outro programa: este host não consulta`);
+      reportedPorts.add(port);
+      return null;
+    }
+  }
+  return null;
+}
+
+/** True when `dir` is a checkout whose `origin` is `repository` (`owner/name`). */
+export async function isCheckoutOf(exec: Exec, dir: string, repository: string): Promise<boolean> {
+  if (!existsSync(dir)) return false;
+  const origin = await exec("git", ["-C", dir, "remote", "get-url", "origin"], { timeoutMs: 10_000 });
+  return origin.code === 0 && new RegExp(`[/:]${repository}(\\.git)?$`).test(origin.stdout.trim());
 }

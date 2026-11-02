@@ -1,9 +1,12 @@
 // Shared shapes. The note body and the host config are the contract with the dbolt repo
 // (openspec change release-on-push-agent-recall, "Contrato entre as lanes").
 
-export type Harness = "paseo" | "opencode";
+export type Harness = "paseo" | "opencode" | "claude";
 
-/** One `Agent-Session` trailer: `paseo/<serverId>/<agentId>` or `opencode/<instance>/<ses_…>`. */
+/**
+ * One `Agent-Session` trailer: `paseo/<serverId>/<agentId>`, `opencode/<instance>/<ses_…>` or
+ * `claude/<instance>/<sessionId>` (Claude Code outside Paseo).
+ */
 export interface SessionRef {
   readonly harness: Harness;
   readonly host: string;

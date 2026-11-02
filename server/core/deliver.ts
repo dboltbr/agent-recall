@@ -114,12 +114,15 @@ export function blockedPrompt(release: Release): string {
   );
 }
 
-/** What a harness can do. Each step throws when it was refused. */
+/**
+ * What a harness can do. Each step throws when it was refused. `action` is the call being made,
+ * for a harness that hands the call over asynchronously and confirms it later (Claude Code).
+ */
 export interface Delivery {
   /** Prompt the existing session. */
-  prompt(target: SessionRef, text: string): Promise<void>;
-  /** Fork (OpenCode) or new agent in the session's workspace (Paseo), then prompt it. */
-  fallback(target: SessionRef, text: string, title: string): Promise<string>;
+  prompt(target: SessionRef, text: string, action: Action): Promise<void>;
+  /** Fork (OpenCode, Claude Code) or new agent in the session's workspace (Paseo), then prompt it. */
+  fallback(target: SessionRef, text: string, title: string, action: Action): Promise<string>;
 }
 
 export type Outcome = "prompt" | "fallback" | "recorded" | "failed";
@@ -157,13 +160,13 @@ export async function deliver(input: DeliverInput): Promise<Delivered> {
   const { action, text, title, delivery, log } = input;
   const failures: string[] = [];
   try {
-    await delivery.prompt(action.target, text);
+    await delivery.prompt(action.target, text, action);
     return { outcome: "prompt", session: action.target.id };
   } catch (error) {
     failures.push(`prompt: ${describe(error)}`);
   }
   try {
-    const id = await delivery.fallback(action.target, text, title);
+    const id = await delivery.fallback(action.target, text, title, action);
     log.warn(`${action.release}: ${formatSession(action.target)} recusou o prompt; chamado foi para ${id}`);
     return { outcome: "fallback", session: id };
   } catch (error) {

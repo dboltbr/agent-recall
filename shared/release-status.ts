@@ -34,7 +34,7 @@ export const VerdictSchema = z.enum(["green", "reverted", "red", "inconclusive",
 export type Verdict = z.infer<typeof VerdictSchema>;
 
 export const SessionSchema = z.object({
-  harness: z.enum(["paseo", "opencode"]),
+  harness: z.enum(["paseo", "opencode", "claude"]),
   host: z.string(),
   id: z.string(),
 });
