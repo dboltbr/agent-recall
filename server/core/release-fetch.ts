@@ -164,15 +164,22 @@ interface CheckRunsPage {
 }
 
 /**
- * The watch attempt's check run: the newest whose details link is that run and that started with
- * this attempt (a rerun keeps the run id and publishes a new one; until it does, the previous
- * attempt's is not this attempt's progress). Another run's check run never is.
+ * The watch attempt's check run: the newest of this release attempt (`external_id`
+ * `<release run id>:<attempt>`, set by release_watch_check.py; GitHub rewrites an Actions check
+ * run's `details_url`, so it says nothing) that started with this watch attempt (a rerun keeps the
+ * run id and publishes a new one; until it does, the previous attempt's is not this attempt's
+ * progress). Another release's check run never is.
  */
-export function watchCheckRun(checkRuns: readonly GitHubCheckRun[], watch: Pick<GitHubRun, "id" | "run_started_at">): GitHubCheckRun | null {
+export function watchCheckRun(
+  checkRuns: readonly GitHubCheckRun[],
+  release: Pick<GitHubRun, "id" | "run_attempt">,
+  watch: Pick<GitHubRun, "run_started_at">,
+): GitHubCheckRun | null {
+  const identity = `${release.id}:${release.run_attempt}`;
   const attemptStart = Date.parse(watch.run_started_at ?? "");
   // Without both times the attempt is unknown: nothing, rather than an older attempt's verdict.
   const ofAttempt = (check: GitHubCheckRun) => Date.parse(check.started_at ?? "") >= attemptStart;
-  const own = checkRuns.filter((check) => (check.details_url ?? "").endsWith(`/actions/runs/${watch.id}`) && ofAttempt(check));
+  const own = checkRuns.filter((check) => check.external_id === identity && ofAttempt(check));
   return own.sort((a, b) => b.id - a.id)[0] ?? null;
 }
 
@@ -244,13 +251,13 @@ export function createReleaseSource(options: ReleaseSourceOptions): ReleaseSourc
    * does not move). An attempt seen open gets one last read after it closes; an attempt never seen
    * open costs nothing.
    */
-  async function progressOf(run: GitHubRun, releaseSha: string, token: string): Promise<WatchProgress | null> {
+  async function progressOf(run: GitHubRun, release: GitHubRun, token: string): Promise<WatchProgress | null> {
     const key = attemptKey(run);
     const known = progress.get(key) ?? null;
     if (run.status === "completed" && (settled.has(key) || !progress.has(key))) return known;
     try {
-      const body = await get<CheckRunsPage>(`repos/${repository}/commits/${releaseSha}/check-runs?check_name=${WATCH_CHECK}&filter=all&per_page=100`, token);
-      const check = watchCheckRun(body.check_runs, run);
+      const body = await get<CheckRunsPage>(`repos/${repository}/commits/${release.head_sha}/check-runs?check_name=${WATCH_CHECK}&filter=all&per_page=100`, token);
+      const check = watchCheckRun(body.check_runs, release, run);
       const next = check ? parseWatchProgress(check) : null;
       progress.set(key, next);
       if (run.status === "completed") settled.add(key);
@@ -277,7 +284,7 @@ export function createReleaseSource(options: ReleaseSourceOptions): ReleaseSourc
     const [jobs, watchJobs, watchProgress, commits] = await Promise.all([
       jobsOf(run, token),
       watchRun ? jobsOf(watchRun, token) : Promise.resolve(null),
-      watchRun ? progressOf(watchRun, run.head_sha, token) : Promise.resolve(null),
+      watchRun ? progressOf(watchRun, run, token) : Promise.resolve(null),
       commitsOf(run, tags, token).catch((error) => {
         options.log.warn(`faixa de ${releaseNameOf(run.run_number)}: ${describe(error)}`);
         return null;

@@ -234,7 +234,8 @@ export interface GitHubJob {
 export interface GitHubCheckRun {
   readonly id: number;
   readonly started_at?: string | null;
-  readonly details_url?: string | null;
+  /** `<release run id>:<attempt>` of the release the watch judges (release_watch_check.py). */
+  readonly external_id?: string | null;
   readonly output?: { readonly text?: string | null } | null;
 }
 

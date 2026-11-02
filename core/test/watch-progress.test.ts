@@ -22,7 +22,7 @@ const later = (minutes: number) => new Date(NOW.getTime() + minutes * 60_000);
 /** A check run as release_watch_check.py publishes it: the snapshot in a fenced JSON block. */
 function checkRun(view: Record<string, unknown>, id = 1): GitHubCheckRun {
   const text = "```json\n" + JSON.stringify({ schema: 1, scope: "deployment", outcome: "pending", ...view }) + "\n```";
-  return { id, details_url: "https://github.com/dboltbr/dbolt/actions/runs/41000000172", output: { text } };
+  return { id, external_id: "40000000172:1", output: { text } };
 }
 
 /** Release 172 with its watch run open and the given progress. */
