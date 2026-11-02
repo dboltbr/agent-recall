@@ -154,6 +154,9 @@ test("inconclusivo diz o que faltou, do check run do vigia (sem nota)", () => {
   const old = { ...release, signals: [{ source: "deployment", label: "implantação", outcome: "inconclusive", reason: "flux-candidate-convergence" }] };
   assert.equal(verdictDetail(old), "inconclusivo · faltou implantação (o Flux não aplicou a release)");
   assert.equal(verdictDetail({ ...release, signals: [] }), "inconclusivo");
+  // The issue count rides after the code; the code still reads in pt-BR.
+  const counted = { ...release, signals: [{ source: "sentry", label: "Sentry", outcome: "inconclusive", reason: "sentry-window-open · 1 issue nova" }] };
+  assert.equal(verdictDetail(counted), "inconclusivo · faltou Sentry (a janela do Sentry não fechou · 1 issue nova)");
 });
 
 test("release em andamento: verificação feita, imagens 3/9, resto pendente", () => {

@@ -626,6 +626,13 @@ export function releaseHandoffs(note: Note | null, delivered: readonly Handoff[]
   return out;
 }
 
+/** Only a red release writes a note; without one, a finished watch's check run says what it saw. */
+function releaseSignals(note: Note | null, progress: WatchProgress | null): Signal[] {
+  if (note) return noteSignals(note);
+  if (progress?.phase === "done") return progress.sources;
+  return [];
+}
+
 export function buildRelease(input: ReleaseInput): Release {
   const { run, note, now } = input;
   const watchRun = input.watch?.run ?? null;
@@ -676,8 +683,7 @@ export function buildRelease(input: ReleaseInput): Release {
     tag: tagged ? releaseNameOf(run.run_number) : null,
     failedJob: failed ? { name: failed.name, url: failed.url } : null,
     revert: note ? noteRevert(note) : null,
-    // Only a red release writes a note; an inconclusive one says what was missing in its check run.
-    signals: note ? noteSignals(note) : input.progress?.phase === "done" ? input.progress.sources : [],
+    signals: releaseSignals(note, input.progress ?? null),
     rollback: note ? noteRollback(note) : null,
     recallFailed: note ? record(note.recall) !== null : false,
     pusher: pusher ? toSession(pusher) : null,
@@ -1083,8 +1089,10 @@ export const REASON_LABELS: Readonly<Record<string, string>> = {
 export function missingEvidence(release: Release): string | null {
   const open = release.signals.filter((signal) => !["green", "red", "not-applicable"].includes(signal.outcome));
   const parts = open.map((signal) => {
-    const reason = signal.reason ? (REASON_LABELS[signal.reason] ?? signal.reason) : null;
-    return reason ? `${signal.label} (${reason})` : signal.label;
+    if (!signal.reason) return signal.label;
+    // The check run's reason may carry the issue count after the code: `sentry-window-open · 1 issue nova`.
+    const [code = "", ...rest] = signal.reason.split(" · ");
+    return `${signal.label} (${[REASON_LABELS[code] ?? code, ...rest].join(" · ")})`;
   });
   return parts.length ? parts.join(" · ") : null;
 }
