@@ -6640,10 +6640,11 @@ function notesByRelease(notes) {
   }
   return byName;
 }
-function watchCheckRun(checkRuns, watch) {
+function watchCheckRun(checkRuns, release, watch) {
+  const identity = `${release.id}:${release.run_attempt}`;
   const attemptStart = Date.parse(watch.run_started_at ?? "");
   const ofAttempt = (check) => Date.parse(check.started_at ?? "") >= attemptStart;
-  const own2 = checkRuns.filter((check) => (check.details_url ?? "").endsWith(`/actions/runs/${watch.id}`) && ofAttempt(check));
+  const own2 = checkRuns.filter((check) => check.external_id === identity && ofAttempt(check));
   return own2.sort((a, b) => b.id - a.id)[0] ?? null;
 }
 var attemptKey = (run) => `${run.id}:${run.run_attempt}`;
@@ -6696,13 +6697,13 @@ function createReleaseSource(options) {
     ranges.set(key, commits);
     return commits;
   }
-  async function progressOf(run, releaseSha, token) {
+  async function progressOf(run, release, token) {
     const key = attemptKey(run);
     const known = progress.get(key) ?? null;
     if (run.status === "completed" && (settled.has(key) || !progress.has(key))) return known;
     try {
-      const body = await get(`repos/${repository}/commits/${releaseSha}/check-runs?check_name=${WATCH_CHECK}&filter=all&per_page=100`, token);
-      const check = watchCheckRun(body.check_runs, run);
+      const body = await get(`repos/${repository}/commits/${release.head_sha}/check-runs?check_name=${WATCH_CHECK}&filter=all&per_page=100`, token);
+      const check = watchCheckRun(body.check_runs, release, run);
       const next = check ? parseWatchProgress(check) : null;
       progress.set(key, next);
       if (run.status === "completed") settled.add(key);
@@ -6721,7 +6722,7 @@ function createReleaseSource(options) {
     const [jobs, watchJobs, watchProgress, commits] = await Promise.all([
       jobsOf(run, token),
       watchRun ? jobsOf(watchRun, token) : Promise.resolve(null),
-      watchRun ? progressOf(watchRun, run.head_sha, token) : Promise.resolve(null),
+      watchRun ? progressOf(watchRun, run, token) : Promise.resolve(null),
       commitsOf(run, tags, token).catch((error2) => {
         options.log.warn(`faixa de ${releaseNameOf(run.run_number)}: ${describe2(error2)}`);
         return null;
