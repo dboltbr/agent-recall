@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { utimes } from "node:fs/promises";
+import { spawn, spawnSync } from "node:child_process";
+import { readdir, utimes } from "node:fs/promises";
 import { connect, createServer } from "node:net";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -85,4 +85,17 @@ test("trava de chamado vale uma vez, mesmo tomada há muito tempo e nunca termin
   const old = new Date(Date.now() - 60 * 60_000);
   await utimes(join(stateDir, "release-90", "ses_a"), old, old);
   assert.equal(await acquireLock(stateDir, "release-90", "ses_a"), false);
+});
+
+test("publishExclusive: escrita que falha no meio (disco cheio) não deixa o temporário", { skip: process.platform === "win32" }, async () => {
+  const dir = await tempState();
+  // A file size limit with SIGXFSZ ignored: the write fails with EFBIG after the temp file exists.
+  const script = `import { publishExclusive } from ${JSON.stringify(hostModule)};
+try { await publishExclusive(process.argv[1] + "/r.json", "x".repeat(4 << 20)); console.log("ok"); } catch (e) { console.log(e.code); }`;
+  const result = spawnSync("sh", ["-c", 'trap "" XFSZ; ulimit -f 64; exec "$0" --input-type=module -e "$1" "$2"', process.execPath, script, dir], {
+    encoding: "utf8",
+    timeout: 20_000,
+  });
+  assert.equal(result.stdout.trim(), "EFBIG", result.stderr);
+  assert.deepEqual(await readdir(dir), []);
 });

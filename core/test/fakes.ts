@@ -3,7 +3,9 @@ import { after } from "node:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Delivery } from "../deliver.ts";
-import type { Exec, ExecResult, Fetch, HostConfig, Logger, Note, SessionRef } from "../types.ts";
+import type { ReleaseTracker } from "../release-fetch.ts";
+import { buildSnapshot, type Release } from "../release-status.ts";
+import type { BlockedNote, Exec, ExecResult, Fetch, HostConfig, Logger, Note, SessionRef } from "../types.ts";
 
 export const NOW = new Date("2026-10-27T15:00:00.000Z");
 
@@ -36,6 +38,7 @@ export const config: HostConfig = {
   instance: "archdev",
   repository: "dboltbr/dbolt",
   notesRef: "refs/notes/release-watch",
+  blockedRef: "refs/notes/release-blocked",
 };
 
 /** A red note as `release-incident-note.py respond` leaves it: pin reverted and applied, no owner. */
@@ -59,31 +62,58 @@ export function session(harness: SessionRef["harness"], host: string, id: string
   return { harness, host, id, commits };
 }
 
-/** GitHub fake: answers the ref endpoint with `refs` in order (last one repeats). */
-export function fakeGitHub(refs: Array<{ status: number; etag?: string; sha?: string }>) {
+export type RefReply = { status: number; etag?: string; sha?: string };
+
+/**
+ * GitHub fake: answers the incident ref endpoint with `refs` in order, and the blocked ref with
+ * `blocked` (404 by default: no blocked release); the last reply of each list repeats.
+ */
+export function fakeGitHub(refs: RefReply[], blocked: RefReply[] = [{ status: 404 }]) {
   const calls: Array<{ url: string; headers: Record<string, string>; body?: string }> = [];
-  let index = 0;
+  const index = { incident: 0, blocked: 0 };
   const fetch: Fetch = async (url, init) => {
     const headers = Object.fromEntries(Object.entries((init?.headers ?? {}) as Record<string, string>));
     calls.push({ url, headers, body: typeof init?.body === "string" ? init.body : undefined });
-    const reply = refs[Math.min(index++, refs.length - 1)]!;
+    const kind = url.includes("/release-blocked") ? "blocked" : "incident";
+    const list = kind === "blocked" ? blocked : refs;
+    const reply = list[Math.min(index[kind]++, list.length - 1)]!;
     if (reply.status !== 200) return new Response(null, { status: reply.status });
-    return new Response(JSON.stringify({ ref: "refs/notes/release-watch", object: { sha: reply.sha ?? "abc" } }), {
+    return new Response(JSON.stringify({ object: { sha: reply.sha ?? "abc" } }), {
       status: 200,
       headers: reply.etag ? { etag: reply.etag } : {},
     });
   };
-  return { fetch, calls, refCalls: () => calls.filter((call) => call.url.startsWith("https://api.github.com")) };
+  const api = () => calls.filter((call) => call.url.startsWith("https://api.github.com"));
+  return {
+    fetch,
+    calls,
+    refCalls: () => api().filter((call) => !call.url.includes("/release-blocked")),
+    blockedCalls: () => api().filter((call) => call.url.includes("/release-blocked")),
+  };
 }
 
 /**
- * git/gh fake serving `notes` (key → body) through `notes list`, `notes show` and `cat-file
- * --batch`. `notes add` + `push` record what the plugin wrote; `push: "reject"` loses every CAS.
+ * git/gh fake serving `notes` (key → body) on the incident ref and `behaviour.blocked` on any
+ * `release-blocked` ref, through `notes list`, `notes show` and `cat-file --batch`. `notes add` +
+ * `push` record what the plugin wrote (and on which ref); `push: "reject"` loses every CAS.
  */
-export function fakeExec(notes: () => Record<string, Note | string>, behaviour: { push?: "ok" | "reject" } = {}) {
+export function fakeExec(
+  notes: () => Record<string, Note | string>,
+  behaviour: { push?: "ok" | "reject"; blocked?: () => Record<string, BlockedNote | string> } = {},
+) {
   const calls: string[][] = [];
-  const written: Array<{ key: string; body: Record<string, unknown> }> = [];
-  let staged: { key: string; body: Record<string, unknown> } | null = null;
+  const written: Array<{ key: string; ref: string; body: Record<string, unknown> }> = [];
+  let staged: { key: string; ref: string; body: Record<string, unknown> } | null = null;
+  const all = () => {
+    const entries = (ref: "incident" | "blocked", source: Record<string, Note | BlockedNote | string>) =>
+      Object.entries(source).map(([key, body], i) => ({
+        ref,
+        key,
+        blob: `${ref === "blocked" ? "c" : "b"}${String(i).padStart(39, "0")}`,
+        body: typeof body === "string" ? body : JSON.stringify(body),
+      }));
+    return [...entries("incident", notes()), ...entries("blocked", behaviour.blocked?.() ?? {})];
+  };
   const exec: Exec = async (command, args, options): Promise<ExecResult> => {
     calls.push([command, ...args]);
     const ok = (stdout = ""): ExecResult => ({ code: 0, stdout, stderr: "" });
@@ -93,18 +123,17 @@ export function fakeExec(notes: () => Record<string, Note | string>, behaviour: 
       await mkdir(args[3]!, { recursive: true });
       return ok();
     }
-    const entries = Object.entries(notes()).map(([key, body], i) => ({
-      key,
-      blob: `b${String(i).padStart(39, "0")}`,
-      body: typeof body === "string" ? body : JSON.stringify(body),
-    }));
+    // `--git-dir <dir> notes --ref <ref> …`: the ref picks which notes answer.
+    const ref = args[3] === "--ref" && args[4]?.includes("release-blocked") ? "blocked" : "incident";
+    const blobs = all();
+    const entries = blobs.filter((entry) => entry.ref === ref);
     if (sub === "fetch") return ok();
     if (sub === "notes" && args[5] === "show") {
       const entry = entries.find((e) => e.key === args[6]);
       return entry ? ok(entry.body) : { code: 1, stdout: "", stderr: "no note found" };
     }
     if (sub === "notes" && args[5] === "add") {
-      staged = { key: args[args.length - 1]!, body: JSON.parse(options.input ?? "{}") as Record<string, unknown> };
+      staged = { key: args[args.length - 1]!, ref: args[4]!, body: JSON.parse(options.input ?? "{}") as Record<string, unknown> };
       return ok();
     }
     if (sub === "notes") return ok(entries.map((e) => `${e.blob} ${e.key}`).join("\n"));
@@ -117,7 +146,7 @@ export function fakeExec(notes: () => Record<string, Note | string>, behaviour: 
       const wanted = (options.input ?? "").split("\n").filter(Boolean);
       return ok(
         wanted
-          .map((blob) => entries.find((e) => e.blob === blob)!)
+          .map((blob) => blobs.find((e) => e.blob === blob)!)
           .map((e) => `${e.blob} blob ${Buffer.byteLength(e.body)}\n${e.body}\n`)
           .join(""),
       );
@@ -149,6 +178,34 @@ export function fakeDelivery(behaviour: { prompt?: "ok" | "refuse"; fallback?: "
 }
 
 export const quietLog: Logger = { info() {}, warn() {}, error() {} };
+
+/**
+ * A release tracker that only hands back a fixed history (null: not loaded yet). `fail` makes the
+ * last refresh a failure that kept the older history (the snapshot carries `error`).
+ */
+export function fixedReleases(releases: Release[] | null): ReleaseTracker & { set(next: Release[] | null): void; fail(error: string | null): void } {
+  let current = releases;
+  let error: string | null = null;
+  return {
+    tick: async () => {},
+    refresh: async () => false,
+    current: () =>
+      current ? buildSnapshot({ repository: "dboltbr/dbolt", workflow: "release", releases: current, runners: [], now: NOW, error }) : null,
+    set: (next) => (current = next),
+    fail: (next) => (error = next),
+  };
+}
+
+/** A logger that keeps every line, by level. */
+export function recordingLog(): Logger & { lines: string[] } {
+  const lines: string[] = [];
+  return {
+    lines,
+    info: (message) => lines.push(`info ${message}`),
+    warn: (message) => lines.push(`warn ${message}`),
+    error: (message) => lines.push(`error ${message}`),
+  };
+}
 
 export async function writeConfig(dir: string, value: HostConfig = config): Promise<string> {
   const path = join(dir, "config.json");

@@ -2,8 +2,9 @@
 
 Chama de volta a sessão dona de uma release do `dboltbr/dbolt` que fica vermelha (com o
 desfecho do rollback do vigia e o congelamento da `main`), avisa as outras sessões da faixa sem
-pedir ação, e chama a sessão do push quando a release é barrada antes da produção. O mesmo repositório traz
-os plugins do OpenCode e do Claude Code (`claude/`, marketplace `agent-recall`). Lê as notas `refs/notes/release-watch` a cada 30 s e grava o heartbeat
+pedir ação, e chama a sessão da faixa (ou a do culpado apontado) quando a release é barrada antes
+da produção. O mesmo repositório traz os plugins do OpenCode e do Claude Code (`claude/`,
+marketplace `agent-recall`). Lê as notas `refs/notes/release-watch` e `refs/notes/release-blocked` a cada 30 s e grava o heartbeat
 `~/.local/state/agent-recall/paseo.alive`. Configuração em `~/.config/agent-recall/config.json`.
 
 Mostra o status das releases no Paseo: pílula no composer do agente que fez o push, linha no

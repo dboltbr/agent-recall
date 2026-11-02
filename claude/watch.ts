@@ -12,8 +12,9 @@
 //   (GitHub poll, heartbeat `claude.alive`, routing). Calling a session writes a request into
 //   `claude/inbox/<sessionId>/`; that session's watcher picks it up, prints the prompt on stderr
 //   and exits 2. The next hook re-arms the watcher.
-// - A call is done once the session's watcher picks it up, like a prompt Paseo or OpenCode
-//   accepted. A session that cannot get it (no live process, a live one with no watcher for 2 min,
+// - An incident call is done once the session's watcher picks it up, like a prompt Paseo or
+//   OpenCode accepted. A blocked-release call is done only when the blocked note names the session
+//   (`owner` or `fix.session`); picked without that for 2 min, it is forked. A session that cannot get it (no live process, a live one with no watcher for 2 min,
 //   or a stuck watcher) is forked in the background (`claude --bg --fork-session --resume <id>`) in
 //   its original directory; a failed fork goes to the note's `recall`, like every harness.
 import { existsSync } from "node:fs";
@@ -24,16 +25,15 @@ import type { Delivery } from "../core/deliver.ts";
 import { acquireHostLock, publishExclusive, readHandoffs, writeHandoff, type HostLock } from "../core/host.ts";
 import { recordRecallFailure, releaseName } from "../core/notes.ts";
 import { describe, POLL_INTERVAL_MS } from "../core/poll.ts";
-import { createReleaseSource, createReleaseTracker } from "../core/release-fetch.ts";
-import { CATCH_UP_MS, roleOf, type Action } from "../core/route.ts";
+import { createReleaseSource, createReleaseTracker, type ReleaseTracker } from "../core/release-fetch.ts";
+import { ACK_TIMEOUT_MS, blockedConfirmation, CATCH_UP_MS, releaseHistory, shippedSince, type Action } from "../core/route.ts";
 import { formatSession } from "../core/trailer.ts";
-import type { Clock, Exec, Fetch, HostConfig, Logger, Note, Role, SessionRef } from "../core/types.ts";
+import type { BlockedNote, Clock, Exec, Fetch, HostConfig, Logger, Note, Role, SessionRef } from "../core/types.ts";
 import { createWatcher, type Watcher } from "../core/watcher.ts";
 
 export const INBOX_INTERVAL_MS = 2_000;
-/** A delivered call the note does not confirm in this long goes to a fork. */
-export const ACK_TIMEOUT_MS = 2 * 60_000;
-/** Flag settings layer of the recall fork: it may edit the original checkout (see `fallback`). */
+export { ACK_TIMEOUT_MS };
+/** Flag settings layer of a recall fork of a closed session: it may edit the original checkout (see `fallback`). */
 export const FORK_SETTINGS = JSON.stringify({ worktree: { bgIsolation: "none" } });
 /** `claude --bg` has this long to start the background session. */
 export const FORK_TIMEOUT_MS = 60_000;
@@ -256,7 +256,8 @@ async function disarmWatcher(stateDir: string, claudePid: number, pid: number): 
 export interface Request {
   readonly release: string;
   readonly kind: Action["kind"];
-  readonly role: ReturnType<typeof roleOf>;
+  /** The incident role, or `blocked` / `fix` for a blocked-release call. */
+  readonly role: Role | "blocked" | "fix";
   readonly lock: string;
   readonly session: string;
   readonly text: string;
@@ -267,7 +268,7 @@ export interface Request {
 function actionOf(request: Request, target: SessionRef): Action {
   const { release, lock } = request;
   if (request.kind === "recall") return { kind: "recall", release, role: request.role as Role, target, lock };
-  return { kind: request.kind, release, target, lock };
+  return { kind: "blocked", release, role: request.role === "fix" ? "fix" : "blocked", target, lock };
 }
 
 /**
@@ -485,7 +486,7 @@ export function createClaudeDelivery(deps: ClaudeDeps): Delivery {
       await writeRequest(deps.stateDir, {
         release: action.release,
         kind: action.kind,
-        role: roleOf(action),
+        role: action.role,
         lock: action.lock,
         session: target.id,
         text,
@@ -497,17 +498,41 @@ export function createClaudeDelivery(deps: ClaudeDeps): Delivery {
       if (!transcript) throw new Error(`transcript de ${target.id} não está em ${deps.projectsDir}`);
       const cwd = await transcriptCwd(transcript);
       if (!cwd || !existsSync(cwd)) throw new Error(`diretório de ${target.id} sumiu: ${cwd ?? "sem cwd no transcript"}`);
-      // Background sessions are confined to a worktree by default (`worktree.bgIsolation`). The fork
-      // only starts when the original session is closed or silent, so it may edit the original
-      // checkout: a flag settings layer for this command only, on top of the user's and project's.
-      return background(cwd, ["--fork-session", "--resume", target.id, "--settings", FORK_SETTINGS, text]);
+      // Background sessions are confined to a worktree by default (`worktree.bgIsolation`). With the
+      // original closed (no live Claude Code process for it on this host) the fork may edit the
+      // original checkout: a flag settings layer for this command only, on top of the user's and
+      // project's. While the original still runs (a busy turn, or a blocked call picked without
+      // taking it) the two could edit the same checkout at once, so the fork keeps the default isolation.
+      const live = (await liveSessions(deps.stateDir, deps.alive)).some((entry) => entry.sessionId === target.id);
+      const isolation = live ? [] : ["--settings", FORK_SETTINGS];
+      return background(cwd, ["--fork-session", "--resume", target.id, ...isolation, text]);
     },
   };
 }
 
-/** Whether a delivered call was taken: picked up by the session's watcher, as Paseo and OpenCode take an accepted prompt. */
-export function confirmation(_request: Request, state: RequestState): "taken" | "open" {
-  return state === "picked" ? "taken" : "open";
+/** The note a stored request answers to, with the ref it lives on (for a `recall` failure). */
+interface Found {
+  readonly key: string;
+  readonly ref: string;
+  readonly note: Note | BlockedNote;
+}
+
+/**
+ * Whether a delivered call was taken. An incident call: picked up by the session's watcher, as
+ * Paseo and OpenCode take an accepted prompt. A blocked-release call: the blocked note names the
+ * session (`blockedConfirmation`: moot when closed or taken by someone else, unknown while the
+ * release history cannot tell whether a later release shipped).
+ */
+export function confirmation(
+  request: Request,
+  state: RequestState,
+  note: BlockedNote | null,
+  host: string,
+  now: Date,
+  shipped: boolean | null,
+): "taken" | "open" | "moot" | "unknown" {
+  if (request.kind !== "blocked") return state === "picked" ? "taken" : "open";
+  return blockedConfirmation(request.role === "fix" ? "fix" : "blocked", { harness: "claude", host, id: request.session }, note, shipped, now);
 }
 
 /**
@@ -530,6 +555,7 @@ export function createClaudeWatcher(deps: ClaudeDeps): ClaudeWatcher {
   let lastPoll = -Infinity;
   let config: HostConfig | null = null;
   let core: Watcher | null = null;
+  let tracker: ReleaseTracker | null = null;
   // Once a wake (or Claude Code's death) begins, the process is about to exit: no new call starts
   // (its lock is not taken, so the next poller makes it), and the calls already started (lock,
   // delivery, handoff record; a fork or new session inside) finish first, each bounded by its own
@@ -546,11 +572,15 @@ export function createClaudeWatcher(deps: ClaudeDeps): ClaudeWatcher {
   }
   const delivery = createClaudeDelivery(deps);
 
-  function noteFor(release: string): { key: string; note: Note } | null {
-    let found: { key: string; note: Note } | null = null;
-    for (const [key, note] of core?.notes() ?? []) {
-      if (releaseName(note) !== release) continue;
-      if (!found || Date.parse(note.updatedAt) > Date.parse(found.note.updatedAt)) found = { key, note };
+  /** The newest note of the request's release on the ref it came from (incident or blocked). */
+  function noteFor(request: Request): Found | null {
+    const blocked = request.kind === "blocked";
+    const ref = blocked ? config?.blockedRef : config?.notesRef;
+    const notes: ReadonlyMap<string, Note | BlockedNote> = (blocked ? core?.blockedNotes() : core?.notes()) ?? new Map();
+    let found: Found | null = null;
+    for (const [key, note] of notes) {
+      if (releaseName(note) !== request.release || !ref) continue;
+      if (!found || Date.parse(note.updatedAt) > Date.parse(found.note.updatedAt)) found = { key, ref, note };
     }
     return found;
   }
@@ -562,19 +592,22 @@ export function createClaudeWatcher(deps: ClaudeDeps): ClaudeWatcher {
     return value;
   }
 
-  async function fallBack(request: Request, found: { key: string; note: Note } | null, host: string): Promise<void> {
+  async function fallBack(request: Request, found: Found | null, host: string): Promise<void> {
     const target: SessionRef = { harness: "claude", host, id: request.session };
+    const blocked = request.kind === "blocked";
     try {
-      const id = await delivery.fallback(target, request.text, `Incidente ${request.release}`, actionOf(request, target));
-      log.warn(`${request.release}: ${formatSession(target)} não pegou; chamado foi para a cópia ${id}`);
+      const title = `${blocked ? "Release barrada" : "Incidente"} ${request.release}`;
+      const id = await delivery.fallback(target, request.text, title, actionOf(request, target));
+      log.warn(`${request.release}: ${formatSession(target)} ${blocked ? "não assumiu" : "não pegou"}; chamado foi para a cópia ${id}`);
       if (found?.note.drill) return;
       await writeHandoff(deps.stateDir, request.release, request.lock, {
-        role: request.role,
+        // Every blocked call is recorded as `blocked`, whatever the routing.
+        role: blocked ? "blocked" : (request.role as Role),
         session: { harness: "claude", host, id },
         at: clock.now().toISOString(),
       }).catch((error) => log.warn(`${request.release}: registrar o chamado: ${describe(error)}`));
     } catch (error) {
-      const reason = `prompt: não pego; fallback: ${describe(error)}`;
+      const reason = `prompt: ${blocked ? "sem confirmação" : "não pego"}; fallback: ${describe(error)}`;
       log.error(`não consegui chamar ${formatSession(target)} para ${request.release} (${request.role}): ${reason}`);
       if (!found || !config) return;
       try {
@@ -582,16 +615,16 @@ export function createClaudeWatcher(deps: ClaudeDeps): ClaudeWatcher {
           exec: deps.exec,
           gitDir: join(deps.stateDir, "claude.git"),
           repository: config.repository,
-          notesRef: config.notesRef,
+          notesRef: found.ref,
           token: await token(),
           key: found.key,
           recall: {
             failedAt: clock.now().toISOString(),
             reason,
             by: `claude/${host}`,
-            role: request.role,
+            role: blocked ? "blocked" : request.role,
             target: formatSession(target),
-            rollback: found.note.rollback?.outcome ?? null,
+            ...("state" in found.note ? { state: found.note.state } : { rollback: found.note.rollback?.outcome ?? null }),
           },
         });
         if (!landed) log.error(`${request.release}: a falha do chamado não entrou na nota`);
@@ -602,11 +635,17 @@ export function createClaudeWatcher(deps: ClaudeDeps): ClaudeWatcher {
   }
 
   /**
-   * Delivered calls: picked → done; otherwise fork when the session cannot get it (no live
-   * process, a live one with no watcher for 2 min, or a watcher that has not picked in 10 min).
+   * Delivered calls: taken → done; otherwise fork when the session cannot get it (no live process,
+   * a live one with no watcher for 2 min, or a watcher that has not picked in 10 min), or, for a
+   * blocked call, got it 2 min ago without taking it. `blockedFresh`: the blocked notes match the
+   * remote this tick; without that a blocked call is not judged at all, since a confirmation not
+   * yet fetched would look like silence.
    */
-  async function followUp(host: string): Promise<void> {
-    const now = clock.now().getTime();
+  async function followUp(host: string, blockedFresh: boolean): Promise<void> {
+    const at = clock.now();
+    const now = at.getTime();
+    // Not loaded, or its last refresh failed: a blocked call cannot be judged (`unknown`).
+    const releases = releaseHistory(tracker?.current() ?? null);
     const sessions = await liveSessions(deps.stateDir, deps.alive);
     for (const { path, dir, base, state, pickedAt, request } of await storedRequests(deps.stateDir)) {
       const created = request ? Date.parse(request.createdAt) : NaN;
@@ -616,12 +655,16 @@ export function createClaudeWatcher(deps: ClaudeDeps): ClaudeWatcher {
         continue;
       }
       if (state === "fallback") continue;
-      if (confirmation(request, state) === "taken") {
-        log.info(`${request.release}: ${request.session} pegou o chamado`);
+      if (request.kind === "blocked" && !blockedFresh) continue;
+      const found = noteFor(request);
+      const blockedNote = request.kind === "blocked" ? ((found?.note as BlockedNote | undefined) ?? null) : null;
+      const taken = confirmation(request, state, blockedNote, host, at, blockedNote ? shippedSince(blockedNote, releases) : null);
+      if (taken === "unknown") continue;
+      if (taken === "taken" || taken === "moot") {
+        log.info(`${request.release}: ${taken === "taken" ? `${request.session} ${request.kind === "blocked" ? "assumiu" : "pegou"} o chamado` : `chamado de ${request.session} encerrado`}`);
         await rm(path, { force: true });
         continue;
       }
-      const found = noteFor(request.release);
       if (!due(state, pickedAt, age, now, sessions.filter((entry) => entry.sessionId === request.session))) continue;
       await guard(async () => {
         const claim = join(dir, `${base}${FALLBACK}`);
@@ -659,7 +702,9 @@ export function createClaudeWatcher(deps: ClaudeDeps): ClaudeWatcher {
       delivery,
       log,
       guard,
-      release: createReleaseTracker({
+      // Blocked calls are confirmed by `followUp` below, through the inbox.
+      confirmsCalls: true,
+      release: (tracker = createReleaseTracker({
         source: createReleaseSource({
           fetch: deps.fetch,
           clock,
@@ -668,11 +713,12 @@ export function createClaudeWatcher(deps: ClaudeDeps): ClaudeWatcher {
         }),
         clock,
         log,
-      }),
+      })),
     });
     const report = await core.tick();
     if (!config || report.poll === "config-error" || report.poll === "token-error") return;
-    await followUp(config.instance);
+    const blockedFresh = report.blocked === "unchanged" || report.blocked === "missing" || (report.blocked === "changed" && report.blockedFetched);
+    await followUp(config.instance, blockedFresh);
   }
 
   let polling: Promise<void> | null = null;

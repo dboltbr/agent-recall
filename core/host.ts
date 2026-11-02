@@ -35,10 +35,13 @@ export async function loadConfig(path = configPath()): Promise<HostConfig> {
   };
   const instance = text("instance", "");
   if (!instance) throw new Error(`${path} sem "instance"`);
+  const notesRef = text("notesRef", "refs/notes/release-watch");
   return {
     instance,
     repository: text("repository", "dboltbr/dbolt"),
-    notesRef: text("notesRef", "refs/notes/release-watch"),
+    notesRef,
+    // A drill reads the drill refs of both kinds unless the config names the blocked one.
+    blockedRef: text("blockedRef", notesRef.endsWith("-drill") ? "refs/notes/release-blocked-drill" : "refs/notes/release-blocked"),
   };
 }
 
@@ -126,8 +129,9 @@ export function isAlive(pid: number): boolean {
 /** `link` publishes a complete file at `path` only when nothing is there: false when something was. */
 export async function publishExclusive(path: string, body: string): Promise<boolean> {
   const tmp = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
-  await writeFile(tmp, body, "utf8");
   try {
+    // Inside the try: a write that fails midway (ENOSPC, EFBIG) still removes the partial file.
+    await writeFile(tmp, body, "utf8");
     await link(tmp, path);
     return true;
   } catch (error) {

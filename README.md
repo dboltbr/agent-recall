@@ -5,8 +5,9 @@ release do `dboltbr/dbolt` fica vermelha ou é barrada antes da produção.
 
 ## O que faz
 
-- A cada 30 s consulta a ref `refs/notes/release-watch` do `dboltbr/dbolt` com `If-None-Match` e o
-  token do `gh` do host. Resposta 304 não faz nada.
+- A cada 30 s consulta as refs `refs/notes/release-watch` (incidentes) e `refs/notes/release-blocked`
+  (releases barradas) do `dboltbr/dbolt` com `If-None-Match` e o token do `gh` do host. Resposta 304
+  não faz nada; ref ausente no remoto = nenhuma nota daquele tipo.
 - Quando a ref muda, busca as notas (uma por tag `release-<n>`). A nota, gravada pelo vigia, traz
   o `owner` (a `Agent-Session` do commit mais novo da faixa), os `notified` (as outras sessões da
   faixa, `paseo/<serverId>/<agentId>` | `opencode/<instance>/<ses_…>` |
@@ -28,12 +29,28 @@ release do `dboltbr/dbolt` fica vermelha ou é barrada antes da produção.
 - Trava `mkdir` atômica por incidente, papel e sessão em `~/.local/state/agent-recall/`: nenhum
   chamado duplo. A cada consulta revê as notas das últimas 8 h, mesmo sem a ref mudar (é assim que
   o dono de um rollback que ficou `pending` é chamado aos 10 min).
-- Release que falha antes da tag (verificação, build, publicação) não tem nota: o status das
-  releases (o mesmo da tela Releases) diz quem fez o push. A sessão do push, se for deste harness e
-  host, recebe uma vez por release
-  `Release barrada release-<n>: carregue a skill dbolt-release-incident. Papel: blocked. … Release: <json>`
-  (número, URL, SHA, job que falhou, sessões da faixa). Falhas das últimas 8 h; release posterior
-  com tag encerra o chamado. Ninguém recebeu → só o log (não há nota).
+- Release barrada antes da tag (verificação, build, publicação): o job `blocked-note` do dbolt grava a
+  nota em `refs/notes/release-blocked` no SHA da cabeça do run (não há tag): `state`, faixa,
+  `sessions` (cada `Agent-Session` identificado com seus commits), `owner` (texto
+  `<harness>/<host>/<id>`), `run` (`url`, `failedJob`), `assessment.suspects`, `fix`. Chama:
+  - `red` sem owner → a única sessão identificada da faixa (commit sem trailer não conta); com
+    várias, a do commit da cabeça (`range.to`), como o dono do incidente; nenhuma → ninguém (o run
+    vermelho avisa o humano);
+  - `fix-pending` → a sessão de cada culpado de `assessment.suspects`, no host dela, salvo o owner;
+  - `investigating`, `duplicate`, `shipped`, `unrelated`, `escalated` → ninguém.
+
+  Todo chamado é
+  `Release barrada release-<n>: carregue a skill dbolt-release-incident. Papel: blocked. Release: <json>`
+  (número, URL do run, `headSha`, job que falhou, estado); a skill decide entre investigar e
+  corrigir pelo estado da nota. Travas `<sessão>.blocked` e `<sessão>.blocked-fix`. Só notas com
+  `updatedAt` das últimas 8 h; release com tag igual ou posterior encerra o chamado. A nota só é
+  roteada com a busca barrada desta volta em dia e o histórico de releases atualizado; senão
+  espera a próxima volta.
+- Confirmação da release barrada, nos três harnesses: o chamado vale quando a nota passa a ter
+  `owner` (`red`) ou `fix.session` (`fix-pending`) igual à sessão chamada. Sem isso em 2 min, a
+  cópia de reserva (agente novo no Paseo, sessão filha no OpenCode, cópia em segundo plano no Claude
+  Code). Nota que saiu do estado do chamado, ou release posterior com tag, encerra sem cópia; sem
+  histórico de releases a espera segue. Cópia que falha → `recall` na nota barrada.
 - Heartbeat a cada consulta em `~/.local/state/agent-recall/<paseo|opencode|claude>.alive`:
   `{ "pid", "polledAt", "sha" }`. O hook de commit do dbolt exige esse arquivo.
 - No OpenCode, um poller por host (trava de host `opencode.poller`, ver "Travas do host") que vive o
@@ -86,18 +103,23 @@ deste repositório) roda um vigia dentro de cada processo do Claude Code, por ho
   mostra `agent-recall: chamado de release` e entrega ao modelo o `rewakeMessage` (o responsável
   instalou o vigia; execute o pedido) seguido do prompt: sessão ociosa acorda na hora, ocupada
   recebe quando a ferramenta em curso volta. O hook seguinte rearma o vigia.
-- **Confirmação.** O chamado vale quando o vigia da sessão pega o pedido (o nome do arquivo passa a
-  `.picked-<ms>`), como o prompt aceito no Paseo e no OpenCode. A cópia sai quando a sessão não tem
-  processo do Claude Code vivo no host (na hora), quando tem processo sem vigia (turno ocupado
-  depois de um chamado) há 2 min, ou quando o vigia armado não pega em 10 min (vigia travado). O
-  dono da consulta abre a cópia em segundo plano: `claude --bg --fork-session --resume <id>
-  --settings '{"worktree":{"bgIsolation":"none"}}' "<prompt>"` no `cwd` da primeira linha do
-  transcript (`~/.claude/projects/*/<id>.jsonl`; o resume não restaura o diretório), conferida em
-  `claude agents --json --all`. Sessão em segundo plano só edita dentro de uma worktree isolada
-  (padrão `worktree.bgIsolation`); a cópia pode editar o checkout da original porque só nasce com
-  a original fechada ou calada. O `--settings` é uma camada a mais (fonte `flagSettings`), só
-  deste comando: as configurações do usuário e do projeto seguem valendo, e o projeto não muda.
-  A cópia falhou → `recall` na nota.
+- **Confirmação.** O chamado de incidente vale quando o vigia da sessão pega o pedido (o nome do
+  arquivo passa a `.picked-<ms>`), como o prompt aceito no Paseo e no OpenCode. O de release
+  barrada vale só quando a nota barrada nomeia a sessão (`owner` ou `fix.session`): pegar não é
+  assumir, e o Claude Code pode recusar um despertar como evento automático; é julgado só com as
+  notas barradas em dia nesta volta. A cópia sai quando a sessão não tem processo do Claude Code
+  vivo no host (na hora), quando tem processo sem vigia (turno ocupado depois de um chamado) há 2
+  min, quando o vigia armado não pega em 10 min (vigia travado), ou, na release barrada, quando
+  pegou há 2 min sem assumir. O dono da consulta abre a cópia em segundo plano: `claude --bg
+  --fork-session --resume <id> "<prompt>"` no `cwd` da primeira linha do transcript
+  (`~/.claude/projects/*/<id>.jsonl`; o resume não restaura o diretório), conferida em `claude
+  agents --json --all`. Sessão em segundo plano só edita dentro de uma worktree isolada (padrão
+  `worktree.bgIsolation`). Com a original fechada (sem processo do Claude Code vivo para ela no
+  host), a cópia leva `--settings '{"worktree":{"bgIsolation":"none"}}'` e pode editar o checkout
+  da original; com a original ainda viva a cópia fica na worktree isolada padrão, para as duas não
+  editarem o mesmo checkout ao mesmo tempo. O `--settings` é uma camada a mais (fonte
+  `flagSettings`), só deste comando: as configurações do usuário e do projeto seguem valendo, e o
+  projeto não muda. A cópia falhou → `recall` na nota (a barrada, para release barrada).
 - **Sem Claude Code aberto no host** ninguém ouve: o heartbeat para e o `watch` escala em 10 min,
   como para qualquer harness parado.
 - Nada vai para o stdout; o log fica em `~/.local/state/agent-recall/claude/watch.log` (gira em
@@ -115,7 +137,10 @@ máquina onde o Claude Code roda.
 - **Chamado perdido.** A trava `mkdir` de cada chamado vale uma vez. Um poller que morre (ou um
   vigia que acorda a própria sessão, ou recebe SIGTERM) entre tomar o chamado e entregá-lo perde
   esse chamado; a rede de segurança é o `watch` da release, que escala em 10 min o incidente que
-  ninguém assume. Pela mesma razão, uma cópia (`.fallback`) interrompida não é refeita.
+  ninguém assume. Pela mesma razão, uma cópia (`.fallback`) interrompida não é refeita. No Paseo e
+  no OpenCode a espera da confirmação de uma release barrada fica em memória: o poller que
+  reinicia (autoatualização do Paseo inclusive) nos 2 min perde a cópia daquele chamado; o run
+  vermelho segue avisando o humano pelo GitHub.
 - **Porta tomada.** Outro programa na porta de uma trava deixa o host sem aquela trava (log
   `porta <n> ocupada por outro programa: este host não consulta`): sem consulta, o heartbeat para
   e o push com trailer do harness é recusado com o comando de instalação.
@@ -203,13 +228,16 @@ harness a revisão mais nova (`core/self-update.ts`). Falha só vai para o log.
 {
   "instance": "archdev",
   "repository": "dboltbr/dbolt",
-  "notesRef": "refs/notes/release-watch"
+  "notesRef": "refs/notes/release-watch",
+  "blockedRef": "refs/notes/release-blocked"
 }
 ```
 
 - `instance`: nome do host nos trailers `opencode/<instance>/…` e `claude/<instance>/…` (o Paseo
   usa o `server-id`).
 - `notesRef`: `refs/notes/release-watch-drill` no ensaio.
+- `blockedRef`: opcional; padrão `refs/notes/release-blocked`, ou `refs/notes/release-blocked-drill`
+  quando o `notesRef` é o de ensaio.
 
 ## Desenvolvimento
 

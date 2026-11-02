@@ -5,8 +5,9 @@ import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
 import { config, fakeExec, fixedClock, hoursAgo, NOW, note, quietLog, removeTempDirs, session, tempState, writeConfig } from "../../core/test/fakes.ts";
+import { job, minutesAgo, run } from "../../core/test/releases.ts";
 import { acquireHostLock, loadConfig, lockPort, readHandoffs } from "../../core/host.ts";
-import type { Exec, Fetch, Note } from "../../core/types.ts";
+import type { BlockedNote, Exec, Fetch, Note } from "../../core/types.ts";
 import {
   ACK_TIMEOUT_MS,
   armWatcher,
@@ -39,12 +40,31 @@ const SESSION = "86117ef6-50de-42ad-8ffc-a2d6f03df9ec";
 const FORK_SHORT = "d05b74cf";
 const FORK_ID = "d05b74cf-81ed-4497-a610-76c3236cab79";
 
-/** `refs/notes/release-watch` that answers 304 until `bump()`; every other GitHub path is 404. */
-function refServer() {
+/**
+ * `refs/notes/release-watch` that answers 304 until `bump()`; `refs/notes/release-blocked` likewise
+ * with `bumpBlocked()`, 404 until `blocked: true`; the release workflow runs list serves `runs`;
+ * every other GitHub path is 404.
+ */
+function refServer(options: { blocked?: boolean; runs?: unknown[] } = {}) {
   let version = 1;
+  let blockedVersion = 1;
   let gate: Promise<void> | null = null;
   const refCalls: string[] = [];
   const fetch: Fetch = async (url, init) => {
+    if (options.runs && url.includes("/actions/workflows/release.yml/runs")) {
+      return new Response(JSON.stringify({ total_count: options.runs.length, workflow_runs: options.runs }), { status: 200 });
+    }
+    if (options.runs && url.includes("/matching-refs/tags/release-")) return new Response("[]", { status: 200 });
+    if (options.runs && url.includes("/actions/runs/") && url.includes("/jobs")) {
+      return new Response(JSON.stringify({ total_count: 1, jobs: [job("verify-production / check", "failure", [15, 5])] }), { status: 200 });
+    }
+    if (url.includes("/git/ref/notes/release-blocked")) {
+      if (!options.blocked) return new Response(null, { status: 404 });
+      const etag = `W/"b${blockedVersion}"`;
+      const headers = (init?.headers ?? {}) as Record<string, string>;
+      if (headers["If-None-Match"] === etag) return new Response(null, { status: 304 });
+      return new Response(JSON.stringify({ object: { sha: `b${blockedVersion}` } }), { status: 200, headers: { etag } });
+    }
     if (!url.includes("/git/ref/")) return new Response(null, { status: 404 });
     refCalls.push(url);
     if (gate) await gate;
@@ -62,11 +82,15 @@ function refServer() {
       open();
     };
   };
-  return { fetch, refCalls, bump: () => version++, hold };
+  return { fetch, refCalls, bump: () => version++, bumpBlocked: () => blockedVersion++, hold };
 }
 
 async function host(options: {
   notes: Record<string, Note>;
+  /** Blocked-release notes; with them the blocked ref and a release history answer. */
+  blocked?: Record<string, BlockedNote>;
+  /** The release history does not load (GitHub failing). */
+  history?: "fail";
   fork?: "ok" | "fail";
   /** Holds `claude --bg` until it resolves (a fork in progress). */
   forkGate?: Promise<void>;
@@ -75,8 +99,8 @@ async function host(options: {
   const configFile = await writeConfig(await tempState(), config);
   const projectsDir = await tempState();
   const clock = fixedClock();
-  const github = refServer();
-  const git = fakeExec(() => options.notes);
+  const github = refServer(options.blocked ? { blocked: true, runs: options.history === "fail" ? undefined : [blockedRun] } : {});
+  const git = fakeExec(() => options.notes, { blocked: () => options.blocked ?? {} });
   const forks: Array<{ args: readonly string[]; cwd: string | undefined }> = [];
   let forkStarted!: () => void;
   const firstFork = new Promise<void>((resolve) => (forkStarted = resolve));
@@ -143,6 +167,19 @@ async function settle(watcher: ClaudeWatcher) {
 
 /** A red release whose owner (the range head's session) is the Claude Code session `id`. */
 const red = (id = SESSION): Note => note({ release: "release-90", updatedAt: hoursAgo(0.1), owner: session("claude", "archdev", id, ["c0ffee1"]) });
+
+const BLOCKED_HEAD = "0292aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+/** Run 292 failed before the tag: the release history the poller reads. */
+const blockedRun = run({ run_number: 292, status: "completed", conclusion: "failure", updated_at: minutesAgo(5) });
+const blockedRed = (partial: Partial<BlockedNote> = {}): BlockedNote => ({
+  release: "release-292",
+  state: "red",
+  range: { from: null, to: BLOCKED_HEAD },
+  sessions: [session("claude", "archdev", SESSION, ["c0ffee1"])],
+  run: { id: 292, url: "https://github.com/dboltbr/dbolt/actions/runs/292", failedJob: "verify-production / check" },
+  updatedAt: hoursAgo(0.1),
+  ...partial,
+});
 
 test("hook stdin: session_id, evento, transcript e cwd; lixo é null", () => {
   assert.deepEqual(
@@ -224,10 +261,12 @@ test("turno ocupado sem vigia por 2 min: o poller abre a cópia no diretório da
 
   h.later(31_000);
   assert.deepEqual(await settle(poller), { kind: "wait" });
+  // The original still runs in its process: the fork keeps the default worktree isolation.
   const fork = h.forks[0]!.args;
   assert.deepEqual(fork.slice(0, 4), ["--bg", "--fork-session", "--resume", SESSION]);
+  assert.equal(fork.length, 5, "sem --settings: a original pode estar editando o checkout");
   assert.equal(h.forks[0]!.cwd, cwd);
-  assert.match(fork[fork.length - 1]!, /^Incidente release-90: .*Papel: owner\./);
+  assert.match(fork[4]!, /^Incidente release-90: .*Papel: owner\./);
   assert.deepEqual(await h.inbox(SESSION), []);
   assert.equal(existsSync(claudePaths(h.stateDir).inbox(SESSION)), false, "caixa vazia sai");
   const handoffs = await readHandoffs(h.stateDir, "release-90");
@@ -254,6 +293,9 @@ test("sessão sem processo vivo no host: a cópia sai na hora, sem caixa", async
   await settle(poller);
   assert.equal(h.forks.length, 1);
   assert.equal(h.forks[0]!.cwd, cwd);
+  // The original is closed: the fork may edit its checkout (background sessions are confined to a
+  // worktree by default), through a flag settings layer on top of the user's, for this command only.
+  assert.deepEqual(h.forks[0]!.args.slice(0, 6), ["--bg", "--fork-session", "--resume", SESSION, "--settings", '{"worktree":{"bgIsolation":"none"}}']);
   assert.deepEqual(await h.inbox(SESSION), []);
 });
 
@@ -271,6 +313,81 @@ test("cópia que falha: recall gravado na nota", async () => {
   assert.equal(recall["role"], "owner");
   assert.match(String(recall["reason"]), /Workspace not trusted/);
 });
+test("release barrada pega sem owner em 2 min: pego não confirma, a cópia sai isolada", async () => {
+  const h = await host({ notes: {}, blocked: { [BLOCKED_HEAD]: blockedRed() } });
+  const cwd = await tempState();
+  await h.transcript(SESSION, cwd);
+  const poller = await h.process(1002, 2002, "other-session");
+  const culprit = await h.process(1001, 2001, SESSION);
+  assert.deepEqual(await settle(poller), { kind: "wait" });
+  const woke = await settle(culprit);
+  assert.equal(woke.kind, "wake");
+  assert.match((woke as { text: string }).text, /^Release barrada release-292: carregue a skill dbolt-release-incident\. Papel: blocked\. Release: /);
+
+  h.later(ACK_TIMEOUT_MS - 1_000);
+  await settle(poller);
+  assert.equal(h.forks.length, 0, "ainda no prazo");
+  h.later(31_000);
+  await settle(poller);
+  assert.equal(h.forks.length, 1);
+  // The original's process still runs: no `--settings`, the default worktree isolation stays.
+  assert.deepEqual(h.forks[0]!.args.slice(0, 4), ["--bg", "--fork-session", "--resume", SESSION]);
+  assert.match(h.forks[0]!.args[4]!, /^Release barrada release-292: /);
+  assert.equal(h.forks[0]!.cwd, cwd);
+  const handoffs = await readHandoffs(h.stateDir, "release-292");
+  assert.deepEqual(handoffs.map((handoff) => [handoff.role, handoff.session.id]), [["blocked", FORK_ID]]);
+});
+
+test("release barrada com owner da sessão dentro do prazo: confirmada, nenhuma cópia", async () => {
+  const blocked: Record<string, BlockedNote> = { [BLOCKED_HEAD]: blockedRed() };
+  const h = await host({ notes: {}, blocked });
+  await h.transcript(SESSION, await tempState());
+  const poller = await h.process(1002, 2002, "other-session");
+  const culprit = await h.process(1001, 2001, SESSION);
+  await settle(poller);
+  assert.equal((await settle(culprit)).kind, "wake");
+  blocked[BLOCKED_HEAD] = blockedRed({ state: "investigating", owner: `claude/archdev/${SESSION}`, updatedAt: NOW.toISOString() });
+  h.github.bumpBlocked();
+  h.later(60_000);
+  await settle(poller);
+  assert.deepEqual(await h.inbox(SESSION), []);
+  h.later(ACK_TIMEOUT_MS);
+  await settle(poller);
+  assert.equal(h.forks.length, 0);
+});
+
+test("release barrada cuja cópia falha: recall na nota barrada", async () => {
+  const h = await host({ notes: {}, blocked: { [BLOCKED_HEAD]: blockedRed() }, fork: "fail" });
+  await h.transcript(SESSION, await tempState());
+  const poller = await h.process(1002, 2002, "other-session");
+  const culprit = await h.process(1001, 2001, SESSION);
+  await settle(poller);
+  assert.equal((await settle(culprit)).kind, "wake");
+  h.later(ACK_TIMEOUT_MS + 30_000);
+  await settle(poller);
+  assert.equal(h.git.written.length, 1);
+  const { key, ref, body } = h.git.written[0]!;
+  assert.deepEqual([key, ref], [BLOCKED_HEAD, "refs/notes/release-blocked"]);
+  const recall = body["recall"] as Record<string, unknown>;
+  assert.deepEqual([recall["role"], recall["target"], recall["state"]], ["blocked", `claude/archdev/${SESSION}`, "red"]);
+});
+
+test("release barrada sem histórico de releases na partida: pedido guardado, sem cópia", async () => {
+  const h = await host({ notes: {}, blocked: { [BLOCKED_HEAD]: blockedRed() }, history: "fail" });
+  await h.transcript(SESSION, await tempState());
+  // A request a previous poller delivered, picked 3 min ago and never taken.
+  const dir = claudePaths(h.stateDir).inbox(SESSION);
+  await mkdir(dir, { recursive: true });
+  const request = { release: "release-292", kind: "blocked", role: "blocked", lock: `${SESSION}.blocked`, session: SESSION, text: "Release barrada release-292: …", createdAt: hoursAgo(0.1) };
+  const name = `release-292.${SESSION}.blocked.picked-${NOW.getTime() - 3 * 60_000}`;
+  await writeFile(join(dir, name), JSON.stringify(request));
+  const poller = await h.process(1002, 2002, "other-session");
+  await settle(poller);
+  assert.equal(h.forks.length, 0, "uma release posterior pode já ter ido à produção");
+  assert.equal(h.git.written.length, 0);
+  assert.deepEqual(await h.inbox(SESSION), [name]);
+});
+
 test("pedido aparece inteiro para quem lê a caixa durante a escrita", async () => {
   for (let round = 0; round < 20; round++) {
     const stateDir = await tempState();
@@ -526,8 +643,8 @@ test("pedido .picked da versão anterior: julgado como pego sem hora", async () 
   const h = await host({ notes: {} });
   const dir = claudePaths(h.stateDir).inbox(SESSION);
   await mkdir(dir, { recursive: true });
-  const request = { release: "release-93", kind: "blocked", role: "blocked", lock: `${SESSION}.blocked`, session: SESSION, text: "Release barrada release-93: …", createdAt: NOW.toISOString() };
-  await writeFile(join(dir, `release-93.${SESSION}.blocked.picked`), JSON.stringify(request));
+  const request = { release: "release-93", kind: "recall", role: "owner", lock: `${SESSION}.owner`, session: SESSION, text: "Incidente release-93: …", createdAt: NOW.toISOString() };
+  await writeFile(join(dir, `release-93.${SESSION}.owner.picked`), JSON.stringify(request));
   const poller = await h.process(1002, 2002, "other-session");
   await settle(poller);
   assert.deepEqual(await h.inbox(SESSION), [], "pego: confirmado e removido");

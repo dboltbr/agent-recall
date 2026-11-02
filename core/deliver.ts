@@ -1,8 +1,8 @@
 import { describe } from "./poll.ts";
 import { formatSession } from "./trailer.ts";
-import { noteSignals, type Release } from "./release-status.ts";
+import { noteSignals } from "./release-status.ts";
 import { noteOwner, roleOf, type Action, type NoteAction } from "./route.ts";
-import type { Logger, Note, SessionRef } from "./types.ts";
+import type { BlockedNote, Logger, Note, SessionRef } from "./types.ts";
 
 /** Why the watch could not revert, in pt-BR (codes of `scripts/release-incident-note.py`). */
 const ROLLBACK_REASONS: Readonly<Record<string, string>> = {
@@ -98,20 +98,19 @@ export function promptFor(action: NoteAction, note: Note): string {
   return action.role === "owner" ? ownerPrompt(action.release, note) : notifiedPrompt(action.release, note);
 }
 
-/** A release that failed before the tag has no note: the prompt carries the run itself. */
-export function blockedPrompt(release: Release): string {
-  const snapshot = {
-    number: release.number,
-    url: release.url,
-    headSha: release.headSha,
-    title: release.title,
-    failedJob: release.failedJob,
-    sessions: release.sessions.map((session) => `${session.harness}/${session.host}/${session.id}`),
+/**
+ * Every call of a blocked-release note: the skill decides between investigating and fixing from
+ * the note state. `key` is the run's head commit the note sits on.
+ */
+export function blockedPrompt(release: string, key: string, note: BlockedNote): string {
+  const essentials = {
+    number: Number(release.replace(/^release-/, "")),
+    url: note.run?.url ?? null,
+    headSha: key,
+    failedJob: note.run?.failedJob ?? null,
+    state: note.state,
   };
-  return (
-    `Release barrada ${release.name}: carregue a skill dbolt-release-incident. Papel: blocked. ` +
-    `Nada foi à produção; os pushes seguintes ficam barrados até a main passar. Release: ${JSON.stringify(snapshot)}`
-  );
+  return `Release barrada ${release}: carregue a skill dbolt-release-incident. Papel: blocked. Release: ${JSON.stringify(essentials)}`;
 }
 
 /**
@@ -149,8 +148,8 @@ export interface DeliverInput {
   /** A drill: logs say so. */
   readonly drill?: boolean;
   readonly delivery: Delivery;
-  /** Writes the failure into the note; true when it landed. Null: there is no note, only the log. */
-  readonly recordFailure: ((failure: Failure) => Promise<boolean>) | null;
+  /** Writes the failure into the note; true when it landed. */
+  readonly recordFailure: (failure: Failure) => Promise<boolean>;
   readonly host: string;
   readonly log: Logger;
 }
@@ -176,7 +175,6 @@ export async function deliver(input: DeliverInput): Promise<Delivered> {
   const role = roleOf(action);
   const reason = failures.join("; ");
   log.error(`${input.drill ? "[ensaio] " : ""}não consegui chamar ${target} para ${action.release} (${role}): ${reason}`);
-  if (!input.recordFailure) return { outcome: "failed", session: null };
   try {
     if (await input.recordFailure({ role, target, reason })) return { outcome: "recorded", session: null };
     log.error(`${action.release}: a falha do chamado não entrou na nota`);

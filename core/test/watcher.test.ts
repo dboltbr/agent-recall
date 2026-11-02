@@ -12,10 +12,12 @@ import {
   fakeExec,
   fakeGitHub,
   fixedClock,
+  fixedReleases,
   hoursAgo,
   NOW,
   note,
   quietLog,
+  recordingLog,
   session,
   tempState,
   writeConfig,
@@ -30,6 +32,7 @@ async function setup(options: {
   harness?: "paseo" | "opencode";
   push?: "ok" | "reject";
   release?: ReleaseTracker;
+  log?: ReturnType<typeof recordingLog>;
 }) {
   const stateDir = options.stateDir ?? (await tempState());
   const configFile = await writeConfig(await tempState(), options.config ?? config);
@@ -48,8 +51,8 @@ async function setup(options: {
     fetch: github.fetch,
     exec: git.exec,
     delivery: delivery.delivery,
-    log: quietLog,
-    release: options.release,
+    log: options.log ?? quietLog,
+    release: options.release ?? fixedReleases([]),
   });
   return { watcher, github, git, delivery, clock, stateDir };
 }
@@ -330,4 +333,23 @@ test("release: o rastreador anda com o token, as notas e o sinal de mudança do 
       ["gho_test", false, ["tagcommit"]],
     ],
   );
+});
+
+test("trava que lança numa sessão não pula as outras; a volta seguinte tenta de novo", async () => {
+  // A session id longer than a file name: its lock mkdir throws ENAMETOOLONG.
+  const long = "s".repeat(300);
+  const red = note({
+    release: "release-95",
+    owner: session("opencode", "archdev", long, ["aaaaaaa1"]),
+    notified: [session("opencode", "archdev", "ses_b", ["bbbbbbb2"])],
+  });
+  const log = recordingLog();
+  const { watcher, delivery } = await setup({ notes: { t: red }, refs: [{ status: 200, etag: '"e1"' }, { status: 304 }], log });
+  await watcher.tick();
+  assert.deepEqual(delivery.recorded.prompts.map((prompt) => prompt.target.id), ["ses_b"]);
+  const failures = () => log.lines.filter((line) => line.startsWith("error") && line.includes(long.slice(0, 20))).length;
+  assert.equal(failures(), 1);
+  await watcher.tick();
+  assert.equal(failures(), 2);
+  assert.equal(delivery.recorded.prompts.length, 1, "a trava segura o que já foi");
 });

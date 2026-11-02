@@ -1,13 +1,13 @@
 import { existsSync } from "node:fs";
-import type { Exec, Note } from "./types.ts";
+import type { BlockedNote, Exec, Note } from "./types.ts";
 
 export const FETCH_TIMEOUT_MS = 25_000;
 
-export interface FetchedNote {
-  /** Commit of tag `release-<n>`, the note's annotated object. */
+export interface FetchedNote<T = Note> {
+  /** The note's annotated object: commit of tag `release-<n>` (incident) or the run's head (blocked). */
   readonly key: string;
   readonly raw: string;
-  readonly note: Note | null;
+  readonly note: T | null;
 }
 
 export interface FetchNotesInput {
@@ -49,7 +49,7 @@ async function fetchRef(input: FetchNotesInput): Promise<void> {
 }
 
 /** Fetches the notes ref into a private bare repository and returns every note body. */
-export async function fetchNotes(input: FetchNotesInput): Promise<FetchedNote[]> {
+export async function fetchNotes<T = Note>(input: FetchNotesInput, parse: (raw: string) => T | null = parseNote as (raw: string) => T | null): Promise<FetchedNote<T>[]> {
   const { exec, gitDir, notesRef } = input;
   await fetchRef(input);
   const list = await exec("git", ["--git-dir", gitDir, "notes", "--ref", notesRef, "list"], {
@@ -66,7 +66,7 @@ export async function fetchNotes(input: FetchNotesInput): Promise<FetchedNote[]>
   const bodies = parseCatFileBatch(batch.stdout);
   return pairs.map(({ blob, key }) => {
     const raw = bodies.get(blob) ?? "";
-    return { key, raw, note: parseNote(raw) };
+    return { key, raw, note: parse(raw) };
   });
 }
 
@@ -79,8 +79,10 @@ export interface RecallFailure {
   readonly role: string;
   /** The session it tried (`<harness>/<host>/<id>`). */
   readonly target: string;
-  /** `rollback.outcome` the call carried (`pending` when it went out before the watch finished). */
-  readonly rollback: string | null;
+  /** Incident note: `rollback.outcome` the call carried (`pending` when it went out before the watch finished). */
+  readonly rollback?: string | null;
+  /** Blocked-release note: the state the call was for. */
+  readonly state?: string;
 }
 
 export interface RecordFailureInput extends FetchNotesInput {
@@ -169,7 +171,13 @@ export function parseNote(raw: string): Note | null {
 }
 
 /** `release-90` whether the note says `90` or `"release-90"`. */
-export function releaseName(note: Note): string {
+export function releaseName(note: Pick<Note | BlockedNote, "release">): string {
   const value = String(note.release);
   return value.startsWith("release-") ? value : `release-${value}`;
+}
+
+/** A blocked-release note body, or null when it is not one (it must carry a `state`). */
+export function parseBlockedNote(raw: string): BlockedNote | null {
+  const note = parseNote(raw) as unknown as Record<string, unknown> | null;
+  return note && typeof note["state"] === "string" ? (note as unknown as BlockedNote) : null;
 }

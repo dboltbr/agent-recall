@@ -56,11 +56,38 @@ export interface Note {
   readonly recall?: unknown;
 }
 
+/**
+ * Body of a `refs/notes/release-blocked` note, keyed by the run's head commit (a release blocked
+ * before its tag has no tag). Its own shape, written by the dbolt `blocked-note` job: `owner` is a
+ * session string here. States: `red` → `investigating` → `fix-pending` → `shipped`, or
+ * `unrelated`, `escalated`, `duplicate` (an open note of the same range already has an owner).
+ */
+export interface BlockedNote {
+  readonly release: string | number;
+  readonly state: string;
+  readonly range?: { readonly from?: string | null; readonly to?: string };
+  /** Every identified `Agent-Session` of the range with its commits; commits without one are absent. */
+  readonly sessions?: readonly NoteSession[];
+  /** `<harness>/<host>/<id>` of the session that took the release. */
+  readonly owner?: string | null;
+  readonly run?: { readonly id?: number; readonly url?: string; readonly failedJob?: string };
+  readonly assessment?: { readonly suspects?: readonly { readonly commit?: string; readonly evidence?: string }[] };
+  readonly fix?: { readonly session?: string; readonly branch?: string; readonly commit?: string };
+  readonly inheritedFrom?: string;
+  readonly drill?: boolean;
+  readonly createdAt?: string;
+  readonly updatedAt: string;
+  /** Written by this plugin when a call failed on every rung. */
+  readonly recall?: unknown;
+}
+
 /** `~/.config/agent-recall/config.json`. */
 export interface HostConfig {
   readonly instance: string;
   readonly repository: string;
   readonly notesRef: string;
+  /** Blocked-release notes (`refs/notes/release-blocked`, `-drill` in a drill). */
+  readonly blockedRef: string;
 }
 
 /** Who this plugin is: it only acts on trailers of its own harness and host. */

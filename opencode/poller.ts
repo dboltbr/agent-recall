@@ -163,7 +163,7 @@ function startPoller(registry: Registry, deps: PollerDeps, handover: Promise<voi
       exec: deps.exec,
       delivery: createDelivery(registry),
       log,
-      // No release UI here: the status only tells which pushes failed before the tag.
+      // No release UI here: the history only tells whether a later release shipped (closes a blocked call).
       release: createReleaseTracker({
         source: createReleaseSource({
           fetch: deps.fetch,
