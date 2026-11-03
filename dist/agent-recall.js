@@ -20067,7 +20067,7 @@ function noteRollback(note) {
   return {
     outcome: typeof rollback["outcome"] === "string" ? rollback["outcome"] : "pending",
     target: typeof rollback["target"] === "string" ? rollback["target"] : null,
-    frozen: !note.resolvedBy && note.drill !== true
+    frozen: typeof note.frozen === "boolean" ? note.frozen : !note.resolvedBy && note.drill !== true
   };
 }
 function bySeverity(signals) {
@@ -20290,6 +20290,7 @@ async function loadConfig(path = configPath()) {
   const notesRef = text2("notesRef", "refs/notes/release-watch");
   return {
     instance,
+    ...text2("factoryApiUrl", "") ? { factoryApiUrl: text2("factoryApiUrl", ""), factoryToken: process.env["FACTORY_RECALL_TOKEN"] ?? text2("factoryToken", "") } : {},
     repository: text2("repository", "dboltbr/dbolt"),
     notesRef,
     // A drill reads the drill refs of both kinds unless the config names the blocked one.
@@ -20968,6 +20969,60 @@ function createReleaseTracker(options) {
   };
 }
 
+// core/factory-api.ts
+async function pollFactory(input2) {
+  const url2 = new URL(input2.url);
+  if (url2.username || url2.password || url2.search || url2.hash || url2.protocol !== "https:" && !(url2.protocol === "http:" && ["127.0.0.1", "localhost"].includes(url2.hostname))) throw new Error("URL da API factory inv\xE1lida");
+  if (!input2.token) throw new Error("Token do recall da factory ausente");
+  const controller = new AbortController();
+  const timer2 = setTimeout(() => controller.abort(), 1e4);
+  let onAbort;
+  try {
+    const work = async () => {
+      const response = await input2.fetch(url2.href, { redirect: "error", signal: controller.signal, headers: { Authorization: `Bearer ${input2.token}`, Accept: "application/json", ...input2.etag ? { "If-None-Match": input2.etag } : {} } });
+      if (response.status === 304) return { kind: "unchanged" };
+      if (response.status !== 200) throw new Error(`API factory respondeu HTTP ${response.status}`);
+      const chunks = [];
+      let bytes = 0;
+      if (!response.body) throw new Error("API factory sem corpo");
+      const reader = response.body.getReader();
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          bytes += value.byteLength;
+          if (bytes > 2e6) {
+            await reader.cancel();
+            throw new Error("API factory excedeu limite de 2 MB");
+          }
+          chunks.push(value);
+        }
+      } finally {
+        reader.releaseLock();
+      }
+      const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      if (!body || typeof body !== "object" || !("releases" in body) || !Array.isArray(body.releases) || body.releases.length > 1e3) throw new Error("Resposta do recall da factory inv\xE1lida");
+      const releases = body.releases.map((value) => {
+        const note = parseNote(JSON.stringify(value));
+        if (!note || !value || typeof value !== "object" || !("key" in value) || typeof value.key !== "string" || !("frozen" in value) || typeof value.frozen !== "boolean" || !("state" in value) || typeof value.state !== "string") throw new Error("Release da API factory inv\xE1lida");
+        return { ...note, key: value.key, frozen: value.frozen, state: value.state };
+      });
+      return { kind: "changed", etag: response.headers.get("etag"), releases };
+    };
+    return await Promise.race([work(), new Promise((_, reject) => {
+      onAbort = () => reject(new Error("Consulta \xE0 factory excedeu deadline de 10 s"));
+      controller.signal.addEventListener("abort", onAbort, { once: true });
+    })]);
+  } finally {
+    clearTimeout(timer2);
+    if (onAbort) controller.signal.removeEventListener("abort", onAbort);
+  }
+}
+function factoryPrompt(role, note, url2) {
+  const verdict = note.verdict;
+  return `Incidente ${note.release}. Papel: ${role}. ${role === "owner" ? "Investigue a faixa e proponha a corre\xE7\xE3o." : "Aviso, sem pedido de a\xE7\xE3o; a sess\xE3o dona investiga."} Dono: ${JSON.stringify(note.owner ?? null)}. Fontes: ${JSON.stringify(verdict?.sources ?? {})}. Rollback: ${JSON.stringify(note.rollback ?? null)}. Main congelada: ${note.frozen ? "sim" : "n\xE3o"}. ${note.drill ? "Ensaio/dry-run: nenhuma escrita externa foi autorizada." : "Qualquer a\xE7\xE3o externa exige autoriza\xE7\xE3o da respons\xE1vel."} Estado atual e evid\xEAncias: consulte a API factory ${url2}; git notes n\xE3o \xE9 autoridade. Faixa: ${JSON.stringify(note.range ?? null)}.`;
+}
+
 // core/watcher.ts
 import { join as join3 } from "node:path";
 
@@ -21203,6 +21258,9 @@ async function deliver(input2) {
 var TOKEN_TTL_MS = 10 * 60 * 1e3;
 function createWatcher(options) {
   const { clock, exec, log: log2 } = options;
+  let factoryEtag = null;
+  let factoryUrl = null;
+  const factoryRecords = /* @__PURE__ */ new Map();
   let etag = null;
   let notesRef = null;
   let caughtUp = false;
@@ -21394,6 +21452,41 @@ function createWatcher(options) {
       awaiting.clear();
     }
     const me = { harness: options.harness, host: options.host(config2) };
+    if (config2.factoryApiUrl) {
+      if (factoryUrl !== config2.factoryApiUrl) {
+        factoryUrl = config2.factoryApiUrl;
+        factoryEtag = null;
+        factoryRecords.clear();
+        notes.clear();
+      }
+      try {
+        const poll2 = await pollFactory({ fetch: options.fetch, url: config2.factoryApiUrl, token: config2.factoryToken ?? "", etag: factoryEtag });
+        if (poll2.kind === "changed") {
+          factoryEtag = poll2.etag;
+          factoryRecords.clear();
+          notes.clear();
+          for (const record3 of poll2.releases) {
+            factoryRecords.set(record3.key, record3);
+            notes.set(record3.range?.to ?? record3.key, record3);
+          }
+        }
+        await writeHeartbeat(options.stateDir, options.harness, { pid: options.pid, polledAt: now, sha: options.sha });
+        const handled2 = [];
+        for (const [key, record3] of factoryRecords) {
+          const verdict = record3.verdict;
+          if (verdict?.verdict !== "red" || !isRecent(record3, now)) continue;
+          await attempt(route(record3, me, now), (action) => call({ action, text: factoryPrompt(action.role, record3, config2.factoryApiUrl ?? ""), title: `Incidente ${record3.release}`, drill: record3.drill === true, recordFailure: async () => {
+            log2.error(`Recall ${key} falhou; nenhuma git note foi escrita`);
+            return false;
+          } }, me), handled2);
+        }
+        await getToken().then((token2) => options.release.tick({ token: token2, notes, notesChanged: poll2.kind === "changed" })).catch((error62) => log2.warn(`release: ${describe3(error62)}`));
+        return { poll: poll2.kind, fetched: poll2.kind === "changed", blocked: null, blockedFetched: false, handled: handled2 };
+      } catch (error62) {
+        log2.warn(`factory: ${describe3(error62)}`);
+        return { poll: "error", fetched: false, blocked: null, blockedFetched: false, handled: [] };
+      }
+    }
     let auth;
     try {
       auth = await getToken();
@@ -21633,7 +21726,7 @@ var index_default = {
   // No dispose: the poller and the newest context outlive location eviction (see ./poller.ts).
   setup(ctx) {
     attach(registry2, ctx, {
-      sha: true ? "6baf568d711ffd8fa8660ab09f694e6c3b7a834f" : "unknown",
+      sha: true ? "4dda70014e2530905f62a252e2163205a1038616" : "unknown",
       stateDir: stateDirectory(),
       pid: process.pid,
       clock: { now: () => /* @__PURE__ */ new Date() },

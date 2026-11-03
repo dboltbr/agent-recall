@@ -6268,7 +6268,7 @@ function noteRollback(note) {
   return {
     outcome: typeof rollback["outcome"] === "string" ? rollback["outcome"] : "pending",
     target: typeof rollback["target"] === "string" ? rollback["target"] : null,
-    frozen: !note.resolvedBy && note.drill !== true
+    frozen: typeof note.frozen === "boolean" ? note.frozen : !note.resolvedBy && note.drill !== true
   };
 }
 function bySeverity(signals) {
