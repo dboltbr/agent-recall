@@ -307,6 +307,34 @@ export function createWatcher(options: WatcherOptions): Watcher {
     return { kind: poll.kind, fetched: true, fresh: true };
   }
 
+  async function processBlocked(config: HostConfig, auth: string, me: Me, now: Date, fetched: boolean, handled: Handled[], canPoll = true) {
+    const blockedPoll = canPoll ? await pollBlocked(config, auth) : null;
+    // A moved blocked ref refreshes the release history now: it is what closes a blocked call.
+    await options.release
+      .tick({ token: auth, notes, notesChanged: fetched || blockedPoll?.fetched === true })
+      .catch((error) => log.warn(`release: ${describe(error)}`));
+    const releases = releaseHistory(options.release.current());
+    // Routed only from notes fetched this tick (a cached copy may be stale: someone took it) and a
+    // release history refreshed this tick (an older one may miss the release that shipped);
+    // otherwise the notes wait for the next tick, unseen.
+    for (const [key, { raw, note }] of blockedPoll?.fresh ? blocked : []) {
+      if (blockedSeen.get(key) === raw) continue;
+      let actions: BlockedAction[];
+      try {
+        const shipped = shippedSince(note, releases);
+        if (shipped === null) continue;
+        actions = shipped || !isRecent(note, now) ? [] : routeBlocked(note, me);
+      } catch (error) {
+        // A note that cannot be routed (JSON from another repository) never stops the others.
+        log.error(`nota barrada ${key.slice(0, 12)}: ${describe(error)}`);
+        continue;
+      }
+      if (await attempt(actions, (action) => actBlocked(action, key, note, config, me, auth), handled)) blockedSeen.set(key, raw);
+    }
+    if (blockedPoll?.fresh) handled.push(...(await followUp(me, releases)));
+    return blockedPoll;
+  }
+
   async function tick(): Promise<TickReport> {
     const now = clock.now();
     let config: HostConfig;
@@ -333,8 +361,11 @@ export function createWatcher(options: WatcherOptions): Watcher {
     const me: Me = { harness: options.harness, host: options.host(config) };
     if (config.factoryApiUrl) {
       if (factoryUrl !== config.factoryApiUrl) { factoryUrl = config.factoryApiUrl; factoryEtag = null; factoryRecords.clear(); notes.clear(); }
+      const handled: Handled[] = [];
+      let kind: "changed" | "unchanged" | "error" = "error";
       try {
         const poll = await pollFactory({ fetch: options.fetch, url: config.factoryApiUrl, token: config.factoryToken ?? "", etag: factoryEtag });
+        kind = poll.kind;
         if (poll.kind === "changed") {
           factoryEtag = poll.etag;
           factoryRecords.clear();
@@ -342,19 +373,21 @@ export function createWatcher(options: WatcherOptions): Watcher {
           for (const record of poll.releases) { factoryRecords.set(record.key, record); notes.set(record.range?.to ?? record.key, record); }
         }
         await writeHeartbeat(options.stateDir, options.harness, { pid: options.pid, polledAt: now, sha: options.sha });
-        const handled: Handled[] = [];
         for (const [key, record] of factoryRecords) {
           const verdict = record.verdict as { verdict?: unknown } | null | undefined;
           if (verdict?.verdict !== "red" || !isRecent(record, now)) continue;
           // Reavaliar 304: o dono de rollback pendente é chamado após 10 min, como antes.
           await attempt(route(record, me, now), (action) => call({ action, text: factoryPrompt(action.role, record, config.factoryApiUrl ?? ""), title: `Incidente ${record.release}`, drill: record.drill === true, recordFailure: async () => { log.error(`Recall ${key} falhou; nenhuma git note foi escrita`); return false; } }, me), handled);
         }
-        // O tracker de publicação continua somente de leitura; a fonte de incidentes é a API.
-        await getToken().then((token) => options.release.tick({ token, notes, notesChanged: poll.kind === "changed" })).catch((error) => log.warn(`release: ${describe(error)}`));
-        return { poll: poll.kind, fetched: poll.kind === "changed", blocked: null, blockedFetched: false, handled };
+      } catch (error) { log.warn(`factory: ${describe(error)}`); }
+      // Releases barradas são uma fonte independente da IA-5, preservada até sua migração.
+      // Indisponibilidade da API de publicados não desliga os callbacks das barradas.
+      try {
+        const blockedPoll = await processBlocked(config, await getToken(), me, now, kind === "changed", handled);
+        return { poll: kind, fetched: kind === "changed", blocked: blockedPoll?.kind ?? null, blockedFetched: blockedPoll?.fetched === true, handled };
       } catch (error) {
-        log.warn(`factory: ${describe(error)}`);
-        return { poll: "error", fetched: false, blocked: null, blockedFetched: false, handled: [] };
+        log.warn(`releases barradas: ${describe(error)}`);
+        return { poll: kind, fetched: kind === "changed", blocked: null, blockedFetched: false, handled };
       }
     }
     let auth: string;
@@ -416,30 +449,7 @@ export function createWatcher(options: WatcherOptions): Watcher {
       if (!isRecent(note, now)) continue;
       await attempt(route(note, me, now), (action) => act(action, key, note, config, me, auth), handled);
     }
-    const blockedPoll = poll.kind === "error" && poll.status === 401 ? null : await pollBlocked(config, auth);
-    // A moved blocked ref refreshes the release history now: it is what closes a blocked call.
-    await options.release
-      .tick({ token: auth, notes, notesChanged: fetched || blockedPoll?.fetched === true })
-      .catch((error) => log.warn(`release: ${describe(error)}`));
-    const releases = releaseHistory(options.release.current());
-    // Routed only from notes fetched this tick (a cached copy may be stale: someone took it) and a
-    // release history refreshed this tick (an older one may miss the release that shipped);
-    // otherwise the notes wait for the next tick, unseen.
-    for (const [key, { raw, note }] of blockedPoll?.fresh ? blocked : []) {
-      if (blockedSeen.get(key) === raw) continue;
-      let actions: BlockedAction[];
-      try {
-        const shipped = shippedSince(note, releases);
-        if (shipped === null) continue;
-        actions = shipped || !isRecent(note, now) ? [] : routeBlocked(note, me);
-      } catch (error) {
-        // A note that cannot be routed (JSON from another repository) never stops the others.
-        log.error(`nota barrada ${key.slice(0, 12)}: ${describe(error)}`);
-        continue;
-      }
-      if (await attempt(actions, (action) => actBlocked(action, key, note, config, me, auth), handled)) blockedSeen.set(key, raw);
-    }
-    if (blockedPoll?.fresh) handled.push(...(await followUp(me, releases)));
+    const blockedPoll = await processBlocked(config, auth, me, now, fetched, handled, !(poll.kind === "error" && poll.status === 401));
     return { poll: poll.kind, fetched, blocked: blockedPoll?.kind ?? null, blockedFetched: blockedPoll?.fetched === true, handled };
   }
 

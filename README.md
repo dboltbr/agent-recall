@@ -24,8 +24,8 @@ notificados no próprio host. Prompts usam a faixa, evidências, rollback e `fro
 dry-run não afirma que a main está congelada. Falhas totais de entrega ficam no log local.
 
 A configuração é o passo de troca: hosts ainda sem `factoryApiUrl` continuam no modo atual
-abaixo. No modo factory não se consulta a ref de releases barradas; a migração desse fluxo
-é coordenada com IA-5. A tela OpenChamber tem um loader próprio ainda não migrado. A API
+abaixo. No modo factory a ref de releases barradas continua sendo consultada como fonte independente;
+a migração desse fluxo é coordenada com IA-5. Falha na API de publicados não desliga as barradas. A tela OpenChamber tem um loader próprio ainda não migrado. A API
 substitui a fonte de incidentes dos callbacks Paseo/OpenCode/Claude Code, sem mudar as UIs.
 
 ## O que faz
