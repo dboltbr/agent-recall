@@ -21428,6 +21428,26 @@ function createWatcher(options) {
     for (const { key, raw, note } of fetched) if (note) blocked.set(key, { raw, note });
     return { kind: poll.kind, fetched: true, fresh: true };
   }
+  async function processBlocked(config2, auth, me, now, fetched, handled, canPoll = true) {
+    const blockedPoll = canPoll ? await pollBlocked(config2, auth) : null;
+    await options.release.tick({ token: auth, notes, notesChanged: fetched || blockedPoll?.fetched === true }).catch((error62) => log2.warn(`release: ${describe3(error62)}`));
+    const releases = releaseHistory(options.release.current());
+    for (const [key, { raw, note }] of blockedPoll?.fresh ? blocked : []) {
+      if (blockedSeen.get(key) === raw) continue;
+      let actions;
+      try {
+        const shipped = shippedSince(note, releases);
+        if (shipped === null) continue;
+        actions = shipped || !isRecent(note, now) ? [] : routeBlocked(note, me);
+      } catch (error62) {
+        log2.error(`nota barrada ${key.slice(0, 12)}: ${describe3(error62)}`);
+        continue;
+      }
+      if (await attempt(actions, (action) => actBlocked(action, key, note, config2, me, auth), handled)) blockedSeen.set(key, raw);
+    }
+    if (blockedPoll?.fresh) handled.push(...await followUp(me, releases));
+    return blockedPoll;
+  }
   async function tick() {
     const now = clock.now();
     let config2;
@@ -21459,8 +21479,11 @@ function createWatcher(options) {
         factoryRecords.clear();
         notes.clear();
       }
+      const handled2 = [];
+      let kind = "error";
       try {
         const poll2 = await pollFactory({ fetch: options.fetch, url: config2.factoryApiUrl, token: config2.factoryToken ?? "", etag: factoryEtag });
+        kind = poll2.kind;
         if (poll2.kind === "changed") {
           factoryEtag = poll2.etag;
           factoryRecords.clear();
@@ -21471,7 +21494,6 @@ function createWatcher(options) {
           }
         }
         await writeHeartbeat(options.stateDir, options.harness, { pid: options.pid, polledAt: now, sha: options.sha });
-        const handled2 = [];
         for (const [key, record3] of factoryRecords) {
           const verdict = record3.verdict;
           if (verdict?.verdict !== "red" || !isRecent(record3, now)) continue;
@@ -21480,11 +21502,15 @@ function createWatcher(options) {
             return false;
           } }, me), handled2);
         }
-        await getToken().then((token2) => options.release.tick({ token: token2, notes, notesChanged: poll2.kind === "changed" })).catch((error62) => log2.warn(`release: ${describe3(error62)}`));
-        return { poll: poll2.kind, fetched: poll2.kind === "changed", blocked: null, blockedFetched: false, handled: handled2 };
       } catch (error62) {
         log2.warn(`factory: ${describe3(error62)}`);
-        return { poll: "error", fetched: false, blocked: null, blockedFetched: false, handled: [] };
+      }
+      try {
+        const blockedPoll2 = await processBlocked(config2, await getToken(), me, now, kind === "changed", handled2);
+        return { poll: kind, fetched: kind === "changed", blocked: blockedPoll2?.kind ?? null, blockedFetched: blockedPoll2?.fetched === true, handled: handled2 };
+      } catch (error62) {
+        log2.warn(`releases barradas: ${describe3(error62)}`);
+        return { poll: kind, fetched: kind === "changed", blocked: null, blockedFetched: false, handled: handled2 };
       }
     }
     let auth;
@@ -21542,23 +21568,7 @@ function createWatcher(options) {
       if (!isRecent(note, now)) continue;
       await attempt(route(note, me, now), (action) => act(action, key, note, config2, me, auth), handled);
     }
-    const blockedPoll = poll.kind === "error" && poll.status === 401 ? null : await pollBlocked(config2, auth);
-    await options.release.tick({ token: auth, notes, notesChanged: fetched || blockedPoll?.fetched === true }).catch((error62) => log2.warn(`release: ${describe3(error62)}`));
-    const releases = releaseHistory(options.release.current());
-    for (const [key, { raw, note }] of blockedPoll?.fresh ? blocked : []) {
-      if (blockedSeen.get(key) === raw) continue;
-      let actions;
-      try {
-        const shipped = shippedSince(note, releases);
-        if (shipped === null) continue;
-        actions = shipped || !isRecent(note, now) ? [] : routeBlocked(note, me);
-      } catch (error62) {
-        log2.error(`nota barrada ${key.slice(0, 12)}: ${describe3(error62)}`);
-        continue;
-      }
-      if (await attempt(actions, (action) => actBlocked(action, key, note, config2, me, auth), handled)) blockedSeen.set(key, raw);
-    }
-    if (blockedPoll?.fresh) handled.push(...await followUp(me, releases));
+    const blockedPoll = await processBlocked(config2, auth, me, now, fetched, handled, !(poll.kind === "error" && poll.status === 401));
     return { poll: poll.kind, fetched, blocked: blockedPoll?.kind ?? null, blockedFetched: blockedPoll?.fetched === true, handled };
   }
   function start(intervalMs = POLL_INTERVAL_MS) {
@@ -21726,7 +21736,7 @@ var index_default = {
   // No dispose: the poller and the newest context outlive location eviction (see ./poller.ts).
   setup(ctx) {
     attach(registry2, ctx, {
-      sha: true ? "4dda70014e2530905f62a252e2163205a1038616" : "unknown",
+      sha: true ? "8d5d4402b9140d3245fd9a692248cdcea5560dec" : "unknown",
       stateDir: stateDirectory(),
       pid: process.pid,
       clock: { now: () => /* @__PURE__ */ new Date() },
