@@ -38,6 +38,7 @@ export async function loadConfig(path = configPath()): Promise<HostConfig> {
   const notesRef = text("notesRef", "refs/notes/release-watch");
   return {
     instance,
+    ...(text("factoryApiUrl", "") ? { factoryApiUrl: text("factoryApiUrl", ""), factoryToken: process.env["FACTORY_RECALL_TOKEN"] ?? text("factoryToken", "") } : {}),
     repository: text("repository", "dboltbr/dbolt"),
     notesRef,
     // A drill reads the drill refs of both kinds unless the config names the blocked one.

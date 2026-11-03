@@ -3,6 +3,31 @@
 Plugin do Paseo, do OpenCode e do Claude Code que chama de volta o agente responsável quando uma
 release do `dboltbr/dbolt` fica vermelha ou é barrada antes da produção.
 
+## Fonte factory (IA-6)
+
+Para migrar este host, adicione `factoryApiUrl` à configuração local:
+
+```json
+{
+  "instance": "meu-host",
+  "repository": "dboltbr/dbolt",
+  "factoryApiUrl": "https://<factory>/releases/recall"
+}
+```
+
+Forneça `FACTORY_RECALL_TOKEN` ao processo do plugin; `factoryToken` no arquivo local
+protegido também é aceito. Este branch não instala, recarrega ou altera configuração do host.
+A API exige bearer, consulta a cada 30 s com ETag e deadline de 10 s incluindo o corpo.
+Falha de autenticação/rede/schema não consulta git notes como fallback. O callback mantém a
+trava por release/sessão/papel, o dono aguardando desfecho de rollback por até 10 min e os
+notificados no próprio host. Prompts usam a faixa, evidências, rollback e `frozen` da API;
+dry-run não afirma que a main está congelada. Falhas totais de entrega ficam no log local.
+
+A configuração é o passo de troca: hosts ainda sem `factoryApiUrl` continuam no modo atual
+abaixo. No modo factory não se consulta a ref de releases barradas; a migração desse fluxo
+é coordenada com IA-5. A tela OpenChamber tem um loader próprio ainda não migrado. A API
+substitui a fonte de incidentes dos callbacks Paseo/OpenCode/Claude Code, sem mudar as UIs.
+
 ## O que faz
 
 - A cada 30 s consulta as refs `refs/notes/release-watch` (incidentes) e `refs/notes/release-blocked`

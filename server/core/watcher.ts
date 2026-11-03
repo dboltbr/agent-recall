@@ -1,3 +1,4 @@
+import { pollFactory, factoryPrompt, type FactoryRecord } from "./factory-api.ts";
 import { join } from "node:path";
 import { blockedPrompt, deliver, promptFor, type Delivery, type Failure, type Outcome } from "./deliver.ts";
 import { acquireLock, writeHandoff, writeHeartbeat } from "./host.ts";
@@ -96,6 +97,9 @@ interface Awaiting {
 
 export function createWatcher(options: WatcherOptions): Watcher {
   const { clock, exec, log } = options;
+  let factoryEtag: string | null = null;
+  let factoryUrl: string | null = null;
+  const factoryRecords = new Map<string, FactoryRecord>();
   let etag: string | null = null;
   let notesRef: string | null = null;
   let caughtUp = false;
@@ -327,6 +331,32 @@ export function createWatcher(options: WatcherOptions): Watcher {
       awaiting.clear();
     }
     const me: Me = { harness: options.harness, host: options.host(config) };
+    if (config.factoryApiUrl) {
+      if (factoryUrl !== config.factoryApiUrl) { factoryUrl = config.factoryApiUrl; factoryEtag = null; factoryRecords.clear(); notes.clear(); }
+      try {
+        const poll = await pollFactory({ fetch: options.fetch, url: config.factoryApiUrl, token: config.factoryToken ?? "", etag: factoryEtag });
+        if (poll.kind === "changed") {
+          factoryEtag = poll.etag;
+          factoryRecords.clear();
+          notes.clear();
+          for (const record of poll.releases) { factoryRecords.set(record.key, record); notes.set(record.range?.to ?? record.key, record); }
+        }
+        await writeHeartbeat(options.stateDir, options.harness, { pid: options.pid, polledAt: now, sha: options.sha });
+        const handled: Handled[] = [];
+        for (const [key, record] of factoryRecords) {
+          const verdict = record.verdict as { verdict?: unknown } | null | undefined;
+          if (verdict?.verdict !== "red" || !isRecent(record, now)) continue;
+          // Reavaliar 304: o dono de rollback pendente é chamado após 10 min, como antes.
+          await attempt(route(record, me, now), (action) => call({ action, text: factoryPrompt(action.role, record, config.factoryApiUrl ?? ""), title: `Incidente ${record.release}`, drill: record.drill === true, recordFailure: async () => { log.error(`Recall ${key} falhou; nenhuma git note foi escrita`); return false; } }, me), handled);
+        }
+        // O tracker de publicação continua somente de leitura; a fonte de incidentes é a API.
+        await getToken().then((token) => options.release.tick({ token, notes, notesChanged: poll.kind === "changed" })).catch((error) => log.warn(`release: ${describe(error)}`));
+        return { poll: poll.kind, fetched: poll.kind === "changed", blocked: null, blockedFetched: false, handled };
+      } catch (error) {
+        log.warn(`factory: ${describe(error)}`);
+        return { poll: "error", fetched: false, blocked: null, blockedFetched: false, handled: [] };
+      }
+    }
     let auth: string;
     try {
       auth = await getToken();

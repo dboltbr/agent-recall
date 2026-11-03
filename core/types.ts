@@ -39,6 +39,8 @@ export interface NoteRollback {
 
 /** Body of a `refs/notes/release-watch` note, keyed by the commit of tag `release-<n>`. */
 export interface Note {
+  /** Autoridade explícita da API; ensaio não congela main. */
+  readonly frozen?: boolean;
   readonly release: string | number;
   /** The watch verdict object (`{verdict, sources, missing, at}`); read through release-status. */
   readonly verdict?: unknown;
@@ -83,6 +85,9 @@ export interface BlockedNote {
 
 /** `~/.config/agent-recall/config.json`. */
 export interface HostConfig {
+  /** Ao migrar o host, a fonte de incidentes passa a ser exclusivamente a API da factory. */
+  readonly factoryApiUrl?: string;
+  readonly factoryToken?: string;
   readonly instance: string;
   readonly repository: string;
   readonly notesRef: string;

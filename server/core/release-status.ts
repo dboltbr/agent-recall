@@ -459,7 +459,7 @@ export function noteRollback(note: Note): Release["rollback"] {
   return {
     outcome: typeof rollback["outcome"] === "string" ? (rollback["outcome"] as string) : "pending",
     target: typeof rollback["target"] === "string" ? (rollback["target"] as string) : null,
-    frozen: !note.resolvedBy && note.drill !== true,
+    frozen: typeof note.frozen === "boolean" ? note.frozen : !note.resolvedBy && note.drill !== true,
   };
 }
 

@@ -614,6 +614,7 @@ export function createClaudeWatcher(deps: ClaudeDeps): ClaudeWatcher {
       const reason = `prompt: ${blocked ? "sem confirmação" : "não pego"}; fallback: ${describe(error)}`;
       log.error(`não consegui chamar ${formatSession(target)} para ${request.release} (${request.role}): ${reason}`);
       if (!found || !config) return;
+      if (config.factoryApiUrl) { log.error(`${request.release}: falha no recall da factory; nenhuma git note foi escrita`); return; }
       try {
         const landed = await recordRecallFailure({
           exec: deps.exec,
