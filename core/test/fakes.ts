@@ -96,10 +96,11 @@ export function fakeGitHub(refs: RefReply[], blocked: RefReply[] = [{ status: 40
  * git/gh fake serving `notes` (key → body) on the incident ref and `behaviour.blocked` on any
  * `release-blocked` ref, through `notes list`, `notes show` and `cat-file --batch`. `notes add` +
  * `push` record what the plugin wrote (and on which ref); `push: "reject"` loses every CAS.
+ * `applyBlocked`: a blocked write replaces the note `blocked()` serves (the map must be mutable).
  */
 export function fakeExec(
   notes: () => Record<string, Note | string>,
-  behaviour: { push?: "ok" | "reject"; blocked?: () => Record<string, BlockedNote | string> } = {},
+  behaviour: { push?: "ok" | "reject"; blocked?: () => Record<string, BlockedNote | string>; applyBlocked?: boolean } = {},
 ) {
   const calls: string[][] = [];
   const written: Array<{ key: string; ref: string; body: Record<string, unknown> }> = [];
@@ -139,7 +140,10 @@ export function fakeExec(
     if (sub === "notes") return ok(entries.map((e) => `${e.blob} ${e.key}`).join("\n"));
     if (sub === "push") {
       if (behaviour.push === "reject") return { code: 1, stdout: "", stderr: " ! [rejected] (fetch first)" };
-      if (staged) written.push(staged);
+      if (staged) {
+        written.push(staged);
+        if (behaviour.applyBlocked && staged.ref.includes("release-blocked")) behaviour.blocked!()[staged.key] = staged.body as unknown as BlockedNote;
+      }
       return ok();
     }
     if (sub === "cat-file") {
@@ -159,11 +163,50 @@ export function fakeExec(
 export interface Recorded {
   prompts: Array<{ target: SessionRef; text: string }>;
   fallbacks: Array<{ target: SessionRef; text: string }>;
+  opened: Array<{ directory: string; text: string; title: string }>;
+  asked: string[];
 }
 
-export function fakeDelivery(behaviour: { prompt?: "ok" | "refuse"; fallback?: "ok" | "refuse" } = {}) {
-  const recorded: Recorded = { prompts: [], fallbacks: [] };
+/**
+ * `roots`: lane id → parent id (gives the delivery `resolveRoot`). `working`: gives `isWorking`
+ * (session ids that work). `open`: gives `open`, which answers `ses_incident` or refuses.
+ */
+export function fakeDelivery(
+  behaviour: {
+    prompt?: "ok" | "refuse";
+    fallback?: "ok" | "refuse";
+    roots?: Record<string, string>;
+    working?: readonly string[];
+    open?: "ok" | "refuse";
+  } = {},
+) {
+  const recorded: Recorded = { prompts: [], fallbacks: [], opened: [], asked: [] };
+  const extra: Partial<Delivery> = {};
+  const roots = behaviour.roots;
+  if (roots) {
+    extra.resolveRoot = async (target) => {
+      let id = target.id;
+      while (roots[id]) id = roots[id]!;
+      return { ...target, id };
+    };
+  }
+  const working = behaviour.working;
+  if (working) {
+    extra.isWorking = async (target) => {
+      recorded.asked.push(target.id);
+      return working.includes(target.id);
+    };
+  }
+  const open = behaviour.open;
+  if (open) {
+    extra.open = async (directory, text, title) => {
+      recorded.opened.push({ directory, text, title });
+      if (open === "refuse") throw new Error("abrir recusado");
+      return "ses_incident";
+    };
+  }
   const delivery: Delivery = {
+    ...extra,
     async prompt(target, text) {
       recorded.prompts.push({ target, text });
       if (behaviour.prompt === "refuse") throw new Error("prompt recusado");

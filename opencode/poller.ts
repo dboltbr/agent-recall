@@ -14,14 +14,22 @@ import type { Delivery } from "../core/deliver.ts";
 import { acquireHostLock, readHandoffs, type HostLock } from "../core/host.ts";
 import { describe } from "../core/poll.ts";
 import { createReleaseSource, createReleaseTracker } from "../core/release-fetch.ts";
+import { HEARTBEAT_MS } from "../core/route.ts";
 import type { Clock, Exec, Fetch, HostConfig, Logger, SessionRef } from "../core/types.ts";
 import { createWatcher, type Watcher } from "../core/watcher.ts";
 
 /** The slice of the OpenCode plugin context this plugin uses (runtime objects carry more). */
 export interface SessionInfo {
   readonly id: string;
+  /** The session that spawned this one (a subagent's lane). */
+  readonly parentID?: string;
   readonly location?: { readonly directory?: string };
+  /** Epoch ms: `busy` is the start of the current or last turn, `idle` its end. */
+  readonly time?: { readonly updated?: number; readonly busy?: number; readonly idle?: number };
 }
+
+/** Child sessions are followed this deep at most (a cycle cannot loop). */
+const MAX_DEPTH = 10;
 export interface Context {
   readonly location?: { readonly directory?: string };
   readonly session: {
@@ -113,6 +121,25 @@ export function createDelivery(registry: Registry): Delivery {
   return {
     async prompt(target: SessionRef, text: string) {
       await context().session.prompt({ sessionID: target.id, text });
+    },
+    async resolveRoot(target: SessionRef) {
+      const ctx = context();
+      let id = target.id;
+      for (let depth = 0; depth < MAX_DEPTH; depth++) {
+        const parent = (await ctx.session.get({ sessionID: id })).parentID;
+        if (!parent || parent === id) break;
+        id = parent;
+      }
+      return { ...target, id };
+    },
+    async isWorking(target: SessionRef) {
+      const time = (await context().session.get({ sessionID: target.id })).time;
+      if (!time) return false;
+      if (typeof time.busy === "number" && (typeof time.idle !== "number" || time.busy > time.idle)) return true;
+      return typeof time.updated === "number" && Date.now() - time.updated < HEARTBEAT_MS;
+    },
+    async open(directory: string, text: string, title: string) {
+      return promptNew(await context().session.create({ title, location: { directory } }), text);
     },
     async fallback(target: SessionRef, text: string, title: string) {
       const ctx = context();

@@ -1,7 +1,8 @@
-// Self-update at startup. OpenCode only checks package plugins on restart (it never installs the
-// newer revision) and Paseo only updates on `paseo plugin update`, so each adapter asks its own
-// harness, once per process and in the background, to install the newest revision. The new code
-// runs on the next OpenCode restart; Paseo activates it right away. Failures are only logged.
+// Self-update. OpenCode only checks package plugins on restart (it never installs the newer
+// revision), Paseo only updates on `paseo plugin update` and Claude Code on `claude plugin update`,
+// so each adapter asks its own harness, in the background at start and every 30 min, to install
+// the newest revision. The new code runs on the next OpenCode restart or Claude Code session start;
+// Paseo activates it right away. Failures are only logged.
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { basename, dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -29,6 +30,47 @@ export type UpdateResult = "local" | "pinned" | "current" | "updated" | "throttl
 export function firstIn(scope: Record<symbol, unknown>, key: symbol): boolean {
   if (scope[key]) return false;
   scope[key] = true;
+  return true;
+}
+
+/** A long-lived host checks for a new plugin this often, besides at start. */
+export const UPDATE_INTERVAL_MS = 30 * 60_000;
+
+export interface UpdateTimer {
+  /** Repeats `run` every `ms`; must not keep the process alive (unref'd). */
+  every(run: () => void, ms: number): void;
+}
+
+const unrefTimer: UpdateTimer = {
+  every: (run, ms) => void setInterval(run, ms).unref(),
+};
+
+/**
+ * Runs `update` now and every 30 min, once per process (`firstIn`): a reloaded plugin does not
+ * start a second schedule. A run still going when the next is due is not overlapped. Errors are
+ * the update's to log; a rejection here is swallowed so the schedule goes on.
+ */
+export function scheduleUpdates(
+  scope: Record<symbol, unknown>,
+  key: symbol,
+  update: () => Promise<unknown>,
+  timer: UpdateTimer = unrefTimer,
+  intervalMs = UPDATE_INTERVAL_MS,
+): boolean {
+  if (!firstIn(scope, key)) return false;
+  let running = false;
+  const tick = () => {
+    if (running) return;
+    running = true;
+    void Promise.resolve()
+      .then(update)
+      .catch(() => undefined)
+      .finally(() => {
+        running = false;
+      });
+  };
+  tick();
+  timer.every(tick, intervalMs);
   return true;
 }
 
@@ -213,6 +255,64 @@ export async function updatePaseo(deps: PaseoUpdateDeps): Promise<UpdateResult> 
     if (applied.code !== 0) {
       log.warn(`autoatualização: paseo plugin update --yes saiu ${applied.code}: ${lastLine(applied.stderr || applied.stdout)}`);
       return "failed";
+    }
+    return "updated";
+  } catch (error) {
+    log.warn(`autoatualização: ${describe(error)}`);
+    return "failed";
+  }
+}
+
+export interface ClaudeUpdateDeps {
+  readonly exec: Exec;
+  readonly log: Logger;
+  readonly clock: Clock;
+  /** The Claude Code CLI. */
+  readonly claude: string;
+  /** Holds `claude.update`, the host's last attempt. */
+  readonly stateDir: string;
+}
+
+/** The Claude Code marketplace and plugin this repository publishes. */
+export const CLAUDE_MARKETPLACE = PACKAGE;
+export const CLAUDE_PLUGIN = `${PACKAGE}@${CLAUDE_MARKETPLACE}`;
+
+/**
+ * `claude plugin marketplace update` + `claude plugin update`, for a marketplace installed from
+ * GitHub (a directory marketplace is a dev checkout: nothing to update). Claude Code has no
+ * long-lived process: the poller holder runs this, and the host attempts it at most once per
+ * 30 min (`claude.update`), however many watchers come and go. Sessions load the new revision on
+ * their next start.
+ */
+export async function updateClaude(deps: ClaudeUpdateDeps): Promise<UpdateResult> {
+  const { exec, log, clock } = deps;
+  const started = clock.now().getTime();
+  const remaining = (): number => Math.max(1_000, UPDATE_DEADLINE_MS - (clock.now().getTime() - started));
+  const claude = (args: string[]) => exec(deps.claude, ["plugin", ...args], { timeoutMs: remaining() });
+  try {
+    const marker = join(deps.stateDir, "claude.update");
+    const last = await readAttempt(marker);
+    if (last && clock.now().getTime() - Date.parse(last.at) < UPDATE_INTERVAL_MS) return "throttled";
+    await writeAttempt(marker, { commit: "", at: clock.now().toISOString() });
+    const listed = await claude(["marketplace", "list", "--json"]);
+    if (listed.code !== 0) {
+      log.warn(`autoatualização: claude plugin marketplace list saiu ${listed.code}: ${lastLine(listed.stderr || listed.stdout)}`);
+      return "failed";
+    }
+    const marketplaces = JSON.parse(listed.stdout) as Array<{ name?: unknown; source?: unknown }>;
+    const mine = marketplaces.find((item) => item.name === CLAUDE_MARKETPLACE);
+    if (!mine) throw new Error(`marketplace ${CLAUDE_MARKETPLACE} ausente do Claude Code`);
+    if (mine.source !== "github" && mine.source !== "git") {
+      log.info(`autoatualização: marketplace ${String(mine.source)}, nada a atualizar`);
+      return "local";
+    }
+    for (const args of [["marketplace", "update", CLAUDE_MARKETPLACE], ["update", CLAUDE_PLUGIN, "--scope", "user"]]) {
+      const result = await claude(args);
+      if (result.code !== 0) {
+        log.warn(`autoatualização: claude plugin ${args.join(" ")} saiu ${result.code}: ${lastLine(result.stderr || result.stdout)}`);
+        return "failed";
+      }
+      if (args[0] === "update") log.info(`autoatualização: ${lastLine(result.stdout) || "em dia"}`);
     }
     return "updated";
   } catch (error) {

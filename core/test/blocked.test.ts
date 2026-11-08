@@ -76,7 +76,7 @@ test("routeBlocked: uma sessão identificada, mesmo com merge sem trailer → el
   assert.deepEqual(routeBlocked(blockedNote(), { ...me, host: "outro" }), [], "a sessão é de outro host");
 });
 
-test("routeBlocked: várias sessões → a do commit da cabeça; nenhuma → ninguém", () => {
+test("routeBlocked: várias sessões → a do commit da cabeça, senão a primeira da nota; nenhuma → ninguém", () => {
   const paseo: Me = { harness: "paseo", host: "srv_archdev" };
   const mac: Me = { harness: "claude", host: "mac" };
   // `range.to` is the Mac session's commit: it is the one called, the Paseo agent is not.
@@ -85,10 +85,13 @@ test("routeBlocked: várias sessões → a do commit da cabeça; nenhuma → nin
     { kind: "blocked", release: "release-352", role: "blocked", target: { harness: "claude", host: "mac", id: "ses-mac" }, lock: "ses-mac.blocked" },
   ]);
   assert.deepEqual(routeBlocked(headIsMac, paseo), []);
-  // The head is a GitHub merge without Agent-Session: none of the several is the head's.
+  // The head is a GitHub merge without Agent-Session: the first in note order (the CI lists them
+  // by their newest commit, newest first) is the one nearest the head.
   const headless: BlockedNote = { ...twoSessions, range: { from: null, to: "9a9a9a9a" } };
   assert.deepEqual(routeBlocked(headless, mac), []);
-  assert.deepEqual(routeBlocked(headless, paseo), []);
+  assert.deepEqual(routeBlocked(headless, paseo), [
+    { kind: "blocked", release: "release-352", role: "blocked", target: { harness: "paseo", host: "srv_archdev", id: "agent-a" }, lock: "agent-a.blocked" },
+  ]);
   assert.deepEqual(routeBlocked(blockedNote({ sessions: [] }), me), [], "só commits humanos ou merges");
 });
 test("routeBlocked: fix-pending chama a sessão de cada culpado no host dela, salvo o owner", () => {
@@ -135,10 +138,12 @@ async function setup(options: {
   harness?: "opencode" | "paseo";
   stateDir?: string;
   log?: ReturnType<typeof recordingLog>;
+  /** Blocked writes land on `blocked` (the next fetch reads them). */
+  apply?: boolean;
 }) {
   const stateDir = options.stateDir ?? (await tempState());
   const configFile = await writeConfig(await tempState(), { ...config, ...options.config });
-  const git = fakeExec(() => ({}), { blocked: () => options.blocked });
+  const git = fakeExec(() => ({}), { blocked: () => options.blocked, applyBlocked: options.apply });
   const github = fakeGitHub([{ status: 404 }], options.blockedRefs ?? [{ status: 200, etag: '"b1"' }, { status: 304 }]);
   const delivery = options.delivery ?? fakeDelivery();
   const clock = fixedClock();

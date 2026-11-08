@@ -43,6 +43,8 @@ export async function loadConfig(path = configPath()): Promise<HostConfig> {
     notesRef,
     // A drill reads the drill refs of both kinds unless the config names the blocked one.
     blockedRef: text("blockedRef", notesRef.endsWith("-drill") ? "refs/notes/release-blocked-drill" : "refs/notes/release-blocked"),
+    // An incident host without a checkout to open the agent in is not one.
+    ...(value["incidentHost"] === true && text("incidentCheckout", "") ? { incidentHost: true, incidentCheckout: text("incidentCheckout", "") } : {}),
   };
 }
 

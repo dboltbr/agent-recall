@@ -3,7 +3,7 @@
 import { nodeExec } from "../core/exec.ts";
 import { loadConfig, stateDirectory } from "../core/host.ts";
 import { POLL_INTERVAL_MS } from "../core/poll.ts";
-import { firstIn, openCodeCommand, updateOpenCode } from "../core/self-update.ts";
+import { openCodeCommand, scheduleUpdates, updateOpenCode } from "../core/self-update.ts";
 import type { Logger } from "../core/types.ts";
 import { attach, registryIn, type Context, type Timer } from "./poller.ts";
 
@@ -42,16 +42,17 @@ export default {
       timer,
       probeTimeoutMs: 10_000,
     });
-    // Once per process, in the background: OpenCode loads the new revision on its next restart.
-    if (firstIn(globalThis as Record<symbol, unknown>, updateKey)) {
-      void updateOpenCode({
+    // Now and every 30 min, once per process, in the background: OpenCode loads the new revision
+    // on its next restart.
+    scheduleUpdates(globalThis as Record<symbol, unknown>, updateKey, () =>
+      updateOpenCode({
         exec: nodeExec,
         log,
         clock: { now: () => new Date() },
         sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms).unref()),
         moduleUrl: import.meta.url,
         command: openCodeCommand(process.execPath),
-      });
-    }
+      }),
+    );
   },
 };

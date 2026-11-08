@@ -83,6 +83,8 @@ export interface RecallFailure {
   readonly rollback?: string | null;
   /** Blocked-release note: the state the call was for. */
   readonly state?: string;
+  /** Blocked-release note: no session of the range, nor the incident host, took it. Written once. */
+  readonly abandoned?: boolean;
 }
 
 export interface RecordFailureInput extends FetchNotesInput {
@@ -90,21 +92,42 @@ export interface RecordFailureInput extends FetchNotesInput {
   readonly recall: RecallFailure;
 }
 
+export interface UpdateNoteInput extends FetchNotesInput {
+  readonly key: string;
+  /**
+   * The new body from the one on the remote right now, or null to leave the note as it is. Runs
+   * again on every lost race, on the body that won: each write re-decides.
+   */
+  readonly edit: (body: Record<string, unknown>) => Record<string, unknown> | null;
+}
+
+/** `written`; `unchanged` (the edit declined); `gone` (no note, or not JSON); `lost` (3 races lost). */
+export type UpdateResult = "written" | "unchanged" | "gone" | "lost";
+
 const PUSH_ATTEMPTS = 3;
 const REJECTED = /rejected|non-fast-forward|fetch first|failed to update ref|cannot lock ref/i;
 
 /**
- * Writes `recall` (and `updatedAt`) into the note of `key`. CAS is git: the push without
- * `--force` only lands as a fast-forward; a rejection re-fetches, re-reads and retries. False when
- * the note is gone or the push keeps losing.
+ * Writes `recall` (and `updatedAt`) into the note of `key` (`updateNote`). False when the note is
+ * gone or the push keeps losing.
  */
 export async function recordRecallFailure(input: RecordFailureInput): Promise<boolean> {
+  const result = await updateNote({ ...input, edit: (body) => ({ ...body, recall: input.recall, updatedAt: input.recall.failedAt }) });
+  return result === "written";
+}
+
+/**
+ * Compare-and-swap on the note of `key`. CAS is git: the push without `--force` only lands as a
+ * fast-forward; a rejection re-fetches, re-reads, runs `edit` again and retries.
+ */
+export async function updateNote(input: UpdateNoteInput): Promise<UpdateResult> {
   const { exec, gitDir, notesRef, key } = input;
   for (let attempt = 0; attempt < PUSH_ATTEMPTS; attempt++) {
     await fetchRef(input);
     const shown = await exec("git", ["--git-dir", gitDir, "notes", "--ref", notesRef, "show", key], { timeoutMs: 10_000 });
-    if (shown.code !== 0 || !parseNote(shown.stdout)) return false;
-    const body = { ...(JSON.parse(shown.stdout) as Record<string, unknown>), recall: input.recall, updatedAt: input.recall.failedAt };
+    if (shown.code !== 0 || !parseNote(shown.stdout)) return "gone";
+    const body = input.edit(JSON.parse(shown.stdout) as Record<string, unknown>);
+    if (!body) return "unchanged";
     const identity = {
       GIT_AUTHOR_NAME: "agent-recall",
       GIT_AUTHOR_EMAIL: "agent-recall@dbolt.invalid",
@@ -121,10 +144,10 @@ export async function recordRecallFailure(input: RecordFailureInput): Promise<bo
       timeoutMs: FETCH_TIMEOUT_MS,
       env: gitEnv(input.token),
     });
-    if (pushed.code === 0) return true;
+    if (pushed.code === 0) return "written";
     if (!REJECTED.test(pushed.stderr)) throw new Error(`git push ${notesRef} falhou: ${pushed.stderr.trim()}`);
   }
-  return false;
+  return "lost";
 }
 
 /** `git notes list` lines: `<note blob> <annotated object>`. */

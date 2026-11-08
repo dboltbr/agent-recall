@@ -7,6 +7,7 @@ import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
 import { nodeExec } from "../core/exec.ts";
 import { isAlive, loadConfig, stateDirectory } from "../core/host.ts";
+import { updateClaude } from "../core/self-update.ts";
 import type { Logger } from "../core/types.ts";
 import { createClaudeWatcher, parseHookInput, recordSession, runWatcher } from "./watch.ts";
 
@@ -108,6 +109,7 @@ async function main(): Promise<number> {
     alive: isAlive,
     projectsDir: join(process.env["CLAUDE_CONFIG_DIR"] || join(home, ".claude"), "projects"),
     claude: claudeCommand(home),
+    update: () => updateClaude({ exec: nodeExec, log, clock, claude: claudeCommand(home), stateDir }),
   });
   // `/exit` SIGTERMs live hooks: leave at once; the kernel frees the host locks, and the next
   // poller redoes whatever the poll in flight left half-done.

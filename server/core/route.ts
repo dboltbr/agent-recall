@@ -7,6 +7,14 @@ export const CATCH_UP_MS = 8 * 60 * 60 * 1000;
 /** A delivered blocked call the note does not confirm in this long goes to the fallback copy. */
 export const ACK_TIMEOUT_MS = 2 * 60_000;
 /**
+ * A blocked note's lease: the holder (`owner` in `investigating`, `fix.session` in `fix-pending`)
+ * keeps it while its newest sign (`heartbeatAt`, `updatedAt`) is younger than this; a red note, or a
+ * `fix-pending` one without `fix.session`, whose `updatedAt` is older has a target that never took it.
+ */
+export const LEASE_MS = 20 * 60_000;
+/** The holder's plugin writes `heartbeatAt` once the newest sign is this old and the session works. */
+export const HEARTBEAT_MS = 10 * 60_000;
+/**
  * How long the owner's call waits for the watch to record how the rollback ended. The watch gives
  * Flux 5 min to apply the revert; past this a `pending` note means the watch died mid-rollback,
  * and the owner is called with what the note says.
@@ -21,7 +29,15 @@ export type Action =
    * (`blocked`), or a suspect's session once the investigation named it (`fix`). Both get the same
    * prompt; the skill reads the note state.
    */
-  | { readonly kind: "blocked"; readonly release: string; readonly role: "blocked" | "fix"; readonly target: SessionRef; readonly lock: string };
+  | {
+      readonly kind: "blocked";
+      readonly release: string;
+      readonly role: "blocked" | "fix";
+      readonly target: SessionRef;
+      readonly lock: string;
+      /** The note's session `target` stands in for when that one is a lane (`target` is its root). */
+      readonly candidate?: SessionRef;
+    };
 
 /** A call that comes from an incident note. */
 export type NoteAction = Extract<Action, { readonly kind: "recall" }>;
@@ -52,6 +68,11 @@ export function notifiedSessions(note: Note): SessionRef[] {
 export function isRecent(note: Pick<Note | BlockedNote, "updatedAt">, now: Date): boolean {
   const at = Date.parse(note.updatedAt);
   return Number.isFinite(at) && now.getTime() - at <= CATCH_UP_MS;
+}
+
+/** A blocked note is also recent while its holder's heartbeat is: a long investigation stays live. */
+export function isBlockedRecent(note: BlockedNote, now: Date): boolean {
+  return isRecent(note, now) || (typeof note.heartbeatAt === "string" && isRecent({ updatedAt: note.heartbeatAt }, now));
 }
 
 /** The rollback has an outcome, or waited long enough (`ROLLBACK_WAIT_MS` since the verdict). */
@@ -118,17 +139,134 @@ function blockedSessions(note: BlockedNote): { ref: SessionRef; commits: readonl
   return out;
 }
 
+/** The sessions in the note's `expired`, as `<harness>/<host>/<id>`. */
+export function expiredSessions(note: BlockedNote): Set<string> {
+  const out = new Set<string>();
+  for (const entry of list(note.expired)) {
+    const session = entry && typeof entry === "object" ? text((entry as { session?: unknown }).session) : null;
+    if (session) out.add(session);
+  }
+  return out;
+}
+
 /**
- * Who a red blocked release calls: the one identified session of the range (commits without a
- * trailer are not in `sessions`); with several, the session of the head commit (`range.to`), as
- * the incident's owner rule; none of them → nobody (the failed run tells the human).
+ * The range's sessions nearest the head first: the head commit's session (`range.to`), then note
+ * order (the CI lists them by their newest commit, newest first).
+ */
+export function blockedCandidates(note: BlockedNote): SessionRef[] {
+  const sessions = blockedSessions(note);
+  const head = text((note.range as { to?: unknown } | null | undefined)?.to);
+  const atHead = head ? sessions.findIndex((entry) => entry.commits.some((commit) => sameCommit(commit, head))) : -1;
+  if (atHead > 0) sessions.unshift(...sessions.splice(atHead, 1));
+  return sessions.map((entry) => entry.ref);
+}
+
+/**
+ * Who a red blocked release calls: the range's session nearest the head that is not in `expired`
+ * (commits without a trailer are not in `sessions`); none → nobody here (no session at all: the
+ * failed run tells the human; all expired: the incident host).
  */
 export function blockedTarget(note: BlockedNote): SessionRef | null {
-  const sessions = blockedSessions(note);
-  if (sessions.length === 1) return sessions[0]!.ref;
-  const head = text((note.range as { to?: unknown } | null | undefined)?.to);
-  if (!head) return null;
-  return sessions.find((entry) => entry.commits.some((commit) => sameCommit(commit, head)))?.ref ?? null;
+  const expired = expiredSessions(note);
+  return blockedCandidates(note).find((ref) => !expired.has(formatSession(ref))) ?? null;
+}
+
+/**
+ * Lock leaf of a blocked call. It carries the number of expired sessions: a session called again
+ * after the note went back to `red` is a new call.
+ */
+export function blockedLock(role: "blocked" | "fix", target: SessionRef, note: BlockedNote): string {
+  const generation = list(note.expired).length;
+  return `${target.id}.${role === "fix" ? "blocked-fix" : "blocked"}${generation ? `-${generation}` : ""}`;
+}
+
+export type BlockedLease =
+  /** Nothing to keep or expire: closed, waiting for its first call, or no session in the range. */
+  | { readonly kind: "none" }
+  /** `holder` keeps the lease; its plugin writes `heartbeatAt` when due and the session works. */
+  | { readonly kind: "held"; readonly holder: SessionRef; readonly heartbeatDue: boolean }
+  /** Back to `red` without `owner` nor `fix`, `who` into `expired`. */
+  | { readonly kind: "expire"; readonly who: readonly string[]; readonly reason: string }
+  /**
+   * Red, and every session of the range expired: the incident host's call. `stale`: nobody took it
+   * (its agent expired, or 20 min passed since the last change), the call failed for good.
+   */
+  | { readonly kind: "orphan"; readonly stale: boolean };
+
+/** Milliseconds of an ISO time, or NaN. */
+function at(value: unknown): number {
+  return typeof value === "string" ? Date.parse(value) : Number.NaN;
+}
+
+/** The newest finite time among `values`, or NaN. */
+function newest(...values: number[]): number {
+  const finite = values.filter(Number.isFinite);
+  return finite.length ? Math.max(...finite) : Number.NaN;
+}
+
+const minutes = (ms: number) => Math.floor(ms / 60_000);
+
+/**
+ * What the lease of a blocked note asks now (design "Posse"). Pure: every plugin reads the same
+ * note and gets the same answer, and each write re-decides on the body it replaces (CAS).
+ *
+ * - `investigating` (or a `red` someone took) → held by `owner`; `fix-pending` with `fix.session` →
+ *   held by it. Its newest sign over 20 min old → expire the holder.
+ * - `red` without owner: the target (`blockedTarget`) not taken in 20 min → expire it; no target
+ *   left but sessions in the range → orphan.
+ * - `fix-pending` without `fix.session` 20 min old → expire the culprits called (the owner when none).
+ * - `shipped`, `unrelated`, `escalated`, `duplicate` never expire.
+ */
+export function blockedLease(note: BlockedNote, now: Date): BlockedLease {
+  const state = note.state;
+  if (state !== "red" && state !== "investigating" && state !== "fix-pending") return { kind: "none" };
+  const updated = at(note.updatedAt);
+  const fixSession = text((note.fix as { session?: unknown } | null | undefined)?.session);
+  const holder = state === "fix-pending" ? fixSession : text(note.owner);
+  if (holder) {
+    const idle = now.getTime() - newest(updated, at(note.heartbeatAt));
+    if (idle > LEASE_MS) return { kind: "expire", who: [holder], reason: `sem sinal de trabalho há ${minutes(idle)} min` };
+    const ref = parseSessionValue(holder);
+    return ref ? { kind: "held", holder: ref, heartbeatDue: !(idle < HEARTBEAT_MS) } : { kind: "none" };
+  }
+  const idle = now.getTime() - updated;
+  if (state === "fix-pending") {
+    if (!(idle > LEASE_MS)) return { kind: "none" };
+    const owner = parseSessionValue(text(note.owner));
+    const expired = expiredSessions(note);
+    const called = blockedCulprits(note)
+      .filter((ref) => !(owner && sameSession(owner, ref)) && !expired.has(formatSession(ref)))
+      .map(formatSession);
+    const who = called.length ? called : owner ? [formatSession(owner)] : [];
+    return { kind: "expire", who, reason: `correção não assumida em ${minutes(idle)} min` };
+  }
+  if (state === "investigating") {
+    return idle > LEASE_MS ? { kind: "expire", who: [], reason: `investigação sem dona há ${minutes(idle)} min` } : { kind: "none" };
+  }
+  const target = blockedTarget(note);
+  if (target) {
+    return idle > LEASE_MS ? { kind: "expire", who: [formatSession(target)], reason: `chamado não assumido em ${minutes(idle)} min` } : { kind: "none" };
+  }
+  if (blockedSessions(note).length === 0) return { kind: "none" };
+  const incident = note.incident && typeof note.incident === "object" ? note.incident : null;
+  const agent = text(incident?.session);
+  const quiet = now.getTime() - newest(updated, at(incident?.at));
+  return { kind: "orphan", stale: (agent !== null && expiredSessions(note).has(agent)) || quiet > LEASE_MS };
+}
+
+/**
+ * The note with the lease expired: back to `red` without `owner`, `fix` nor `heartbeatAt`, `who`
+ * appended to `expired`. Everything else (assessment, incident, recall) is kept.
+ */
+export function expireLease(body: Record<string, unknown>, who: readonly string[], reason: string, now: Date): Record<string, unknown> {
+  const { owner: _owner, fix: _fix, heartbeatAt: _heartbeat, ...rest } = body;
+  const stamp = now.toISOString();
+  return {
+    ...rest,
+    state: "red",
+    expired: [...list(body["expired"]), ...who.map((session) => ({ session, at: stamp, reason }))],
+    updatedAt: stamp,
+  };
 }
 
 /** Sessions that wrote a suspect commit (`assessment.suspects[].commit`), in note order; malformed suspects are ignored. */
@@ -148,7 +286,10 @@ export function blockedCulprits(note: BlockedNote): SessionRef[] {
  * same release name.
  *
  * - `red` without owner → `blockedTarget`, role `blocked`. A red note with an owner is taken.
- * - `fix-pending` → each suspect's session (`blockedCulprits`), role `fix`, unless it is the owner.
+ * - `fix-pending` → each suspect's session (`blockedCulprits`) not in `expired`, role `fix`, unless
+ *   it is the owner.
+ *
+ * A target may be a lane: the watcher swaps it for its root (`Delivery.resolveRoot`) before calling.
  * - Any other state (`investigating`, `duplicate`, `shipped`, `unrelated`, `escalated`) calls nobody.
  */
 export function routeBlocked(note: BlockedNote, me: Me): BlockedAction[] {
@@ -156,13 +297,14 @@ export function routeBlocked(note: BlockedNote, me: Me): BlockedAction[] {
   const actions: BlockedAction[] = [];
   if (note.state === "red" && !note.owner) {
     const target = blockedTarget(note);
-    if (target && mine(target, me)) actions.push({ kind: "blocked", release, role: "blocked", target, lock: `${target.id}.blocked` });
+    if (target && mine(target, me)) actions.push({ kind: "blocked", release, role: "blocked", target, lock: blockedLock("blocked", target, note) });
   }
   if (note.state === "fix-pending") {
     const owner = parseSessionValue(text(note.owner));
+    const expired = expiredSessions(note);
     for (const target of blockedCulprits(note)) {
-      if (!mine(target, me) || (owner && sameSession(owner, target))) continue;
-      actions.push({ kind: "blocked", release, role: "fix", target, lock: `${target.id}.blocked-fix` });
+      if (!mine(target, me) || (owner && sameSession(owner, target)) || expired.has(formatSession(target))) continue;
+      actions.push({ kind: "blocked", release, role: "fix", target, lock: blockedLock("fix", target, note) });
     }
   }
   return actions;
@@ -202,7 +344,7 @@ export function shippedSince(note: Pick<BlockedNote, "release">, releases: reado
  * left the state the call was for (someone else took it, the skill escalated, or the assessment no
  * longer names the fix call's session). Unknown when it would be open but whether a later release
  * shipped cannot be told (`shipped` null): the caller waits, keeping the call and starting no
- * fallback.
+ * fallback. `candidate` is the note's session the call stands in for when `target` is its root.
  */
 export function blockedConfirmation(
   role: "blocked" | "fix",
@@ -210,17 +352,22 @@ export function blockedConfirmation(
   note: BlockedNote | null,
   shipped: boolean | null,
   now: Date,
+  candidate: SessionRef = target,
 ): "taken" | "open" | "moot" | "unknown" {
-  if (!note || shipped === true || !isRecent(note, now)) return "moot";
+  if (!note || shipped === true || !isBlockedRecent(note, now)) return "moot";
   const called = formatSession(target);
   const fixSession = text((note.fix as { session?: unknown } | null | undefined)?.session);
   if (text(note.owner) === called || fixSession === called) return "taken";
+  const expired = expiredSessions(note);
+  if (expired.has(called) || expired.has(formatSession(candidate))) return "moot";
   // A fix call stays open only while its session is still among the note's culprits: an
-  // assessment that moved on to other commits makes it moot.
+  // assessment that moved on to other commits makes it moot. A red call, while the note still
+  // calls that session.
+  const next = blockedTarget(note);
   const callable =
     role === "fix"
-      ? note.state === "fix-pending" && blockedCulprits(note).some((culprit) => sameSession(culprit, target))
-      : note.state === "red" && !note.owner;
+      ? note.state === "fix-pending" && blockedCulprits(note).some((culprit) => sameSession(culprit, candidate))
+      : note.state === "red" && !note.owner && next !== null && sameSession(next, candidate);
   if (!callable) return "moot";
   return shipped === null ? "unknown" : "open";
 }

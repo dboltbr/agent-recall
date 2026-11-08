@@ -122,9 +122,22 @@ export interface Delivery {
   prompt(target: SessionRef, text: string, action: Action): Promise<void>;
   /** Fork (OpenCode, Claude Code) or new agent in the session's workspace (Paseo), then prompt it. */
   fallback(target: SessionRef, text: string, title: string, action: Action): Promise<string>;
+  /**
+   * The session a lane stands in for: its parent, up to the root (Paseo `paseo.parent-agent-id`,
+   * OpenCode `parentID`). Absent: the harness has no lanes, every session is its own root.
+   */
+  resolveRoot?(target: SessionRef): Promise<SessionRef>;
+  /**
+   * The session is working: in a turn, or active in the last 10 min (Paseo `running`, OpenCode
+   * busy, the Claude Code transcript). Absent or false: no heartbeat, the lease runs out.
+   */
+  isWorking?(target: SessionRef): Promise<boolean>;
+  /** A new session in `directory`, prompted with `text`: the incident host's agent. Returns its id. */
+  open?(directory: string, text: string, title: string): Promise<string>;
 }
 
-export type Outcome = "prompt" | "fallback" | "recorded" | "failed";
+/** `incident`: a new agent the incident host opened. */
+export type Outcome = "prompt" | "fallback" | "incident" | "recorded" | "failed";
 
 /** How a call ended, and the session id that received it (null when nobody did). */
 export interface Delivered {

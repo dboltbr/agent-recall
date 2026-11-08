@@ -16,7 +16,7 @@ import {
 } from "../../core/test/fakes.ts";
 import { loadConfig } from "../../core/host.ts";
 import type { Note } from "../../core/types.ts";
-import { attach, type Context, type PollerDeps, type Registry, type Timer } from "../poller.ts";
+import { attach, createDelivery, type Context, type PollerDeps, type Registry, type SessionInfo, type Timer } from "../poller.ts";
 
 const INTERVAL = 30_000;
 const PROBE = 10_000;
@@ -216,4 +216,43 @@ test("trava de arquivo da versão anterior, do mesmo processo: o poller recarreg
   await registry.poller!.idle();
   assert.equal((await heartbeat())?.sha, "bbbbbbbbbbbb2222");
   await registry.poller!.stop();
+});
+
+test("entrega: filha sobe até a raiz; ocupada ou ativa há menos de 10 min trabalha; abre sessão nova no diretório", async () => {
+  const now = Date.now();
+  const sessions: Record<string, SessionInfo> = {
+    ses_lane: { id: "ses_lane", parentID: "ses_mid", time: { updated: now - 60 * 60_000, busy: now - 2 * 60 * 60_000, idle: now - 60 * 60_000 } },
+    ses_mid: { id: "ses_mid", parentID: "ses_root", time: { updated: now - 60_000 } },
+    ses_root: { id: "ses_root", time: { updated: now - 60 * 60_000, busy: now - 30 * 60_000 } },
+  };
+  const created: Array<{ title?: string; location?: { directory: string } }> = [];
+  const prompts: Array<{ sessionID: string; text: string }> = [];
+  const ctx: Context = {
+    session: {
+      async list() {
+        return { data: [] };
+      },
+      async prompt(input) {
+        prompts.push(input);
+      },
+      async get(input) {
+        return sessions[input.sessionID] ?? { id: input.sessionID };
+      },
+      async create(input) {
+        created.push(input);
+        return { id: "ses_new" };
+      },
+    },
+  };
+  const delivery = createDelivery({ ctx, poller: null });
+  const target = (id: string) => ({ harness: "opencode" as const, host: "archdev", id });
+  assert.deepEqual(await delivery.resolveRoot!(target("ses_lane")), target("ses_root"));
+  assert.deepEqual(await delivery.resolveRoot!(target("ses_root")), target("ses_root"));
+  assert.equal(await delivery.isWorking!(target("ses_lane")), false, "turno encerrado há 1 h");
+  assert.equal(await delivery.isWorking!(target("ses_mid")), true, "ativa há 1 min");
+  assert.equal(await delivery.isWorking!(target("ses_root")), true, "em turno (busy sem idle)");
+  assert.equal(await delivery.isWorking!(target("ses_none")), false);
+  assert.equal(await delivery.open!("/srv/dbolt", "texto", "Release barrada"), "ses_new");
+  assert.deepEqual(created, [{ title: "Release barrada", location: { directory: "/srv/dbolt" } }]);
+  assert.deepEqual(prompts, [{ sessionID: "ses_new", text: "texto" }]);
 });

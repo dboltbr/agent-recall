@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
 import { config, fakeExec, fixedClock, hoursAgo, NOW, note, quietLog, removeTempDirs, session, tempState, writeConfig } from "../../core/test/fakes.ts";
@@ -16,6 +16,7 @@ import {
   backgroundId,
   backgroundSession,
   claudePaths,
+  createClaudeDelivery,
   createClaudeWatcher,
   due,
   parseHookInput,
@@ -717,3 +718,41 @@ function depsOf(h: Awaited<ReturnType<typeof host>>, pid: number, claudePid: num
     claude: CLAUDE,
     };
 }
+
+test("isWorking: transcript escrito há menos de 10 min trabalha; sem transcript, não", async () => {
+  const h = await host({ notes: {} });
+  const projectsDir = await tempState();
+  await mkdir(join(projectsDir, "-tmp-checkout"), { recursive: true });
+  const file = join(projectsDir, "-tmp-checkout", "ses-live.jsonl");
+  await writeFile(file, "{}\n");
+  await utimes(file, new Date(NOW.getTime() - 9 * 60_000), new Date(NOW.getTime() - 9 * 60_000));
+  const delivery = (at: Date) => createClaudeDelivery({ ...depsOf(h, 1, 2), clock: { now: () => at }, projectsDir });
+  const target = (id: string) => ({ harness: "claude" as const, host: "archdev", id });
+  assert.equal(await delivery(NOW).isWorking!(target("ses-live")), true);
+  assert.equal(await delivery(new Date(NOW.getTime() + 2 * 60_000)).isWorking!(target("ses-live")), false);
+  assert.equal(await delivery(NOW).isWorking!(target("ses-none")), false);
+});
+
+test("autoatualização: o vigia que segura a consulta do host a dispara, sem esperar nem sobrepor", async () => {
+  const h = await host({ notes: {} });
+  let calls = 0;
+  let finish: () => void = () => {};
+  const update = () => {
+    calls++;
+    return new Promise<void>((resolve) => (finish = resolve));
+  };
+  h.live.add(1003);
+  h.live.add(2003);
+  const watcher = createClaudeWatcher({ ...depsOf(h, 1003, 2003), update, pollIntervalMs: 1 });
+  started.push(watcher);
+  await settle(watcher);
+  assert.equal(calls, 1);
+  h.later(1_000);
+  await settle(watcher);
+  assert.equal(calls, 1, "a anterior ainda roda");
+  finish();
+  await new Promise((resolve) => setImmediate(resolve));
+  h.later(1_000);
+  await settle(watcher);
+  assert.equal(calls, 2);
+});

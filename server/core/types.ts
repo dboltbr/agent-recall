@@ -58,6 +58,23 @@ export interface Note {
   readonly recall?: unknown;
 }
 
+/** One entry of a blocked note's `expired`: a session that lost the lease or never took the call. */
+export interface ExpiredSession {
+  /** `<harness>/<host>/<id>`. */
+  readonly session?: string;
+  readonly at?: string;
+  readonly reason?: string;
+}
+
+/** The incident host's claim on a blocked note no session of the range can take any more. */
+export interface BlockedIncident {
+  /** `<harness>/<host>` of the plugin that claimed it. */
+  readonly by?: string;
+  readonly at?: string;
+  /** `<harness>/<host>/<id>` of the agent it opened, once open. */
+  readonly session?: string;
+}
+
 /**
  * Body of a `refs/notes/release-blocked` note, keyed by the run's head commit (a release blocked
  * before its tag has no tag). Its own shape, written by the dbolt `blocked-note` job: `owner` is a
@@ -72,13 +89,22 @@ export interface BlockedNote {
   readonly sessions?: readonly NoteSession[];
   /** `<harness>/<host>/<id>` of the session that took the release. */
   readonly owner?: string | null;
-  readonly run?: { readonly id?: number; readonly url?: string; readonly failedJob?: string };
+  /** `failures`: the failing tests the CI read from the failed jobs' logs. */
+  readonly run?: { readonly id?: number; readonly url?: string; readonly failedJob?: string; readonly failures?: readonly string[] };
   readonly assessment?: { readonly suspects?: readonly { readonly commit?: string; readonly evidence?: string }[] };
   readonly fix?: { readonly session?: string; readonly branch?: string; readonly commit?: string };
   readonly inheritedFrom?: string;
   readonly drill?: boolean;
   readonly createdAt?: string;
   readonly updatedAt: string;
+  /**
+   * The lease holder's last sign of work (`owner` in `investigating`, `fix.session` in
+   * `fix-pending`), written only by the holder's plugin; never moves `updatedAt`.
+   */
+  readonly heartbeatAt?: string;
+  /** Sessions that lost the lease or never took the call: never called again for this note. */
+  readonly expired?: readonly ExpiredSession[];
+  readonly incident?: BlockedIncident | null;
   /** Written by this plugin when a call failed on every rung. */
   readonly recall?: unknown;
 }
@@ -93,6 +119,10 @@ export interface HostConfig {
   readonly notesRef: string;
   /** Blocked-release notes (`refs/notes/release-blocked`, `-drill` in a drill). */
   readonly blockedRef: string;
+  /** This host opens a new agent for a blocked note no session of the range can take. */
+  readonly incidentHost?: boolean;
+  /** The dbolt checkout the incident agent opens in; required by `incidentHost`. */
+  readonly incidentCheckout?: string;
 }
 
 /** Who this plugin is: it only acts on trailers of its own harness and host. */

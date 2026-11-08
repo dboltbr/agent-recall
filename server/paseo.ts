@@ -8,7 +8,8 @@ import type { Delivery } from "./core/deliver.ts";
 import { nodeExec } from "./core/exec.ts";
 import { loadConfig, stateDirectory } from "./core/host.ts";
 import { describe } from "./core/poll.ts";
-import { firstIn, updatePaseo } from "./core/self-update.ts";
+import { HEARTBEAT_MS } from "./core/route.ts";
+import { scheduleUpdates, updatePaseo } from "./core/self-update.ts";
 import type { Exec, Logger, SessionRef } from "./core/types.ts";
 import { createWatcher } from "./core/watcher.ts";
 import { createReleaseService, type ReleaseService } from "./release.ts";
@@ -58,7 +59,13 @@ interface AgentRecord {
   readonly cwd?: string;
   readonly config?: { readonly model?: string; readonly modeId?: string; readonly thinkingOptionId?: string };
   readonly persistence?: { readonly sessionId?: string | null } | null;
+  readonly labels?: Readonly<Record<string, string>> | null;
 }
+
+/** A lane's label: the agent that spawned it. */
+const PARENT_LABEL = "paseo.parent-agent-id";
+/** Lanes of lanes are followed this deep at most (a cycle in the records cannot loop). */
+const MAX_DEPTH = 10;
 
 /** The daemon's agent record (`$PASEO_HOME/agents/<project>/<id>.json`): workspace and model. */
 async function agentRecord(id: string): Promise<AgentRecord | null> {
@@ -103,6 +110,24 @@ function createDelivery(exec: Exec, stateDir: string): Delivery {
       } finally {
         await rm(file, { force: true });
       }
+    },
+    async resolveRoot(target: SessionRef) {
+      let id = target.id;
+      for (let depth = 0; depth < MAX_DEPTH; depth++) {
+        const parent = (await agentRecord(id))?.labels?.[PARENT_LABEL];
+        if (typeof parent !== "string" || !parent || parent === id) break;
+        id = parent;
+      }
+      return { ...target, id };
+    },
+    async isWorking(target: SessionRef) {
+      const agent = JSON.parse(await paseo(exec, ["inspect", target.id, "--json"])) as { Status?: unknown; UpdatedAt?: unknown };
+      if (agent.Status === "running") return true;
+      const updated = typeof agent.UpdatedAt === "string" ? Date.parse(agent.UpdatedAt) : Number.NaN;
+      return Number.isFinite(updated) && Date.now() - updated < HEARTBEAT_MS;
+    },
+    async open(directory: string, text: string, title: string) {
+      return run(["--cwd", directory, "--title", title], text);
     },
     async fallback(target: SessionRef, text: string, title: string) {
       const record = await agentRecord(target.id);
@@ -161,17 +186,18 @@ export function startPaseoRecall(): PaseoRecall {
       release: release.tracker,
     });
     stop = watcher.start();
-    // In the background and never awaited by stop(): applying an update stops this plugin.
-    if (firstIn(globalThis as Record<symbol, unknown>, Symbol.for("dbolt.agent-recall.paseo.update"))) {
-      void updatePaseo({
+    // Now and every 30 min, in the background and never awaited by stop(): applying an update
+    // stops this plugin. Once per daemon process: the reloaded plugin does not start another.
+    scheduleUpdates(globalThis as Record<symbol, unknown>, Symbol.for("dbolt.agent-recall.paseo.update"), () =>
+      updatePaseo({
         exec,
         log,
         clock,
         sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms).unref()),
         home: paseoHome(),
         stateDir,
-      });
-    }
+      }),
+    );
   })().catch((error) => log.error(`não iniciou: ${describe(error)}`));
   return {
     release,

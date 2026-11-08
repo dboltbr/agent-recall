@@ -58,11 +58,16 @@ substitui a fonte de incidentes dos callbacks Paseo/OpenCode/Claude Code, sem mu
   nota em `refs/notes/release-blocked` no SHA da cabeça do run (não há tag): `state`, faixa,
   `sessions` (cada `Agent-Session` identificado com seus commits), `owner` (texto
   `<harness>/<host>/<id>`), `run` (`url`, `failedJob`), `assessment.suspects`, `fix`. Chama:
-  - `red` sem owner → a única sessão identificada da faixa (commit sem trailer não conta); com
-    várias, a do commit da cabeça (`range.to`), como o dono do incidente; nenhuma → ninguém (o run
-    vermelho avisa o humano);
-  - `fix-pending` → a sessão de cada culpado de `assessment.suspects`, no host dela, salvo o owner;
+  - `red` sem owner → a sessão da faixa mais perto da cabeça fora de `expired` (commit sem trailer
+    não conta): a do commit da cabeça (`range.to`), depois a ordem da nota (o CI lista pelo commit
+    mais novo de cada uma); nenhuma sessão na faixa → ninguém (o run vermelho avisa o humano);
+  - `fix-pending` → a sessão de cada culpado de `assessment.suspects` fora de `expired`, no host
+    dela, salvo o owner;
   - `investigating`, `duplicate`, `shipped`, `unrelated`, `escalated` → ninguém.
+
+  Sessão que é lane não é chamada: agente Paseo com `paseo.parent-agent-id` dá lugar ao pai, até a
+  raiz; sessão filha do OpenCode, à raiz (`parentID`). A raiz ocupa o lugar da lane; raiz já em
+  `expired` leva a lane junto e a próxima sessão é chamada.
 
   Todo chamado é
   `Release barrada release-<n>: carregue a skill dbolt-release-incident. Papel: blocked. Release: <json>`
@@ -76,6 +81,19 @@ substitui a fonte de incidentes dos callbacks Paseo/OpenCode/Claude Code, sem mu
   cópia de reserva (agente novo no Paseo, sessão filha no OpenCode, cópia em segundo plano no Claude
   Code). Nota que saiu do estado do chamado, ou release posterior com tag, encerra sem cópia; sem
   histórico de releases a espera segue. Cópia que falha → `recall` na nota barrada.
+- Posse da release barrada (`blockedLease`, em `core/route.ts`): quem detém (`owner` em
+  `investigating`, `fix.session` em `fix-pending`) mantém a posse enquanto o sinal mais novo
+  (`heartbeatAt`, `updatedAt`) tem menos de 20 min. O plugin do host da detentora grava
+  `heartbeatAt` a partir dos 10 min se a sessão trabalha (em turno ou ativa nos últimos 10 min:
+  `paseo inspect`, `time.busy`/`time.updated` do OpenCode, mtime do transcript do Claude Code).
+  Posse vencida, ou chamado `red`/correção não assumido em 20 min → qualquer plugin devolve a nota a
+  `red`, sem `owner`, `fix` nem `heartbeatAt`, e põe a sessão em `expired` (`{session, at,
+  reason}`); ela não é chamada de novo e a trava ganha a geração (`<sessão>.blocked-<n>`). Toda
+  escrita é CAS (`updateNote`) e decide de novo sobre a nota que substitui.
+- Nota `red` com toda sessão da faixa em `expired`: o host de incidente (`incidentHost` +
+  `incidentCheckout`) reivindica `incident: {by, at}` por CAS, abre um agente novo no checkout com o
+  chamado `blocked` e grava `incident.session`. Sem host de incidente, ou se ninguém assumir em 20
+  min (o agente expirou, ou abrir falhou), `recall` com `abandoned: true`, uma vez.
 - Heartbeat a cada consulta em `~/.local/state/agent-recall/<paseo|opencode|claude>.alive`:
   `{ "pid", "polledAt", "sha" }`. O hook de commit do dbolt exige esse arquivo.
 - No OpenCode, um poller por host (trava de host `opencode.poller`, ver "Travas do host") que vive o
@@ -230,8 +248,8 @@ Conferir: `bash scripts/agent-recall.sh check` no dbolt, `paseo plugin logs agen
 
 ## Autoatualização
 
-Na partida, uma vez por processo, em segundo plano e com prazo de 60 s, o plugin pede ao próprio
-harness a revisão mais nova (`core/self-update.ts`). Falha só vai para o log.
+Na partida e a cada 30 min, uma agenda por processo, em segundo plano e com prazo de 60 s, o plugin
+pede ao próprio harness a revisão mais nova (`core/self-update.ts`). Falha só vai para o log.
 
 - **OpenCode**: `opencode plugin update <spec>`, com o spec lido do `package.json` da instalação
   em `…/opencode/npm/…/node_modules/agent-recall/`. O OpenCode só confere atualização ao reiniciar
@@ -241,9 +259,10 @@ harness a revisão mais nova (`core/self-update.ts`). Falha só vai para o log.
   revisão nova aplica `--yes`, e o Paseo recarrega o plugin na hora. Instalação `directory`
   (checkout de dev) é ignorada. O commit tentado fica em `~/.local/state/agent-recall/paseo.update`
   e não é reaplicado em 30 min, então um Paseo que siga propondo a mesma revisão não entra em laço.
-- **Claude Code**: o plugin não se atualiza sozinho. `claude plugin marketplace update agent-recall`
-  e `claude plugin update agent-recall@agent-recall` trazem o último commit de `main` (o
-  `agent-recall.sh update` do dbolt faz isso); a revisão nova vale na sessão seguinte.
+- **Claude Code**: o vigia que segura a consulta do host roda `claude plugin marketplace update
+  agent-recall` e `claude plugin update agent-recall@agent-recall --scope user`, no máximo uma vez a
+  cada 30 min no host (`~/.local/state/agent-recall/claude.update`). Só com o marketplace do
+  GitHub; o de diretório (checkout de dev) é ignorado. A revisão nova vale na sessão seguinte.
 
 ## Configuração do host
 
@@ -263,6 +282,9 @@ harness a revisão mais nova (`core/self-update.ts`). Falha só vai para o log.
 - `notesRef`: `refs/notes/release-watch-drill` no ensaio.
 - `blockedRef`: opcional; padrão `refs/notes/release-blocked`, ou `refs/notes/release-blocked-drill`
   quando o `notesRef` é o de ensaio.
+- `incidentHost` + `incidentCheckout`: opcionais; `true` e o checkout do dbolt fazem deste host o
+  que abre o agente de uma release barrada que nenhuma sessão da faixa assume. Sem
+  `incidentCheckout`, `incidentHost` não vale.
 
 ## Desenvolvimento
 

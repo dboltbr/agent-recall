@@ -26,7 +26,7 @@ import { acquireHostLock, publishExclusive, readHandoffs, writeHandoff, type Hos
 import { recordRecallFailure, releaseName } from "../core/notes.ts";
 import { describe, POLL_INTERVAL_MS } from "../core/poll.ts";
 import { createReleaseSource, createReleaseTracker, type ReleaseTracker } from "../core/release-fetch.ts";
-import { ACK_TIMEOUT_MS, blockedConfirmation, CATCH_UP_MS, releaseHistory, shippedSince, type Action } from "../core/route.ts";
+import { ACK_TIMEOUT_MS, blockedConfirmation, CATCH_UP_MS, HEARTBEAT_MS, releaseHistory, shippedSince, type Action } from "../core/route.ts";
 import { formatSession } from "../core/trailer.ts";
 import type { BlockedNote, Clock, Exec, Fetch, HostConfig, Logger, Note, Role, SessionRef } from "../core/types.ts";
 import { createWatcher, type Watcher } from "../core/watcher.ts";
@@ -445,6 +445,11 @@ export interface ClaudeDeps {
   /** The Claude Code CLI that starts background sessions. */
   readonly claude: string;
   readonly pollIntervalMs?: number;
+  /**
+   * The plugin's self-update (`updateClaude`), run in the background by the poller holder on each
+   * poll; the host throttles it to once per 30 min. Never awaited by the watcher.
+   */
+  readonly update?: () => Promise<unknown>;
 }
 
 export type Step = { readonly kind: "wake"; readonly text: string } | { readonly kind: "exit"; readonly reason: string } | { readonly kind: "wait" };
@@ -496,6 +501,12 @@ export function createClaudeDelivery(deps: ClaudeDeps): Delivery {
         text,
         createdAt: deps.clock.now().toISOString(),
       });
+    },
+    async isWorking(target) {
+      // Every turn appends to the transcript: written in the last 10 min is working.
+      const transcript = await findTranscript(deps.projectsDir, target.id);
+      if (!transcript) return false;
+      return deps.clock.now().getTime() - (await stat(transcript)).mtimeMs < HEARTBEAT_MS;
     },
     async fallback(target, text) {
       const transcript = await findTranscript(deps.projectsDir, target.id);
@@ -692,10 +703,20 @@ export function createClaudeWatcher(deps: ClaudeDeps): ClaudeWatcher {
 
   let pollerLock: HostLock | null = null;
   let armed = false;
+  let updating = false;
 
   async function poll(): Promise<void> {
     pollerLock ??= await acquireHostLock(deps.stateDir, POLLER_LOCK, log);
     if (!pollerLock) return;
+    if (deps.update && !updating) {
+      updating = true;
+      void deps
+        .update()
+        .catch((error) => log.warn(`autoatualização: ${describe(error)}`))
+        .finally(() => {
+          updating = false;
+        });
+    }
     core ??= createWatcher({
       harness: "claude",
       host: (value) => value.instance,

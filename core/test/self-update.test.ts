@@ -4,10 +4,14 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 import {
+  CLAUDE_PLUGIN,
   firstIn,
   openCodeCommand,
   openCodeTarget,
   PASEO_RETRY_MS,
+  scheduleUpdates,
+  UPDATE_INTERVAL_MS,
+  updateClaude,
   updateOpenCode,
   updatePaseo,
   type OpenCodeUpdateDeps,
@@ -235,4 +239,63 @@ test("Paseo: daemon ainda não atende → uma nova tentativa; falhas só registr
     args.includes("--check") ? ok(preview("update", { target: { kind: "git", commit: NEW } })) : { code: 1, stdout: "", stderr: "preparation failed" },
   );
   assert.equal(await updatePaseo((await paseoDeps(applyFails.exec)).deps), "failed");
+});
+
+test("scheduleUpdates: agora e a cada 30 min, uma vez por processo, sem sobrepor", async () => {
+  const scope: Record<symbol, unknown> = {};
+  const key = Symbol("u");
+  const ticks: Array<() => void> = [];
+  const timer = { every: (run: () => void, ms: number) => (assert.equal(ms, UPDATE_INTERVAL_MS), ticks.push(run)) };
+  let calls = 0;
+  let finish: () => void = () => {};
+  const update = () => {
+    calls++;
+    return new Promise<void>((resolve) => (finish = resolve));
+  };
+  assert.equal(scheduleUpdates(scope, key, update, timer), true);
+  assert.equal(scheduleUpdates(scope, key, update, timer), false, "o plugin recarregado não agenda outra");
+  await Promise.resolve();
+  assert.equal(calls, 1, "roda já");
+  ticks[0]!();
+  await Promise.resolve();
+  assert.equal(calls, 1, "a anterior ainda roda");
+  finish();
+  await new Promise((resolve) => setImmediate(resolve));
+  ticks[0]!();
+  await Promise.resolve();
+  assert.equal(calls, 2);
+  assert.equal(ticks.length, 1);
+});
+
+test("Claude: marketplace do GitHub → marketplace update e plugin update; a cada 30 min no host", async () => {
+  const stateDir = await tempState();
+  const clock = fixedClock();
+  const { exec, calls } = recordingExec((args) =>
+    args[1] === "marketplace" && args[2] === "list" ? ok(JSON.stringify([{ name: "agent-recall", source: "github" }])) : ok("updated\n"),
+  );
+  const deps = { exec, log: quietLog, clock, claude: "/bin/claude", stateDir };
+  assert.equal(await updateClaude(deps), "updated");
+  assert.deepEqual(
+    calls.map((call) => [call.command, ...call.args].join(" ")),
+    [
+      "/bin/claude plugin marketplace list --json",
+      "/bin/claude plugin marketplace update agent-recall",
+      `/bin/claude plugin update ${CLAUDE_PLUGIN} --scope user`,
+    ],
+  );
+  assert.ok(calls.every((call) => call.timeoutMs > 0 && call.timeoutMs <= 60_000));
+  assert.equal(await updateClaude(deps), "throttled");
+  clock.set(new Date(NOW.getTime() + UPDATE_INTERVAL_MS));
+  assert.equal(await updateClaude(deps), "updated");
+});
+
+test("Claude: marketplace de diretório não atualiza; falha do CLI só registra", async () => {
+  const local = recordingExec(() => ok(JSON.stringify([{ name: "agent-recall", source: "directory" }])));
+  assert.equal(await updateClaude({ exec: local.exec, log: quietLog, clock: fixedClock(), claude: "claude", stateDir: await tempState() }), "local");
+  assert.equal(local.calls.length, 1);
+  const broken = recordingExec((args) =>
+    args[2] === "list" ? ok(JSON.stringify([{ name: "agent-recall", source: "github" }])) : { code: 1, stdout: "", stderr: "Error: offline" },
+  );
+  assert.equal(await updateClaude({ exec: broken.exec, log: quietLog, clock: fixedClock(), claude: "claude", stateDir: await tempState() }), "failed");
+  assert.equal(broken.calls.length, 2, "para no primeiro erro");
 });
