@@ -20497,7 +20497,7 @@ var unrefTimer = {
 };
 function scheduleUpdates(scope, key, update, timer2 = unrefTimer, intervalMs = UPDATE_INTERVAL_MS) {
   const current = scope[key];
-  if (current) {
+  if (isSchedule(current)) {
     current.update = update;
     return false;
   }
@@ -20514,6 +20514,9 @@ function scheduleUpdates(scope, key, update, timer2 = unrefTimer, intervalMs = U
   tick();
   schedule.cancel = timer2.every(tick, intervalMs);
   return true;
+}
+function isSchedule(value) {
+  return typeof value === "object" && value !== null && typeof value.cancel === "function";
 }
 function lastLine(text2) {
   return text2.trim().split("\n").filter(Boolean).pop()?.trim().slice(0, 400) ?? "";
@@ -20638,7 +20641,11 @@ var REJECTED = /rejected|non-fast-forward|fetch first|failed to update ref|canno
 async function recordRecallFailure(input2) {
   const result = await updateNote({
     ...input2,
-    edit: (body) => input2.keepUpdatedAt ? { ...body, recall: input2.recall } : { ...body, recall: input2.recall, updatedAt: input2.recall.failedAt }
+    edit: (body) => {
+      if (!input2.keepUpdatedAt) return { ...body, recall: input2.recall, updatedAt: input2.recall.failedAt };
+      const abandoned = body["recall"]?.abandoned === true;
+      return { ...body, recall: abandoned ? { ...input2.recall, abandoned: true } : input2.recall };
+    }
   });
   return result === "written";
 }
@@ -21192,11 +21199,12 @@ function blockedConfirmation(role, target, note, shipped, now, candidate = targe
   if (!note || shipped === true || !isBlockedRecent(note, now)) return "moot";
   const called = formatSession(target);
   const fixSession = text(note.fix?.session);
-  if (text(note.owner) === called || fixSession === called) return "taken";
+  if (fixSession === called || role === "blocked" && text(note.owner) === called) return "taken";
   const expired = expiredSessions(note);
   if (expired.has(called) || expired.has(formatSession(candidate))) return "moot";
   const next = blockedTarget(note);
-  const callable = role === "fix" ? note.state === "fix-pending" && blockedCulprits(note).some((culprit) => sameSession(culprit, candidate)) : note.state === "red" && !note.owner && next !== null && sameSession(next, candidate);
+  const ownFix = !fixSession && text(note.owner) === formatSession(candidate);
+  const callable = role === "fix" ? note.state === "fix-pending" && (ownFix || blockedCulprits(note).some((culprit) => sameSession(culprit, candidate))) : note.state === "red" && !note.owner && next !== null && sameSession(next, candidate);
   if (!callable) return "moot";
   return shipped === null ? "unknown" : "open";
 }
@@ -21643,12 +21651,13 @@ function createWatcher(options) {
       }
     };
     const root = await rootOf(action.target);
-    if (sameSession(root, action.target)) return action;
+    const self = sameSession(root, action.target);
+    if (self && action.role !== "blocked") return action;
     const rootName = formatSession(root);
-    let rootExpired = expiredSessions(note).has(rootName);
+    let rootExpired = !self && expiredSessions(note).has(rootName);
     for (const name of rootExpired ? [] : expiredSessions(note)) {
       const lane = parseSessionValue(name);
-      if (!lane || !sameSession({ ...lane, id: root.id }, root)) continue;
+      if (!lane || name === rootName || !sameSession({ ...lane, id: root.id }, root)) continue;
       if (sameSession(await rootOf(lane), root)) {
         rootExpired = true;
         break;
@@ -21666,8 +21675,14 @@ function createWatcher(options) {
       }
       return null;
     }
+    if (self) return action;
     const owner = parseSessionValue(typeof note.owner === "string" ? note.owner : null);
-    if (action.role === "fix" && owner && sameSession(owner, root)) return null;
+    if (action.role === "fix" && owner && sameSession(owner, root)) {
+      const fixSession = note.fix?.session;
+      if (typeof fixSession === "string" || expiredSessions(note).has(rootName)) return null;
+      log2.info(`${action.release}: ${formatSession(action.target)} \xE9 lane da dona; a corre\xE7\xE3o \xE9 da dona ${rootName}`);
+      return { ...action, target: owner, candidate: action.target, lock: blockedLock("fix", owner, note) };
+    }
     log2.info(`${action.release}: ${formatSession(action.target)} \xE9 lane; chamando a raiz ${rootName}`);
     return { ...action, target: root, candidate: action.target, lock: blockedLock(action.role, root, note) };
   }
@@ -21702,18 +21717,18 @@ function createWatcher(options) {
     const blockedPoll = canPoll ? await pollBlocked(config2, auth) : null;
     await options.release.tick({ token: auth, notes, notesChanged: fetched || blockedPoll?.fetched === true }).catch((error62) => log2.warn(`release: ${describe3(error62)}`));
     const releases = releaseHistory(options.release.current());
+    const historyUnknown = releases === null || releases.length === 0;
     const outdated = /* @__PURE__ */ new Set();
     for (const [key, { raw, note }] of blockedPoll?.fresh ? blocked : []) {
       let actions;
       try {
         const shipped = shippedSince(note, releases);
         const open2 = shipped === false && isBlockedRecent(note, now);
-        if (open2 || shipped === null && isBlockedRecent(note, now)) {
+        if (open2 || historyUnknown && isBlockedRecent(note, now)) {
           let step = "none";
           try {
-            step = await keepLease(key, note, config2, me, auth, now, handled, shipped === null);
+            step = await keepLease(key, note, config2, me, auth, now, handled, historyUnknown);
           } catch (error62) {
-            step = "stale";
             log2.warn(`${releaseName(note)}: posse: ${describe3(error62)}`);
           }
           if (step !== "none") {
@@ -22084,7 +22099,7 @@ var index_default = {
   // No dispose: the poller and the newest context outlive location eviction (see ./poller.ts).
   setup(ctx) {
     attach(registry2, ctx, {
-      sha: true ? "63e620b3a7b61858895acd4b1c5fe96dd0c4dd8d" : "unknown",
+      sha: true ? "13828d3a141bee335ffc83c2353552c948ace842" : "unknown",
       stateDir: stateDirectory(),
       pid: process.pid,
       clock: { now: () => /* @__PURE__ */ new Date() },
