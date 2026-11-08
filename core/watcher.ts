@@ -100,6 +100,9 @@ export interface Watcher {
 }
 
 /** A blocked call prompted into an existing session, waiting for the note to name it. */
+/** What `keepLease` did to a blocked note this tick (see there). */
+type LeaseStep = "none" | "wrote" | "stale";
+
 interface Awaiting {
   readonly action: BlockedAction;
   readonly key: string;
@@ -170,7 +173,7 @@ export function createWatcher(options: WatcherOptions): Watcher {
   }
 
   /** Writes a failed call into the note of `key` on `ref`, with what that note kind records. */
-  function failureRecorder(key: string, ref: string, extra: Pick<RecallFailure, "rollback" | "state">, config: HostConfig, me: Me, auth: string) {
+  function failureRecorder(key: string, ref: string, extra: Pick<RecallFailure, "rollback" | "state">, config: HostConfig, me: Me, auth: string, keepUpdatedAt = false) {
     return (failure: Failure) =>
       recordRecallFailure({
         exec,
@@ -180,6 +183,7 @@ export function createWatcher(options: WatcherOptions): Watcher {
         token: auth,
         key,
         recall: { ...failure, ...extra, failedAt: clock.now().toISOString(), by: `${me.harness}/${me.host}` },
+        keepUpdatedAt,
       });
   }
 
@@ -202,7 +206,7 @@ export function createWatcher(options: WatcherOptions): Watcher {
       text: blockedPrompt(action.release, key, note),
       title: `Release barrada ${action.release}${note.drill ? " [ensaio]" : ""}`,
       drill: note.drill === true,
-      recordFailure: failureRecorder(key, config.blockedRef, { state: note.state }, config, me, auth),
+      recordFailure: failureRecorder(key, config.blockedRef, { state: note.state }, config, me, auth, true),
     };
     const done = await call(input, me);
     // Prompted is not taken: the note must name the session (`owner`, `fix.session`) within 2 min.
@@ -219,11 +223,12 @@ export function createWatcher(options: WatcherOptions): Watcher {
    * Runs only with the blocked notes matching the remote: a confirmation not yet fetched would
    * look like silence. In memory: a poller that restarts in between drops the follow-up.
    */
-  async function followUp(me: Me, releases: readonly Release[] | null): Promise<Handled[]> {
+  async function followUp(me: Me, releases: readonly Release[] | null, outdated: ReadonlySet<string> = new Set()): Promise<Handled[]> {
     const handled: Handled[] = [];
     const now = clock.now();
     for (const [id, waiting] of awaiting) {
       const { action } = waiting;
+      if (outdated.has(waiting.key)) continue;
       const note = blocked.get(waiting.key)?.note ?? null;
       let verdict: ReturnType<typeof blockedConfirmation>;
       try {
@@ -306,25 +311,39 @@ export function createWatcher(options: WatcherOptions): Watcher {
   /**
    * What the lease of a blocked note asks of this plugin (`blockedLease`): the heartbeat of a holder
    * of this host that is working, the expiry (any plugin), the incident host's agent or the final
-   * failure of an orphan. Every write re-decides on the body it replaces. True when it wrote: the
-   * cached note is stale, routing waits for the next fetch.
+   * failure of an orphan. Every write re-decides on the body it replaces. `none`: nothing written,
+   * the cached note stands. Otherwise (`wrote`, or `stale` when the write found a remote note that
+   * disagrees) the cached note is out of date: routing and the call follow-up wait for the next
+   * fetch. `heartbeatOnly`: the release history is unknown on this host, only the heartbeat of a
+   * holder of this host is written (another host decides the rest).
    */
-  async function keepLease(key: string, note: BlockedNote, config: HostConfig, me: Me, auth: string, now: Date, handled: Handled[]): Promise<boolean> {
+  async function keepLease(
+    key: string,
+    note: BlockedNote,
+    config: HostConfig,
+    me: Me,
+    auth: string,
+    now: Date,
+    handled: Handled[],
+    heartbeatOnly = false,
+  ): Promise<LeaseStep> {
     const lease = blockedLease(note, now);
     const release = releaseName(note);
+    if (heartbeatOnly && lease.kind !== "held") return "none";
+    const step = (result: UpdateResult): LeaseStep => (result === "written" ? "wrote" : "stale");
     switch (lease.kind) {
       case "none":
-        return false;
+        return "none";
       case "held": {
         const isWorking = options.delivery.isWorking;
-        if (!lease.heartbeatDue || !isMine(lease.holder, me) || !isWorking) return false;
+        if (!lease.heartbeatDue || !isMine(lease.holder, me) || !isWorking) return "none";
         let working = false;
         try {
           working = await isWorking(lease.holder);
         } catch (error) {
           log.warn(`${release}: estado de ${formatSession(lease.holder)}: ${describe(error)}`);
         }
-        if (!working) return false;
+        if (!working) return "none";
         const stamp = now.toISOString();
         const result = await updateBlocked(key, config, auth, (body) => {
           const fresh = asBlocked(body);
@@ -332,7 +351,7 @@ export function createWatcher(options: WatcherOptions): Watcher {
           return again?.kind === "held" && again.heartbeatDue && sameSession(again.holder, lease.holder) ? { ...body, heartbeatAt: stamp } : null;
         });
         if (result === "written") log.info(`${release}: heartbeat de ${formatSession(lease.holder)}`);
-        return result === "written";
+        return step(result);
       }
       case "expire": {
         let expired: BlockedLease | null = null;
@@ -345,7 +364,7 @@ export function createWatcher(options: WatcherOptions): Watcher {
           const done = (expired ?? lease) as Extract<BlockedLease, { kind: "expire" }>;
           log.warn(`${release}: posse expirada (${done.who.join(", ") || "sem sessão"}): ${done.reason}; a nota voltou a red`);
         }
-        return result === "written";
+        return step(result);
       }
       case "orphan":
         return orphan(key, note, lease, config, me, auth, now, handled);
@@ -368,10 +387,11 @@ export function createWatcher(options: WatcherOptions): Watcher {
     auth: string,
     now: Date,
     handled: Handled[],
-  ): Promise<boolean> {
+  ): Promise<LeaseStep> {
     const release = releaseName(note);
     const by = `${me.harness}/${me.host}`;
     const incident = note.incident && typeof note.incident === "object" ? note.incident : null;
+    const step = (result: UpdateResult): LeaseStep => (result === "written" ? "wrote" : "stale");
     const abandon = (reason: string) =>
       updateBlocked(key, config, auth, (body) => {
         const fresh = asBlocked(body);
@@ -379,15 +399,18 @@ export function createWatcher(options: WatcherOptions): Watcher {
         const recall: RecallFailure = { failedAt: now.toISOString(), reason, by, role: "blocked", target: "", state: fresh.state, abandoned: true };
         return { ...body, recall, updatedAt: recall.failedAt };
       });
+    const abandoned = (value: BlockedNote) => (value.recall as { abandoned?: unknown } | null | undefined)?.abandoned === true;
     const open = options.delivery.open;
     const checkout = config.incidentCheckout;
-    if (!incident && config.incidentHost && checkout && open) {
+    if (!incident && !abandoned(note) && config.incidentHost && checkout && open) {
       const claimedAt = now.toISOString();
       const claimed = await updateBlocked(key, config, auth, (body) => {
         const fresh = asBlocked(body);
-        return fresh && !fresh.incident && blockedLease(fresh, now).kind === "orphan" ? { ...body, incident: { by, at: claimedAt } } : null;
+        return fresh && !fresh.incident && !abandoned(fresh) && blockedLease(fresh, now).kind === "orphan"
+          ? { ...body, incident: { by, at: claimedAt } }
+          : null;
       });
-      if (claimed !== "written") return false;
+      if (claimed !== "written") return "stale";
       const run = async (): Promise<void> => {
         const title = `Release barrada ${release} [incidente]${note.drill ? " [ensaio]" : ""}`;
         try {
@@ -408,15 +431,15 @@ export function createWatcher(options: WatcherOptions): Watcher {
         }
       };
       await (options.guard ? options.guard(run) : run());
-      return true;
+      return "wrote";
     }
-    if (!lease.stale || (note.recall as { abandoned?: unknown } | null | undefined)?.abandoned === true) return false;
+    if (!lease.stale || abandoned(note)) return "none";
     const reason = incident
       ? `o agente de incidente ${typeof incident.session === "string" ? incident.session : "(não aberto)"} não assumiu`
       : "nenhuma sessão da faixa fora de expired e nenhum host de incidente assumiu";
     const result = await abandon(reason);
     if (result === "written") log.error(`${note.drill ? "[ensaio] " : ""}${release}: ninguém assumiu a release barrada: ${reason}`);
-    return result === "written";
+    return step(result);
   }
 
   /**
@@ -427,15 +450,37 @@ export function createWatcher(options: WatcherOptions): Watcher {
   async function rooted(action: BlockedAction, key: string, note: BlockedNote, config: HostConfig, auth: string, now: Date): Promise<BlockedAction | null> {
     const resolve = options.delivery.resolveRoot;
     if (!resolve) return action;
-    const root = await resolve(action.target);
+    const rootOf = async (target: SessionRef): Promise<SessionRef> => {
+      try {
+        return await resolve(target);
+      } catch (error) {
+        // Unknown to this harness (or it does not answer): the session stands for itself.
+        log.warn(`${action.release}: raiz de ${formatSession(target)}: ${describe(error)}`);
+        return target;
+      }
+    };
+    const root = await rootOf(action.target);
     if (sameSession(root, action.target)) return action;
     const rootName = formatSession(root);
-    if (expiredSessions(note).has(rootName)) {
+    // The root is expired when it is in `expired` itself or stood in for a lane that is: one call
+    // per root, however many of its lanes the range holds.
+    let rootExpired = expiredSessions(note).has(rootName);
+    for (const name of rootExpired ? [] : expiredSessions(note)) {
+      const lane = parseSessionValue(name);
+      if (!lane || !sameSession({ ...lane, id: root.id }, root)) continue;
+      if (sameSession(await rootOf(lane), root)) {
+        rootExpired = true;
+        break;
+      }
+    }
+    if (rootExpired) {
       if (action.role === "blocked") {
         const lane = formatSession(action.target);
         await updateBlocked(key, config, auth, (body) => {
           const fresh = asBlocked(body);
-          if (!fresh || fresh.state !== "red" || fresh.owner || !expiredSessions(fresh).has(rootName) || expiredSessions(fresh).has(lane)) return null;
+          // The expired set only grows: what made the root expired still holds on the fresh note.
+          if (!fresh || fresh.state !== "red" || fresh.owner || expiredSessions(fresh).has(lane)) return null;
+          for (const name of expiredSessions(note)) if (!expiredSessions(fresh).has(name)) return null;
           return expireLease(body, [lane], `raiz ${rootName} expirada`, now);
         });
       }
@@ -489,20 +534,31 @@ export function createWatcher(options: WatcherOptions): Watcher {
     // Routed only from notes fetched this tick (a cached copy may be stale: someone took it) and a
     // release history refreshed this tick (an older one may miss the release that shipped);
     // otherwise the notes wait for the next tick, unseen.
+    // Notes whose cached copy a lease write just made out of date: no routing nor follow-up on them.
+    const outdated = new Set<string>();
     for (const [key, { raw, note }] of blockedPoll?.fresh ? blocked : []) {
       let actions: BlockedAction[];
       try {
         const shipped = shippedSince(note, releases);
-        if (shipped === null) continue;
-        const open = !shipped && isBlockedRecent(note, now);
-        // Every tick, not only on change: the lease runs on the clock.
-        if (open) {
+        const open = shipped === false && isBlockedRecent(note, now);
+        // Every tick, not only on change: the lease runs on the clock. Without a release history
+        // the holder's heartbeat still goes out (other hosts may have one and would expire it).
+        if (open || (shipped === null && isBlockedRecent(note, now))) {
+          let step: LeaseStep = "none";
           try {
-            if (await keepLease(key, note, config, me, auth, now, handled)) continue;
+            step = await keepLease(key, note, config, me, auth, now, handled, shipped === null);
           } catch (error) {
+            step = "stale";
             log.warn(`${releaseName(note)}: posse: ${describe(error)}`);
           }
+          if (step !== "none") {
+            outdated.add(key);
+            // Not written: the remote note differs from the cached one; fetch it next tick.
+            if (step === "stale") blockedEtag = null;
+            continue;
+          }
         }
+        if (shipped === null) continue;
         if (blockedSeen.get(key) === raw) continue;
         actions = open ? routeBlocked(note, me) : [];
       } catch (error) {
@@ -516,7 +572,7 @@ export function createWatcher(options: WatcherOptions): Watcher {
       };
       if (await attempt(actions, run, handled)) blockedSeen.set(key, raw);
     }
-    if (blockedPoll?.fresh) handled.push(...(await followUp(me, releases)));
+    if (blockedPoll?.fresh) handled.push(...(await followUp(me, releases, outdated)));
     return blockedPoll;
   }
 

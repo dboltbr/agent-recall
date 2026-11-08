@@ -90,6 +90,11 @@ export interface RecallFailure {
 export interface RecordFailureInput extends FetchNotesInput {
   readonly key: string;
   readonly recall: RecallFailure;
+  /**
+   * Leave `updatedAt` as it is: on a blocked note it is the lease clock, and a failed call must
+   * not give its target another 20 min.
+   */
+  readonly keepUpdatedAt?: boolean;
 }
 
 export interface UpdateNoteInput extends FetchNotesInput {
@@ -112,7 +117,10 @@ const REJECTED = /rejected|non-fast-forward|fetch first|failed to update ref|can
  * gone or the push keeps losing.
  */
 export async function recordRecallFailure(input: RecordFailureInput): Promise<boolean> {
-  const result = await updateNote({ ...input, edit: (body) => ({ ...body, recall: input.recall, updatedAt: input.recall.failedAt }) });
+  const result = await updateNote({
+    ...input,
+    edit: (body) => (input.keepUpdatedAt ? { ...body, recall: input.recall } : { ...body, recall: input.recall, updatedAt: input.recall.failedAt }),
+  });
   return result === "written";
 }
 

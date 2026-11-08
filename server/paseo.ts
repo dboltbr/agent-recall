@@ -9,12 +9,13 @@ import { nodeExec } from "./core/exec.ts";
 import { loadConfig, stateDirectory } from "./core/host.ts";
 import { describe } from "./core/poll.ts";
 import { HEARTBEAT_MS } from "./core/route.ts";
-import { scheduleUpdates, updatePaseo } from "./core/self-update.ts";
+import { cancelUpdates, scheduleUpdates, updatePaseo } from "./core/self-update.ts";
 import type { Exec, Logger, SessionRef } from "./core/types.ts";
 import { createWatcher } from "./core/watcher.ts";
 import { createReleaseService, type ReleaseService } from "./release.ts";
 
 const REPO = "dboltbr/agent-recall";
+const UPDATE_KEY = Symbol.for("dbolt.agent-recall.paseo.update");
 const CLI_TIMEOUT_MS = 30_000;
 
 const log: Logger = {
@@ -64,6 +65,8 @@ interface AgentRecord {
 
 /** A lane's label: the agent that spawned it. */
 const PARENT_LABEL = "paseo.parent-agent-id";
+/** The daemon the parent agent lives on; absent on agents older than the label. */
+const PARENT_SERVER_LABEL = "paseo.parent-server-id";
 /** Lanes of lanes are followed this deep at most (a cycle in the records cannot loop). */
 const MAX_DEPTH = 10;
 
@@ -92,7 +95,19 @@ async function agentOfSession(sessionId: string): Promise<string | null> {
   return null;
 }
 
-function createDelivery(exec: Exec, stateDir: string): Delivery {
+/** `paseo ls --json` entry. */
+interface ListedAgent {
+  readonly id?: string;
+  readonly status?: string;
+}
+
+export function createDelivery(exec: Exec, stateDir: string, serverId: string): Delivery {
+  /** Live agents whose parent is `id` (`paseo ls` leaves archived ones out). */
+  async function children(id: string): Promise<ListedAgent[]> {
+    const out = await paseo(exec, ["ls", "--global", "--background", "--label", `${PARENT_LABEL}=${id}`, "--json"]);
+    const listed = JSON.parse(out) as unknown;
+    return Array.isArray(listed) ? (listed as ListedAgent[]) : [];
+  }
   async function run(args: string[], text: string): Promise<string> {
     const out = await paseo(exec, ["run", "--no-wait", "--json", ...args, text]);
     const id = (JSON.parse(out) as { agentId?: string }).agentId;
@@ -111,20 +126,44 @@ function createDelivery(exec: Exec, stateDir: string): Delivery {
         await rm(file, { force: true });
       }
     },
+    // Up the parents this daemon holds: a parent on another daemon (`paseo.parent-server-id`) or
+    // without a record here cannot be called from here, the last one that can is the root.
     async resolveRoot(target: SessionRef) {
       let id = target.id;
       for (let depth = 0; depth < MAX_DEPTH; depth++) {
-        const parent = (await agentRecord(id))?.labels?.[PARENT_LABEL];
+        const labels = (await agentRecord(id))?.labels;
+        const parent = labels?.[PARENT_LABEL];
         if (typeof parent !== "string" || !parent || parent === id) break;
+        const server = labels?.[PARENT_SERVER_LABEL];
+        if (typeof server === "string" && server && server !== serverId) break;
+        if (!(await agentRecord(parent))) break;
         id = parent;
       }
       return { ...target, id };
     },
+    // In a turn or active in the last 10 min, or one of its lanes (down the parent label) running:
+    // an orchestrator waits idle while its lanes do the work.
     async isWorking(target: SessionRef) {
       const agent = JSON.parse(await paseo(exec, ["inspect", target.id, "--json"])) as { Status?: unknown; UpdatedAt?: unknown };
       if (agent.Status === "running") return true;
       const updated = typeof agent.UpdatedAt === "string" ? Date.parse(agent.UpdatedAt) : Number.NaN;
-      return Number.isFinite(updated) && Date.now() - updated < HEARTBEAT_MS;
+      if (Number.isFinite(updated) && Date.now() - updated < HEARTBEAT_MS) return true;
+      let level = [target.id];
+      const seen = new Set(level);
+      for (let depth = 0; depth < MAX_DEPTH && level.length > 0; depth++) {
+        const next: string[] = [];
+        for (const id of level) {
+          for (const child of await children(id)) {
+            if (child.status === "running") return true;
+            if (child.id && !seen.has(child.id)) {
+              seen.add(child.id);
+              next.push(child.id);
+            }
+          }
+        }
+        level = next;
+      }
+      return false;
     },
     async open(directory: string, text: string, title: string) {
       return run(["--cwd", directory, "--title", title], text);
@@ -181,14 +220,14 @@ export function startPaseoRecall(): PaseoRecall {
       clock,
       fetch: (input, init) => fetch(input, init),
       exec,
-      delivery: createDelivery(exec, stateDir),
+      delivery: createDelivery(exec, stateDir, serverId),
       log,
       release: release.tracker,
     });
     stop = watcher.start();
     // Now and every 30 min, in the background and never awaited by stop(): applying an update
-    // stops this plugin. Once per daemon process: the reloaded plugin does not start another.
-    scheduleUpdates(globalThis as Record<symbol, unknown>, Symbol.for("dbolt.agent-recall.paseo.update"), () =>
+    // stops this plugin, and stop() cancels the schedule; the reloaded plugin starts its own.
+    scheduleUpdates(globalThis as Record<symbol, unknown>, UPDATE_KEY, () =>
       updatePaseo({
         exec,
         log,
@@ -204,6 +243,7 @@ export function startPaseoRecall(): PaseoRecall {
     async stop() {
       stopped = true;
       await boot;
+      cancelUpdates(globalThis as Record<symbol, unknown>, UPDATE_KEY);
       await stop?.();
     },
   };

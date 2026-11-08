@@ -256,3 +256,39 @@ test("entrega: filha sobe até a raiz; ocupada ou ativa há menos de 10 min trab
   assert.deepEqual(created, [{ title: "Release barrada", location: { directory: "/srv/dbolt" } }]);
   assert.deepEqual(prompts, [{ sessionID: "ses_new", text: "texto" }]);
 });
+
+test("entrega: pai ocioso com subagente em turno trabalha; datas em texto valem; sessão ausente falha em vez de travar", async () => {
+  const now = Date.now();
+  const iso = (ms: number) => new Date(ms).toISOString();
+  const sessions: SessionInfo[] = [
+    { id: "ses_parent", time: { updated: iso(now - 60 * 60_000), busy: iso(now - 2 * 60 * 60_000), idle: iso(now - 60 * 60_000) } },
+    { id: "ses_child", parentID: "ses_parent", time: { updated: now - 60 * 60_000, busy: now - 40 * 60_000, idle: now - 50 * 60_000 } },
+    { id: "ses_alone", time: { updated: iso(now - 60 * 60_000) } },
+  ];
+  const ctx: Context = {
+    session: {
+      async list(input) {
+        return { data: sessions.filter((session) => !input?.parentID || session.parentID === input.parentID) };
+      },
+      async prompt() {},
+      async get(input) {
+        if (input.sessionID === "ses_hang") return new Promise<SessionInfo>(() => {});
+        const found = sessions.find((session) => session.id === input.sessionID);
+        if (!found) throw new Error(`sessão ${input.sessionID} não existe`);
+        return found;
+      },
+      async create() {
+        return { id: "x" };
+      },
+    },
+  };
+  const clock = manualTimer();
+  const delivery = createDelivery({ ctx, poller: null }, { timer: clock.timer, timeoutMs: PROBE });
+  const target = (id: string) => ({ harness: "opencode" as const, host: "archdev", id });
+  assert.equal(await delivery.isWorking!(target("ses_parent")), true, "o filho está em turno");
+  assert.equal(await delivery.isWorking!(target("ses_alone")), false);
+  await assert.rejects(delivery.resolveRoot!(target("ses_none")), /não existe/);
+  const hung = delivery.isWorking!(target("ses_hang"));
+  clock.fire(PROBE);
+  await assert.rejects(hung);
+});

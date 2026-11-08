@@ -97,10 +97,17 @@ export function fakeGitHub(refs: RefReply[], blocked: RefReply[] = [{ status: 40
  * `release-blocked` ref, through `notes list`, `notes show` and `cat-file --batch`. `notes add` +
  * `push` record what the plugin wrote (and on which ref); `push: "reject"` loses every CAS.
  * `applyBlocked`: a blocked write replaces the note `blocked()` serves (the map must be mutable).
+ * `blockedRemote`: what the CAS read (`notes show`) of a blocked note sees, when another host already
+ * changed it after this one fetched.
  */
 export function fakeExec(
   notes: () => Record<string, Note | string>,
-  behaviour: { push?: "ok" | "reject"; blocked?: () => Record<string, BlockedNote | string>; applyBlocked?: boolean } = {},
+  behaviour: {
+    push?: "ok" | "reject";
+    blocked?: () => Record<string, BlockedNote | string>;
+    applyBlocked?: boolean;
+    blockedRemote?: () => Record<string, BlockedNote | string>;
+  } = {},
 ) {
   const calls: string[][] = [];
   const written: Array<{ key: string; ref: string; body: Record<string, unknown> }> = [];
@@ -130,6 +137,11 @@ export function fakeExec(
     const entries = blobs.filter((entry) => entry.ref === ref);
     if (sub === "fetch") return ok();
     if (sub === "notes" && args[5] === "show") {
+      const remote = ref === "blocked" ? behaviour.blockedRemote?.() : undefined;
+      if (remote) {
+        const body = remote[args[6]!];
+        return body === undefined ? { code: 1, stdout: "", stderr: "no note found" } : ok(typeof body === "string" ? body : JSON.stringify(body));
+      }
       const entry = entries.find((e) => e.key === args[6]);
       return entry ? ok(entry.body) : { code: 1, stdout: "", stderr: "no note found" };
     }

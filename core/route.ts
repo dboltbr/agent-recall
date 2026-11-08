@@ -302,9 +302,16 @@ export function routeBlocked(note: BlockedNote, me: Me): BlockedAction[] {
   if (note.state === "fix-pending") {
     const owner = parseSessionValue(text(note.owner));
     const expired = expiredSessions(note);
-    for (const target of blockedCulprits(note)) {
-      if (!mine(target, me) || (owner && sameSession(owner, target)) || expired.has(formatSession(target))) continue;
+    const others = blockedCulprits(note).filter((target) => !(owner && sameSession(owner, target)));
+    const callable = others.filter((target) => !expired.has(formatSession(target)));
+    for (const target of callable) {
+      if (!mine(target, me)) continue;
       actions.push({ kind: "blocked", release, role: "fix", target, lock: blockedLock("fix", target, note) });
+    }
+    // Every other culprit expired: the fix is the owner's own, it is told so once.
+    const fixSession = text((note.fix as { session?: unknown } | null | undefined)?.session);
+    if (owner && others.length > 0 && callable.length === 0 && !fixSession && mine(owner, me) && !expired.has(formatSession(owner))) {
+      actions.push({ kind: "blocked", release, role: "fix", target: owner, lock: blockedLock("fix", owner, note) });
     }
   }
   return actions;

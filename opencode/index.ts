@@ -42,8 +42,8 @@ export default {
       timer,
       probeTimeoutMs: 10_000,
     });
-    // Now and every 30 min, once per process, in the background: OpenCode loads the new revision
-    // on its next restart.
+    // Now and every 30 min, one schedule per process, in the background (a reloaded file hands it
+    // its own update): OpenCode loads the new revision on its next restart.
     scheduleUpdates(globalThis as Record<symbol, unknown>, updateKey, () =>
       updateOpenCode({
         exec: nodeExec,

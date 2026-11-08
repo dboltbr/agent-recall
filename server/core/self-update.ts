@@ -37,18 +37,29 @@ export function firstIn(scope: Record<symbol, unknown>, key: symbol): boolean {
 export const UPDATE_INTERVAL_MS = 30 * 60_000;
 
 export interface UpdateTimer {
-  /** Repeats `run` every `ms`; must not keep the process alive (unref'd). */
-  every(run: () => void, ms: number): void;
+  /** Repeats `run` every `ms` without keeping the process alive (unref'd); returns its cancel. */
+  every(run: () => void, ms: number): () => void;
 }
 
 const unrefTimer: UpdateTimer = {
-  every: (run, ms) => void setInterval(run, ms).unref(),
+  every: (run, ms) => {
+    const handle = setInterval(run, ms);
+    handle.unref();
+    return () => clearInterval(handle);
+  },
 };
 
+interface Schedule {
+  update: () => Promise<unknown>;
+  cancel: () => void;
+}
+
 /**
- * Runs `update` now and every 30 min, once per process (`firstIn`): a reloaded plugin does not
- * start a second schedule. A run still going when the next is due is not overlapped. Errors are
- * the update's to log; a rejection here is swallowed so the schedule goes on.
+ * Runs `update` now and every 30 min, one schedule per process (it lives in `scope`, normally
+ * `globalThis`, under `key`): a reloaded plugin hands its own `update` to the running schedule
+ * instead of starting another, so the newest module is the one that runs. A run still going when
+ * the next is due is not overlapped. Errors are the update's to log; a rejection here is swallowed
+ * so the schedule goes on. True when this call started the schedule.
  */
 export function scheduleUpdates(
   scope: Record<symbol, unknown>,
@@ -57,21 +68,35 @@ export function scheduleUpdates(
   timer: UpdateTimer = unrefTimer,
   intervalMs = UPDATE_INTERVAL_MS,
 ): boolean {
-  if (!firstIn(scope, key)) return false;
+  const current = scope[key] as Schedule | undefined;
+  if (current) {
+    current.update = update;
+    return false;
+  }
   let running = false;
+  const schedule: Schedule = { update, cancel: () => undefined };
   const tick = () => {
     if (running) return;
     running = true;
     void Promise.resolve()
-      .then(update)
+      .then(() => schedule.update())
       .catch(() => undefined)
       .finally(() => {
         running = false;
       });
   };
+  scope[key] = schedule;
   tick();
-  timer.every(tick, intervalMs);
+  schedule.cancel = timer.every(tick, intervalMs);
   return true;
+}
+
+/** Stops the schedule of `key` (a plugin being stopped); the next `scheduleUpdates` starts anew. */
+export function cancelUpdates(scope: Record<symbol, unknown>, key: symbol): void {
+  const current = scope[key] as Schedule | undefined;
+  if (!current) return;
+  current.cancel();
+  delete scope[key];
 }
 
 function lastLine(text: string): string {

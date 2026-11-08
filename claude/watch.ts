@@ -642,6 +642,7 @@ export function createClaudeWatcher(deps: ClaudeDeps): ClaudeWatcher {
             target: formatSession(target),
             ...("state" in found.note ? { state: found.note.state } : { rollback: found.note.rollback?.outcome ?? null }),
           },
+          keepUpdatedAt: blocked,
         });
         if (!landed) log.error(`${request.release}: a falha do chamado não entrou na nota`);
       } catch (failure) {

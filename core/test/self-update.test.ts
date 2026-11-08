@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 import {
+  cancelUpdates,
   CLAUDE_PLUGIN,
   firstIn,
   openCodeCommand,
@@ -241,30 +242,42 @@ test("Paseo: daemon ainda não atende → uma nova tentativa; falhas só registr
   assert.equal(await updatePaseo((await paseoDeps(applyFails.exec)).deps), "failed");
 });
 
-test("scheduleUpdates: agora e a cada 30 min, uma vez por processo, sem sobrepor", async () => {
+test("scheduleUpdates: agora e a cada 30 min, uma agenda por processo, sem sobrepor; o recarregado assume", async () => {
   const scope: Record<symbol, unknown> = {};
   const key = Symbol("u");
   const ticks: Array<() => void> = [];
-  const timer = { every: (run: () => void, ms: number) => (assert.equal(ms, UPDATE_INTERVAL_MS), ticks.push(run)) };
-  let calls = 0;
+  let cancelled = 0;
+  const timer = {
+    every: (run: () => void, ms: number) => {
+      assert.equal(ms, UPDATE_INTERVAL_MS);
+      ticks.push(run);
+      return () => void cancelled++;
+    },
+  };
+  const calls: string[] = [];
   let finish: () => void = () => {};
-  const update = () => {
-    calls++;
+  const update = (name: string) => () => {
+    calls.push(name);
     return new Promise<void>((resolve) => (finish = resolve));
   };
-  assert.equal(scheduleUpdates(scope, key, update, timer), true);
-  assert.equal(scheduleUpdates(scope, key, update, timer), false, "o plugin recarregado não agenda outra");
+  assert.equal(scheduleUpdates(scope, key, update("velho"), timer), true);
   await Promise.resolve();
-  assert.equal(calls, 1, "roda já");
+  await Promise.resolve();
+  assert.deepEqual(calls, ["velho"], "roda já");
+  assert.equal(scheduleUpdates(scope, key, update("novo"), timer), false, "o plugin recarregado não agenda outra");
   ticks[0]!();
   await Promise.resolve();
-  assert.equal(calls, 1, "a anterior ainda roda");
+  assert.deepEqual(calls, ["velho"], "a anterior ainda roda");
   finish();
   await new Promise((resolve) => setImmediate(resolve));
   ticks[0]!();
   await Promise.resolve();
-  assert.equal(calls, 2);
+  assert.deepEqual(calls, ["velho", "novo"], "a próxima volta roda o módulo novo");
   assert.equal(ticks.length, 1);
+  cancelUpdates(scope, key);
+  assert.equal(cancelled, 1);
+  assert.equal(scheduleUpdates(scope, key, update("depois"), timer), true, "parado, o próximo começa outra agenda");
+  assert.equal(ticks.length, 2);
 });
 
 test("Claude: marketplace do GitHub → marketplace update e plugin update; a cada 30 min no host", async () => {

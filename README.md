@@ -85,15 +85,26 @@ substitui a fonte de incidentes dos callbacks Paseo/OpenCode/Claude Code, sem mu
   `investigating`, `fix.session` em `fix-pending`) mantém a posse enquanto o sinal mais novo
   (`heartbeatAt`, `updatedAt`) tem menos de 20 min. O plugin do host da detentora grava
   `heartbeatAt` a partir dos 10 min se a sessão trabalha (em turno ou ativa nos últimos 10 min:
-  `paseo inspect`, `time.busy`/`time.updated` do OpenCode, mtime do transcript do Claude Code).
+  `paseo inspect`, `time.busy`/`time.idle`/`time.updated` do OpenCode, mtime do transcript do
+  Claude Code), ou se uma sessão abaixo dela trabalha (lanes do Paseo por `paseo.parent-agent-id`,
+  sessões filhas do OpenCode): o orquestrador espera ocioso enquanto as lanes corrigem. O heartbeat
+  sai mesmo quando este host não lê o histórico de releases; expirar e chamar, não.
   Posse vencida, ou chamado `red`/correção não assumido em 20 min → qualquer plugin devolve a nota a
   `red`, sem `owner`, `fix` nem `heartbeatAt`, e põe a sessão em `expired` (`{session, at,
   reason}`); ela não é chamada de novo e a trava ganha a geração (`<sessão>.blocked-<n>`). Toda
-  escrita é CAS (`updateNote`) e decide de novo sobre a nota que substitui.
+  escrita é CAS (`updateNote`) e decide de novo sobre a nota que substitui; escrita tentada (feita
+  ou recusada pela nota remota) deixa a cópia local velha: nada é chamado nem conferido com ela até
+  a próxima consulta. Falha de chamado em nota barrada não move `updatedAt`.
+- Lane chama a raiz (`resolveRoot`: pais do mesmo daemon Paseo com registro aqui, ou `parentID`
+  do OpenCode; sem resposta, a própria sessão). Raiz já expirada, por ela mesma ou por outra lane
+  dela em `expired`, expira a lane com `raiz <raiz> expirada`: uma chamada por raiz.
+- `fix-pending` com todo culpado além da dona em `expired` e sem `fix.session`: a dona é chamada
+  uma vez com o papel `fix`.
 - Nota `red` com toda sessão da faixa em `expired`: o host de incidente (`incidentHost` +
   `incidentCheckout`) reivindica `incident: {by, at}` por CAS, abre um agente novo no checkout com o
   chamado `blocked` e grava `incident.session`. Sem host de incidente, ou se ninguém assumir em 20
-  min (o agente expirou, ou abrir falhou), `recall` com `abandoned: true`, uma vez.
+  min (o agente expirou, ou abrir falhou), `recall` com `abandoned: true`, uma vez. Nota já
+  abandonada não abre agente.
 - Heartbeat a cada consulta em `~/.local/state/agent-recall/<paseo|opencode|claude>.alive`:
   `{ "pid", "polledAt", "sha" }`. O hook de commit do dbolt exige esse arquivo.
 - No OpenCode, um poller por host (trava de host `opencode.poller`, ver "Travas do host") que vive o
@@ -249,7 +260,9 @@ Conferir: `bash scripts/agent-recall.sh check` no dbolt, `paseo plugin logs agen
 ## Autoatualização
 
 Na partida e a cada 30 min, uma agenda por processo, em segundo plano e com prazo de 60 s, o plugin
-pede ao próprio harness a revisão mais nova (`core/self-update.ts`). Falha só vai para o log.
+pede ao próprio harness a revisão mais nova (`core/self-update.ts`). Falha só vai para o log. O
+plugin recarregado entrega a própria atualização à agenda em curso, sem abrir outra; o `stop()` do
+Paseo cancela a agenda.
 
 - **OpenCode**: `opencode plugin update <spec>`, com o spec lido do `package.json` da instalação
   em `…/opencode/npm/…/node_modules/agent-recall/`. O OpenCode só confere atualização ao reiniciar

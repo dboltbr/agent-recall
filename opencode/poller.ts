@@ -24,8 +24,25 @@ export interface SessionInfo {
   /** The session that spawned this one (a subagent's lane). */
   readonly parentID?: string;
   readonly location?: { readonly directory?: string };
-  /** Epoch ms: `busy` is the start of the current or last turn, `idle` its end. */
-  readonly time?: { readonly updated?: number; readonly busy?: number; readonly idle?: number };
+  /** `busy` is the start of the current or last turn, `idle` its end (epoch ms or a date). */
+  readonly time?: { readonly updated?: Instant; readonly busy?: Instant; readonly idle?: Instant };
+}
+
+type Instant = number | string | Date;
+
+function millis(value: Instant | undefined): number | null {
+  if (value === undefined) return null;
+  const ms = typeof value === "number" ? value : new Date(value).getTime();
+  return Number.isFinite(ms) ? ms : null;
+}
+
+/** In a turn (`busy` after the last `idle`), or updated in the last 10 min. */
+export function sessionWorking(session: SessionInfo, now: number): boolean {
+  const busy = millis(session.time?.busy);
+  const idle = millis(session.time?.idle);
+  if (busy !== null && (idle === null || busy > idle)) return true;
+  const updated = millis(session.time?.updated);
+  return updated !== null && now - updated < HEARTBEAT_MS;
 }
 
 /** Child sessions are followed this deep at most (a cycle cannot loop). */
@@ -36,7 +53,7 @@ export interface Context {
     prompt(input: { sessionID: string; text: string }): Promise<unknown>;
     create(input: { title?: string; parentID?: string; location?: { directory: string } }): Promise<SessionInfo>;
     get(input: { sessionID: string }): Promise<SessionInfo>;
-    list(input?: { limit?: number; order?: "asc" | "desc" }): Promise<{ data?: SessionInfo[] } | SessionInfo[]>;
+    list(input?: { limit?: number; order?: "asc" | "desc"; parentID?: string }): Promise<{ data?: SessionInfo[] } | SessionInfo[]>;
   };
 }
 
@@ -89,6 +106,11 @@ export function attach(registry: Registry, ctx: Context, deps: PollerDeps): void
 /** Host lock of the OpenCode poller (a TCP listener, `acquireHostLock`). */
 export const POLLER_LOCK = "opencode.poller";
 
+const defaultTimer: Timer = {
+  set: (run, ms) => setTimeout(run, ms).unref(),
+  clear: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+};
+
 function within<T>(promise: Promise<T>, ms: number, timer: Timer, what: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const handle = timer.set(() => reject(new Error(`${what}: sem resposta em ${ms} ms`)), ms);
@@ -109,11 +131,19 @@ function within<T>(promise: Promise<T>, ms: number, timer: Timer, what: string):
  * Sessions are reached through the newest context, disposed or not. The plugin API has no fork,
  * so a refused prompt goes to a child session in the original's directory.
  */
-export function createDelivery(registry: Registry): Delivery {
+export function createDelivery(registry: Registry, limits: { timer: Timer; timeoutMs: number } = { timer: defaultTimer, timeoutMs: 10_000 }): Delivery {
   const context = (): Context => {
     if (!registry.ctx) throw new Error("nenhum contexto OpenCode carregado");
     return registry.ctx;
   };
+  // Lease checks run inside the tick: a context that does not answer must not hold it.
+  const bounded = <T>(promise: Promise<T>, what: string) => within(promise, limits.timeoutMs, limits.timer, what);
+  const get = (sessionID: string) => bounded(context().session.get({ sessionID }), "session.get");
+  async function children(parentID: string): Promise<SessionInfo[]> {
+    const listed = await bounded(context().session.list({ parentID }), "session.list");
+    const all = Array.isArray(listed) ? listed : (listed.data ?? []);
+    return all.filter((session) => session.parentID === parentID);
+  }
   async function promptNew(session: SessionInfo, text: string): Promise<string> {
     await context().session.prompt({ sessionID: session.id, text });
     return session.id;
@@ -123,20 +153,35 @@ export function createDelivery(registry: Registry): Delivery {
       await context().session.prompt({ sessionID: target.id, text });
     },
     async resolveRoot(target: SessionRef) {
-      const ctx = context();
       let id = target.id;
       for (let depth = 0; depth < MAX_DEPTH; depth++) {
-        const parent = (await ctx.session.get({ sessionID: id })).parentID;
+        const parent = (await get(id)).parentID;
         if (!parent || parent === id) break;
         id = parent;
       }
       return { ...target, id };
     },
+    // The session or one of its children (subagents, down to MAX_DEPTH): a parent waits idle
+    // while its subagents work.
     async isWorking(target: SessionRef) {
-      const time = (await context().session.get({ sessionID: target.id })).time;
-      if (!time) return false;
-      if (typeof time.busy === "number" && (typeof time.idle !== "number" || time.busy > time.idle)) return true;
-      return typeof time.updated === "number" && Date.now() - time.updated < HEARTBEAT_MS;
+      const now = Date.now();
+      if (sessionWorking(await get(target.id), now)) return true;
+      let level = [target.id];
+      const seen = new Set(level);
+      for (let depth = 0; depth < MAX_DEPTH && level.length > 0; depth++) {
+        const next: string[] = [];
+        for (const id of level) {
+          for (const child of await children(id)) {
+            if (sessionWorking(child, now)) return true;
+            if (!seen.has(child.id)) {
+              seen.add(child.id);
+              next.push(child.id);
+            }
+          }
+        }
+        level = next;
+      }
+      return false;
     },
     async open(directory: string, text: string, title: string) {
       return promptNew(await context().session.create({ title, location: { directory } }), text);
@@ -188,7 +233,7 @@ function startPoller(registry: Registry, deps: PollerDeps, handover: Promise<voi
       clock: deps.clock,
       fetch: deps.fetch,
       exec: deps.exec,
-      delivery: createDelivery(registry),
+      delivery: createDelivery(registry, { timer, timeoutMs: deps.probeTimeoutMs }),
       log,
       // No release UI here: the history only tells whether a later release shipped (closes a blocked call).
       release: createReleaseTracker({
