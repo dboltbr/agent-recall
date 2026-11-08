@@ -8,7 +8,7 @@ var __export = (target, all) => {
 // claude/index.ts
 import { appendFileSync, existsSync as existsSync3, mkdirSync, renameSync, statSync } from "node:fs";
 import { homedir as homedir2 } from "node:os";
-import { delimiter, join as join4 } from "node:path";
+import { delimiter, join as join5 } from "node:path";
 
 // core/exec.ts
 import { spawn } from "node:child_process";
@@ -19978,8 +19978,8 @@ function imageName(name) {
   return suffix ?? prefix.slice("images-".length);
 }
 function splitJobName(name) {
-  const at = name.indexOf(" / ");
-  return at < 0 ? [name.trim(), null] : [name.slice(0, at).trim(), name.slice(at + 3).trim()];
+  const at2 = name.indexOf(" / ");
+  return at2 < 0 ? [name.trim(), null] : [name.slice(0, at2).trim(), name.slice(at2 + 3).trim()];
 }
 function jobState(job) {
   if (job.status === "in_progress") return "running";
@@ -20165,8 +20165,8 @@ var NOT_STARTED = /* @__PURE__ */ new Set(["queued", "waiting"]);
 function releaseHandoffs(note, delivered) {
   if (!note) return delivered.filter((handoff2) => handoff2.role === "blocked");
   const out = [];
-  const add = (role, ref, at) => {
-    if (ref && !out.some((known) => sameSession(known.session, ref))) out.push({ role, session: toSession(ref), at });
+  const add = (role, ref, at2) => {
+    if (ref && !out.some((known) => sameSession(known.session, ref))) out.push({ role, session: toSession(ref), at: at2 });
   };
   const ordered = [...delivered].sort((a, b) => (time3(a.at) ?? 0) - (time3(b.at) ?? 0));
   for (const handoff2 of ordered) add(handoff2.role, handoff2.session, handoff2.at);
@@ -20299,7 +20299,9 @@ async function loadConfig(path = configPath()) {
     repository: text2("repository", "dboltbr/dbolt"),
     notesRef,
     // A drill reads the drill refs of both kinds unless the config names the blocked one.
-    blockedRef: text2("blockedRef", notesRef.endsWith("-drill") ? "refs/notes/release-blocked-drill" : "refs/notes/release-blocked")
+    blockedRef: text2("blockedRef", notesRef.endsWith("-drill") ? "refs/notes/release-blocked-drill" : "refs/notes/release-blocked"),
+    // An incident host without a checkout to open the agent in is not one.
+    ...value["incidentHost"] === true && text2("incidentCheckout", "") ? { incidentHost: true, incidentCheckout: text2("incidentCheckout", "") } : {}
   };
 }
 async function writeHeartbeat(stateDir, harness, beat) {
@@ -20454,11 +20456,124 @@ async function acquireHostLock(stateDir, name, log) {
   return null;
 }
 
+// core/self-update.ts
+import { mkdir as mkdir2, readFile as readFile2, rename as rename2, writeFile as writeFile2 } from "node:fs/promises";
+import { basename, dirname as dirname2, join as join2, sep } from "node:path";
+
+// core/poll.ts
+var POLL_INTERVAL_MS = 3e4;
+var POLL_TIMEOUT_MS = 1e4;
+async function pollRef(input2) {
+  const ref = input2.notesRef.replace(/^refs\//, "");
+  const url2 = `https://api.github.com/repos/${input2.repository}/git/ref/${ref}`;
+  const headers = {
+    Accept: "application/vnd.github+json",
+    Authorization: `Bearer ${input2.token}`,
+    "User-Agent": "agent-recall",
+    "X-GitHub-Api-Version": "2022-11-28"
+  };
+  if (input2.etag) headers["If-None-Match"] = input2.etag;
+  let response;
+  try {
+    response = await input2.fetch(url2, { headers, signal: AbortSignal.timeout(POLL_TIMEOUT_MS) });
+  } catch (error62) {
+    return { kind: "error", status: null, message: describe3(error62) };
+  }
+  if (response.status === 304) return { kind: "unchanged" };
+  if (response.status === 404) return { kind: "missing" };
+  if (response.status !== 200) {
+    return { kind: "error", status: response.status, message: `GitHub respondeu ${response.status}` };
+  }
+  let sha;
+  try {
+    sha = (await response.json()).object?.sha;
+  } catch (error62) {
+    return { kind: "error", status: 200, message: describe3(error62) };
+  }
+  if (typeof sha !== "string") return { kind: "error", status: 200, message: "ref sem object.sha" };
+  return { kind: "changed", etag: response.headers.get("etag"), sha };
+}
+function describe3(error62) {
+  if (error62 === null || typeof error62 !== "object") return String(error62);
+  const fields = error62;
+  const message = typeof fields.message === "string" ? fields.message.trim() : "";
+  const tag = typeof fields._tag === "string" ? fields._tag : typeof fields.name === "string" ? fields.name : "";
+  if (message) return tag && tag !== "Error" && !message.includes(tag) ? `${tag}: ${message}` : message;
+  if (tag && tag !== "Error") return tag;
+  try {
+    return JSON.stringify(error62).slice(0, 300);
+  } catch {
+    return String(error62);
+  }
+}
+
+// core/self-update.ts
+var PACKAGE = "agent-recall";
+var UPDATE_DEADLINE_MS = 6e4;
+var PASEO_RETRY_MS = 30 * 6e4;
+var UPDATE_INTERVAL_MS = 30 * 6e4;
+function lastLine(text2) {
+  return text2.trim().split("\n").filter(Boolean).pop()?.trim().slice(0, 400) ?? "";
+}
+async function readAttempt(path) {
+  try {
+    const value = JSON.parse(await readFile2(path, "utf8"));
+    return typeof value.commit === "string" && typeof value.at === "string" ? { commit: value.commit, at: value.at } : null;
+  } catch {
+    return null;
+  }
+}
+async function writeAttempt(path, attempt) {
+  await mkdir2(dirname2(path), { recursive: true });
+  const tmp = `${path}.${process.pid}.tmp`;
+  await writeFile2(tmp, `${JSON.stringify(attempt)}
+`, "utf8");
+  await rename2(tmp, path);
+}
+var CLAUDE_MARKETPLACE = PACKAGE;
+var CLAUDE_PLUGIN = `${PACKAGE}@${CLAUDE_MARKETPLACE}`;
+async function updateClaude(deps) {
+  const { exec, log, clock } = deps;
+  const started = clock.now().getTime();
+  const remaining = () => Math.max(1e3, UPDATE_DEADLINE_MS - (clock.now().getTime() - started));
+  const claude = (args) => exec(deps.claude, ["plugin", ...args], { timeoutMs: remaining() });
+  try {
+    const marker = join2(deps.stateDir, "claude.update");
+    const last = await readAttempt(marker);
+    if (last && clock.now().getTime() - Date.parse(last.at) < UPDATE_INTERVAL_MS) return "throttled";
+    await writeAttempt(marker, { commit: "", at: clock.now().toISOString() });
+    const listed = await claude(["marketplace", "list", "--json"]);
+    if (listed.code !== 0) {
+      log.warn(`autoatualiza\xE7\xE3o: claude plugin marketplace list saiu ${listed.code}: ${lastLine(listed.stderr || listed.stdout)}`);
+      return "failed";
+    }
+    const marketplaces = JSON.parse(listed.stdout);
+    const mine2 = marketplaces.find((item) => item.name === CLAUDE_MARKETPLACE);
+    if (!mine2) throw new Error(`marketplace ${CLAUDE_MARKETPLACE} ausente do Claude Code`);
+    if (mine2.source !== "github" && mine2.source !== "git") {
+      log.info(`autoatualiza\xE7\xE3o: marketplace ${String(mine2.source)}, nada a atualizar`);
+      return "local";
+    }
+    for (const args of [["marketplace", "update", CLAUDE_MARKETPLACE], ["update", CLAUDE_PLUGIN, "--scope", "user"]]) {
+      const result = await claude(args);
+      if (result.code !== 0) {
+        log.warn(`autoatualiza\xE7\xE3o: claude plugin ${args.join(" ")} saiu ${result.code}: ${lastLine(result.stderr || result.stdout)}`);
+        return "failed";
+      }
+      if (args[0] === "update") log.info(`autoatualiza\xE7\xE3o: ${lastLine(result.stdout) || "em dia"}`);
+    }
+    return "updated";
+  } catch (error62) {
+    log.warn(`autoatualiza\xE7\xE3o: ${describe3(error62)}`);
+    return "failed";
+  }
+}
+
 // claude/watch.ts
 import { existsSync as existsSync2 } from "node:fs";
 import { randomBytes as randomBytes2 } from "node:crypto";
-import { mkdir as mkdir2, open as open2, readdir as readdir2, readFile as readFile2, rename as rename2, rm as rm2, rmdir, stat, writeFile as writeFile2 } from "node:fs/promises";
-import { join as join3 } from "node:path";
+import { mkdir as mkdir3, open as open2, readdir as readdir2, readFile as readFile3, rename as rename3, rm as rm2, rmdir, stat, writeFile as writeFile3 } from "node:fs/promises";
+import { join as join4 } from "node:path";
 
 // core/notes.ts
 import { existsSync } from "node:fs";
@@ -20512,12 +20627,17 @@ async function fetchNotes(input2, parse3 = parseNote) {
 var PUSH_ATTEMPTS = 3;
 var REJECTED = /rejected|non-fast-forward|fetch first|failed to update ref|cannot lock ref/i;
 async function recordRecallFailure(input2) {
+  const result = await updateNote({ ...input2, edit: (body) => ({ ...body, recall: input2.recall, updatedAt: input2.recall.failedAt }) });
+  return result === "written";
+}
+async function updateNote(input2) {
   const { exec, gitDir, notesRef, key } = input2;
   for (let attempt = 0; attempt < PUSH_ATTEMPTS; attempt++) {
     await fetchRef(input2);
     const shown = await exec("git", ["--git-dir", gitDir, "notes", "--ref", notesRef, "show", key], { timeoutMs: 1e4 });
-    if (shown.code !== 0 || !parseNote(shown.stdout)) return false;
-    const body = { ...JSON.parse(shown.stdout), recall: input2.recall, updatedAt: input2.recall.failedAt };
+    if (shown.code !== 0 || !parseNote(shown.stdout)) return "gone";
+    const body = input2.edit(JSON.parse(shown.stdout));
+    if (!body) return "unchanged";
     const identity = {
       GIT_AUTHOR_NAME: "agent-recall",
       GIT_AUTHOR_EMAIL: "agent-recall@dbolt.invalid",
@@ -20535,10 +20655,10 @@ async function recordRecallFailure(input2) {
       timeoutMs: FETCH_TIMEOUT_MS,
       env: gitEnv(input2.token)
     });
-    if (pushed.code === 0) return true;
+    if (pushed.code === 0) return "written";
     if (!REJECTED.test(pushed.stderr)) throw new Error(`git push ${notesRef} falhou: ${pushed.stderr.trim()}`);
   }
-  return false;
+  return "lost";
 }
 function parseNotesList(stdout) {
   return stdout.split("\n").map((line) => line.trim().split(/\s+/)).filter((parts) => parts.length === 2 && parts[0] !== "").map(([blob, key]) => ({ blob, key }));
@@ -20580,53 +20700,6 @@ function releaseName(note) {
 function parseBlockedNote(raw) {
   const note = parseNote(raw);
   return note && typeof note["state"] === "string" ? note : null;
-}
-
-// core/poll.ts
-var POLL_INTERVAL_MS = 3e4;
-var POLL_TIMEOUT_MS = 1e4;
-async function pollRef(input2) {
-  const ref = input2.notesRef.replace(/^refs\//, "");
-  const url2 = `https://api.github.com/repos/${input2.repository}/git/ref/${ref}`;
-  const headers = {
-    Accept: "application/vnd.github+json",
-    Authorization: `Bearer ${input2.token}`,
-    "User-Agent": "agent-recall",
-    "X-GitHub-Api-Version": "2022-11-28"
-  };
-  if (input2.etag) headers["If-None-Match"] = input2.etag;
-  let response;
-  try {
-    response = await input2.fetch(url2, { headers, signal: AbortSignal.timeout(POLL_TIMEOUT_MS) });
-  } catch (error62) {
-    return { kind: "error", status: null, message: describe3(error62) };
-  }
-  if (response.status === 304) return { kind: "unchanged" };
-  if (response.status === 404) return { kind: "missing" };
-  if (response.status !== 200) {
-    return { kind: "error", status: response.status, message: `GitHub respondeu ${response.status}` };
-  }
-  let sha;
-  try {
-    sha = (await response.json()).object?.sha;
-  } catch (error62) {
-    return { kind: "error", status: 200, message: describe3(error62) };
-  }
-  if (typeof sha !== "string") return { kind: "error", status: 200, message: "ref sem object.sha" };
-  return { kind: "changed", etag: response.headers.get("etag"), sha };
-}
-function describe3(error62) {
-  if (error62 === null || typeof error62 !== "object") return String(error62);
-  const fields = error62;
-  const message = typeof fields.message === "string" ? fields.message.trim() : "";
-  const tag = typeof fields._tag === "string" ? fields._tag : typeof fields.name === "string" ? fields.name : "";
-  if (message) return tag && tag !== "Error" && !message.includes(tag) ? `${tag}: ${message}` : message;
-  if (tag && tag !== "Error") return tag;
-  try {
-    return JSON.stringify(error62).slice(0, 300);
-  } catch {
-    return String(error62);
-  }
 }
 
 // core/release-fetch.ts
@@ -20922,6 +20995,8 @@ function createReleaseTracker(options) {
 // core/route.ts
 var CATCH_UP_MS = 8 * 60 * 60 * 1e3;
 var ACK_TIMEOUT_MS = 2 * 6e4;
+var LEASE_MS = 20 * 6e4;
+var HEARTBEAT_MS = 10 * 6e4;
 var ROLLBACK_WAIT_MS = 10 * 60 * 1e3;
 function mine(ref, me) {
   return ref.harness === me.harness && ref.host === me.host;
@@ -20939,14 +21014,17 @@ function notifiedSessions(note) {
   return out;
 }
 function isRecent(note, now) {
-  const at = Date.parse(note.updatedAt);
-  return Number.isFinite(at) && now.getTime() - at <= CATCH_UP_MS;
+  const at2 = Date.parse(note.updatedAt);
+  return Number.isFinite(at2) && now.getTime() - at2 <= CATCH_UP_MS;
+}
+function isBlockedRecent(note, now) {
+  return isRecent(note, now) || typeof note.heartbeatAt === "string" && isRecent({ updatedAt: note.heartbeatAt }, now);
 }
 function rollbackSettled(note, now) {
   if (note.rollback?.outcome !== "pending") return true;
   const verdictAt = note.verdict?.at;
-  const at = Date.parse(typeof verdictAt === "string" ? verdictAt : note.updatedAt);
-  return !Number.isFinite(at) || now.getTime() - at >= ROLLBACK_WAIT_MS;
+  const at2 = Date.parse(typeof verdictAt === "string" ? verdictAt : note.updatedAt);
+  return !Number.isFinite(at2) || now.getTime() - at2 >= ROLLBACK_WAIT_MS;
 }
 function route(note, me, now) {
   const owner = noteOwner(note);
@@ -20982,12 +21060,80 @@ function blockedSessions(note) {
   }
   return out;
 }
-function blockedTarget(note) {
+function expiredSessions(note) {
+  const out = /* @__PURE__ */ new Set();
+  for (const entry of list(note.expired)) {
+    const session = entry && typeof entry === "object" ? text(entry.session) : null;
+    if (session) out.add(session);
+  }
+  return out;
+}
+function blockedCandidates(note) {
   const sessions = blockedSessions(note);
-  if (sessions.length === 1) return sessions[0].ref;
   const head = text(note.range?.to);
-  if (!head) return null;
-  return sessions.find((entry) => entry.commits.some((commit) => sameCommit(commit, head)))?.ref ?? null;
+  const atHead = head ? sessions.findIndex((entry) => entry.commits.some((commit) => sameCommit(commit, head))) : -1;
+  if (atHead > 0) sessions.unshift(...sessions.splice(atHead, 1));
+  return sessions.map((entry) => entry.ref);
+}
+function blockedTarget(note) {
+  const expired = expiredSessions(note);
+  return blockedCandidates(note).find((ref) => !expired.has(formatSession(ref))) ?? null;
+}
+function blockedLock(role, target, note) {
+  const generation = list(note.expired).length;
+  return `${target.id}.${role === "fix" ? "blocked-fix" : "blocked"}${generation ? `-${generation}` : ""}`;
+}
+function at(value) {
+  return typeof value === "string" ? Date.parse(value) : Number.NaN;
+}
+function newest(...values) {
+  const finite = values.filter(Number.isFinite);
+  return finite.length ? Math.max(...finite) : Number.NaN;
+}
+var minutes = (ms) => Math.floor(ms / 6e4);
+function blockedLease(note, now) {
+  const state = note.state;
+  if (state !== "red" && state !== "investigating" && state !== "fix-pending") return { kind: "none" };
+  const updated = at(note.updatedAt);
+  const fixSession = text(note.fix?.session);
+  const holder = state === "fix-pending" ? fixSession : text(note.owner);
+  if (holder) {
+    const idle2 = now.getTime() - newest(updated, at(note.heartbeatAt));
+    if (idle2 > LEASE_MS) return { kind: "expire", who: [holder], reason: `sem sinal de trabalho h\xE1 ${minutes(idle2)} min` };
+    const ref = parseSessionValue(holder);
+    return ref ? { kind: "held", holder: ref, heartbeatDue: !(idle2 < HEARTBEAT_MS) } : { kind: "none" };
+  }
+  const idle = now.getTime() - updated;
+  if (state === "fix-pending") {
+    if (!(idle > LEASE_MS)) return { kind: "none" };
+    const owner = parseSessionValue(text(note.owner));
+    const expired = expiredSessions(note);
+    const called = blockedCulprits(note).filter((ref) => !(owner && sameSession(owner, ref)) && !expired.has(formatSession(ref))).map(formatSession);
+    const who = called.length ? called : owner ? [formatSession(owner)] : [];
+    return { kind: "expire", who, reason: `corre\xE7\xE3o n\xE3o assumida em ${minutes(idle)} min` };
+  }
+  if (state === "investigating") {
+    return idle > LEASE_MS ? { kind: "expire", who: [], reason: `investiga\xE7\xE3o sem dona h\xE1 ${minutes(idle)} min` } : { kind: "none" };
+  }
+  const target = blockedTarget(note);
+  if (target) {
+    return idle > LEASE_MS ? { kind: "expire", who: [formatSession(target)], reason: `chamado n\xE3o assumido em ${minutes(idle)} min` } : { kind: "none" };
+  }
+  if (blockedSessions(note).length === 0) return { kind: "none" };
+  const incident = note.incident && typeof note.incident === "object" ? note.incident : null;
+  const agent = text(incident?.session);
+  const quiet = now.getTime() - newest(updated, at(incident?.at));
+  return { kind: "orphan", stale: agent !== null && expiredSessions(note).has(agent) || quiet > LEASE_MS };
+}
+function expireLease(body, who, reason, now) {
+  const { owner: _owner, fix: _fix, heartbeatAt: _heartbeat, ...rest } = body;
+  const stamp = now.toISOString();
+  return {
+    ...rest,
+    state: "red",
+    expired: [...list(body["expired"]), ...who.map((session) => ({ session, at: stamp, reason }))],
+    updatedAt: stamp
+  };
 }
 function blockedCulprits(note) {
   const assessment = note.assessment;
@@ -20999,13 +21145,14 @@ function routeBlocked(note, me) {
   const actions = [];
   if (note.state === "red" && !note.owner) {
     const target = blockedTarget(note);
-    if (target && mine(target, me)) actions.push({ kind: "blocked", release, role: "blocked", target, lock: `${target.id}.blocked` });
+    if (target && mine(target, me)) actions.push({ kind: "blocked", release, role: "blocked", target, lock: blockedLock("blocked", target, note) });
   }
   if (note.state === "fix-pending") {
     const owner = parseSessionValue(text(note.owner));
+    const expired = expiredSessions(note);
     for (const target of blockedCulprits(note)) {
-      if (!mine(target, me) || owner && sameSession(owner, target)) continue;
-      actions.push({ kind: "blocked", release, role: "fix", target, lock: `${target.id}.blocked-fix` });
+      if (!mine(target, me) || owner && sameSession(owner, target) || expired.has(formatSession(target))) continue;
+      actions.push({ kind: "blocked", release, role: "fix", target, lock: blockedLock("fix", target, note) });
     }
   }
   return actions;
@@ -21023,12 +21170,15 @@ function shippedSince(note, releases) {
   const oldest = Math.min(...releases.map((release) => release.number));
   return Number.isFinite(number4) && number4 >= oldest ? false : null;
 }
-function blockedConfirmation(role, target, note, shipped, now) {
-  if (!note || shipped === true || !isRecent(note, now)) return "moot";
+function blockedConfirmation(role, target, note, shipped, now, candidate = target) {
+  if (!note || shipped === true || !isBlockedRecent(note, now)) return "moot";
   const called = formatSession(target);
   const fixSession = text(note.fix?.session);
   if (text(note.owner) === called || fixSession === called) return "taken";
-  const callable = role === "fix" ? note.state === "fix-pending" && blockedCulprits(note).some((culprit) => sameSession(culprit, target)) : note.state === "red" && !note.owner;
+  const expired = expiredSessions(note);
+  if (expired.has(called) || expired.has(formatSession(candidate))) return "moot";
+  const next = blockedTarget(note);
+  const callable = role === "fix" ? note.state === "fix-pending" && blockedCulprits(note).some((culprit) => sameSession(culprit, candidate)) : note.state === "red" && !note.owner && next !== null && sameSession(next, candidate);
   if (!callable) return "moot";
   return shipped === null ? "unknown" : "open";
 }
@@ -21099,7 +21249,7 @@ function factoryPrompt(role, note, url2) {
 }
 
 // core/watcher.ts
-import { join as join2 } from "node:path";
+import { join as join3 } from "node:path";
 
 // core/deliver.ts
 var ROLLBACK_REASONS = {
@@ -21206,6 +21356,12 @@ async function deliver(input2) {
 
 // core/watcher.ts
 var TOKEN_TTL_MS = 10 * 60 * 1e3;
+function asBlocked(body) {
+  return typeof body["state"] === "string" && typeof body["updatedAt"] === "string" ? body : null;
+}
+function isMine(ref, me) {
+  return ref.harness === me.harness && ref.host === me.host;
+}
 function createWatcher(options) {
   const { clock, exec, log } = options;
   let factoryEtag = null;
@@ -21254,7 +21410,7 @@ function createWatcher(options) {
   function failureRecorder(key, ref, extra, config2, me, auth) {
     return (failure2) => recordRecallFailure({
       exec,
-      gitDir: join2(options.stateDir, `${options.harness}.git`),
+      gitDir: join3(options.stateDir, `${options.harness}.git`),
       repository: config2.repository,
       notesRef: ref,
       token: auth,
@@ -21296,7 +21452,7 @@ function createWatcher(options) {
       const note = blocked.get(waiting.key)?.note ?? null;
       let verdict;
       try {
-        verdict = blockedConfirmation(action.role, action.target, note, note ? shippedSince(note, releases) : null, now);
+        verdict = blockedConfirmation(action.role, action.target, note, note ? shippedSince(note, releases) : null, now, action.candidate);
       } catch (error62) {
         log.error(`${action.release}: conferir o chamado: ${describe3(error62)}`);
         continue;
@@ -21351,6 +21507,128 @@ function createWatcher(options) {
     }
     return clean;
   }
+  function updateBlocked(key, config2, auth, edit) {
+    return updateNote({
+      exec,
+      gitDir: join3(options.stateDir, `${options.harness}.git`),
+      repository: config2.repository,
+      notesRef: config2.blockedRef,
+      token: auth,
+      key,
+      edit
+    });
+  }
+  async function keepLease(key, note, config2, me, auth, now, handled) {
+    const lease = blockedLease(note, now);
+    const release = releaseName(note);
+    switch (lease.kind) {
+      case "none":
+        return false;
+      case "held": {
+        const isWorking = options.delivery.isWorking;
+        if (!lease.heartbeatDue || !isMine(lease.holder, me) || !isWorking) return false;
+        let working = false;
+        try {
+          working = await isWorking(lease.holder);
+        } catch (error62) {
+          log.warn(`${release}: estado de ${formatSession(lease.holder)}: ${describe3(error62)}`);
+        }
+        if (!working) return false;
+        const stamp = now.toISOString();
+        const result = await updateBlocked(key, config2, auth, (body) => {
+          const fresh = asBlocked(body);
+          const again = fresh ? blockedLease(fresh, now) : null;
+          return again?.kind === "held" && again.heartbeatDue && sameSession(again.holder, lease.holder) ? { ...body, heartbeatAt: stamp } : null;
+        });
+        if (result === "written") log.info(`${release}: heartbeat de ${formatSession(lease.holder)}`);
+        return result === "written";
+      }
+      case "expire": {
+        let expired = null;
+        const result = await updateBlocked(key, config2, auth, (body) => {
+          const fresh = asBlocked(body);
+          expired = fresh ? blockedLease(fresh, now) : null;
+          return expired?.kind === "expire" ? expireLease(body, expired.who, expired.reason, now) : null;
+        });
+        if (result === "written") {
+          const done = expired ?? lease;
+          log.warn(`${release}: posse expirada (${done.who.join(", ") || "sem sess\xE3o"}): ${done.reason}; a nota voltou a red`);
+        }
+        return result === "written";
+      }
+      case "orphan":
+        return orphan(key, note, lease, config2, me, auth, now, handled);
+    }
+  }
+  async function orphan(key, note, lease, config2, me, auth, now, handled) {
+    const release = releaseName(note);
+    const by = `${me.harness}/${me.host}`;
+    const incident = note.incident && typeof note.incident === "object" ? note.incident : null;
+    const abandon = (reason2) => updateBlocked(key, config2, auth, (body) => {
+      const fresh = asBlocked(body);
+      if (!fresh || blockedLease(fresh, now).kind !== "orphan" || fresh.recall?.abandoned === true) return null;
+      const recall = { failedAt: now.toISOString(), reason: reason2, by, role: "blocked", target: "", state: fresh.state, abandoned: true };
+      return { ...body, recall, updatedAt: recall.failedAt };
+    });
+    const open3 = options.delivery.open;
+    const checkout = config2.incidentCheckout;
+    if (!incident && config2.incidentHost && checkout && open3) {
+      const claimedAt = now.toISOString();
+      const claimed = await updateBlocked(key, config2, auth, (body) => {
+        const fresh = asBlocked(body);
+        return fresh && !fresh.incident && blockedLease(fresh, now).kind === "orphan" ? { ...body, incident: { by, at: claimedAt } } : null;
+      });
+      if (claimed !== "written") return false;
+      const run = async () => {
+        const title = `Release barrada ${release} [incidente]${note.drill ? " [ensaio]" : ""}`;
+        try {
+          const id = await open3(checkout, blockedPrompt(release, key, note), title);
+          const target = { harness: me.harness, host: me.host, id };
+          const action = { kind: "blocked", release, role: "blocked", target, lock: "incident" };
+          log.warn(`${release}: nenhuma sess\xE3o da faixa assumiu; agente de incidente ${formatSession(target)} aberto em ${checkout}`);
+          handled.push({ action, outcome: "incident", session: id });
+          if (!note.drill) await recordHandoff(action, me, id);
+          await updateBlocked(key, config2, auth, (body) => {
+            const current = body["incident"];
+            return current?.by === by && current.at === claimedAt && !current.session ? { ...body, incident: { ...current, session: formatSession(target) } } : null;
+          }).catch((error62) => log.warn(`${release}: gravar o agente de incidente: ${describe3(error62)}`));
+        } catch (error62) {
+          const reason2 = `host de incidente ${by}: ${describe3(error62)}`;
+          log.error(`${note.drill ? "[ensaio] " : ""}${release}: n\xE3o consegui abrir o agente de incidente: ${describe3(error62)}`);
+          await abandon(reason2).catch((failure2) => log.error(`${release}: gravar a falha na nota: ${describe3(failure2)}`));
+        }
+      };
+      await (options.guard ? options.guard(run) : run());
+      return true;
+    }
+    if (!lease.stale || note.recall?.abandoned === true) return false;
+    const reason = incident ? `o agente de incidente ${typeof incident.session === "string" ? incident.session : "(n\xE3o aberto)"} n\xE3o assumiu` : "nenhuma sess\xE3o da faixa fora de expired e nenhum host de incidente assumiu";
+    const result = await abandon(reason);
+    if (result === "written") log.error(`${note.drill ? "[ensaio] " : ""}${release}: ningu\xE9m assumiu a release barrada: ${reason}`);
+    return result === "written";
+  }
+  async function rooted(action, key, note, config2, auth, now) {
+    const resolve = options.delivery.resolveRoot;
+    if (!resolve) return action;
+    const root = await resolve(action.target);
+    if (sameSession(root, action.target)) return action;
+    const rootName = formatSession(root);
+    if (expiredSessions(note).has(rootName)) {
+      if (action.role === "blocked") {
+        const lane = formatSession(action.target);
+        await updateBlocked(key, config2, auth, (body) => {
+          const fresh = asBlocked(body);
+          if (!fresh || fresh.state !== "red" || fresh.owner || !expiredSessions(fresh).has(rootName) || expiredSessions(fresh).has(lane)) return null;
+          return expireLease(body, [lane], `raiz ${rootName} expirada`, now);
+        });
+      }
+      return null;
+    }
+    const owner = parseSessionValue(typeof note.owner === "string" ? note.owner : null);
+    if (action.role === "fix" && owner && sameSession(owner, root)) return null;
+    log.info(`${action.release}: ${formatSession(action.target)} \xE9 lane; chamando a raiz ${rootName}`);
+    return { ...action, target: root, candidate: action.target, lock: blockedLock(action.role, root, note) };
+  }
   async function pollBlocked(config2, auth) {
     const poll = await pollRef({ fetch: options.fetch, token: auth, repository: config2.repository, notesRef: config2.blockedRef, etag: blockedEtag });
     if (poll.kind === "error") {
@@ -21366,7 +21644,7 @@ function createWatcher(options) {
     let fetched;
     try {
       fetched = await fetchNotes(
-        { exec, gitDir: join2(options.stateDir, `${options.harness}.git`), repository: config2.repository, notesRef: config2.blockedRef, token: auth },
+        { exec, gitDir: join3(options.stateDir, `${options.harness}.git`), repository: config2.repository, notesRef: config2.blockedRef, token: auth },
         parseBlockedNote
       );
     } catch (error62) {
@@ -21383,17 +21661,29 @@ function createWatcher(options) {
     await options.release.tick({ token: auth, notes, notesChanged: fetched || blockedPoll?.fetched === true }).catch((error62) => log.warn(`release: ${describe3(error62)}`));
     const releases = releaseHistory(options.release.current());
     for (const [key, { raw, note }] of blockedPoll?.fresh ? blocked : []) {
-      if (blockedSeen.get(key) === raw) continue;
       let actions;
       try {
         const shipped = shippedSince(note, releases);
         if (shipped === null) continue;
-        actions = shipped || !isRecent(note, now) ? [] : routeBlocked(note, me);
+        const open3 = !shipped && isBlockedRecent(note, now);
+        if (open3) {
+          try {
+            if (await keepLease(key, note, config2, me, auth, now, handled)) continue;
+          } catch (error62) {
+            log.warn(`${releaseName(note)}: posse: ${describe3(error62)}`);
+          }
+        }
+        if (blockedSeen.get(key) === raw) continue;
+        actions = open3 ? routeBlocked(note, me) : [];
       } catch (error62) {
         log.error(`nota barrada ${key.slice(0, 12)}: ${describe3(error62)}`);
         continue;
       }
-      if (await attempt(actions, (action) => actBlocked(action, key, note, config2, me, auth), handled)) blockedSeen.set(key, raw);
+      const run = async (action) => {
+        const target = await rooted(action, key, note, config2, auth, now);
+        return target ? actBlocked(target, key, note, config2, me, auth) : null;
+      };
+      if (await attempt(actions, run, handled)) blockedSeen.set(key, raw);
     }
     if (blockedPoll?.fresh) handled.push(...await followUp(me, releases));
     return blockedPoll;
@@ -21491,7 +21781,7 @@ function createWatcher(options) {
       try {
         fetchedNotes = await fetchNotes({
           exec,
-          gitDir: join2(options.stateDir, `${options.harness}.git`),
+          gitDir: join3(options.stateDir, `${options.harness}.git`),
           repository: config2.repository,
           notesRef: config2.notesRef,
           token: auth
@@ -21556,13 +21846,13 @@ var TRANSCRIPT_HEAD_BYTES = 1024 * 1024;
 var SAFE2 = /[^A-Za-z0-9._-]/g;
 var safe = (value) => value.replace(SAFE2, "_");
 function claudePaths(stateDir) {
-  const root = join3(stateDir, "claude");
+  const root = join4(stateDir, "claude");
   return {
     root,
-    pidFile: (claudePid) => join3(root, "pids", String(claudePid)),
-    armedFile: (claudePid) => join3(root, "armed", String(claudePid)),
-    inboxRoot: join3(root, "inbox"),
-    inbox: (sessionId) => join3(root, "inbox", safe(sessionId))
+    pidFile: (claudePid) => join4(root, "pids", String(claudePid)),
+    armedFile: (claudePid) => join4(root, "armed", String(claudePid)),
+    inboxRoot: join4(root, "inbox"),
+    inbox: (sessionId) => join4(root, "inbox", safe(sessionId))
   };
 }
 function parseHookInput(raw) {
@@ -21580,12 +21870,12 @@ function parseHookInput(raw) {
 }
 async function writeAtomic(path, body) {
   const tmp = `${path}.${process.pid}.tmp`;
-  await writeFile2(tmp, body, "utf8");
-  await rename2(tmp, path);
+  await writeFile3(tmp, body, "utf8");
+  await rename3(tmp, path);
 }
 async function recordSession(stateDir, claudePid, input2, clock) {
   const path = claudePaths(stateDir).pidFile(claudePid);
-  await mkdir2(join3(path, ".."), { recursive: true });
+  await mkdir3(join4(path, ".."), { recursive: true });
   const record3 = {
     sessionId: input2.sessionId,
     transcriptPath: input2.transcriptPath,
@@ -21596,7 +21886,7 @@ async function recordSession(stateDir, claudePid, input2, clock) {
 `);
 }
 async function readPidRecord(path) {
-  const raw = await readFile2(path, "utf8").catch(() => null);
+  const raw = await readFile3(path, "utf8").catch(() => null);
   if (!raw) return null;
   try {
     const record3 = JSON.parse(raw);
@@ -21610,17 +21900,17 @@ async function sessionOf(stateDir, claudePid) {
 }
 var POLLER_LOCK = "claude.poller";
 async function liveSessions(stateDir, alive) {
-  const dir = join3(claudePaths(stateDir).root, "pids");
+  const dir = join4(claudePaths(stateDir).root, "pids");
   const names = await readdir2(dir).catch(() => []);
   const out = [];
   for (const name of names) {
     const pid = Number(name);
     if (!Number.isInteger(pid) || pid <= 0) continue;
     if (!alive(pid)) {
-      await rm2(join3(dir, name), { force: true });
+      await rm2(join4(dir, name), { force: true });
       continue;
     }
-    const record3 = await readPidRecord(join3(dir, name));
+    const record3 = await readPidRecord(join4(dir, name));
     if (record3) out.push({ ...record3, pid, armed: await armedWatcher(claudePaths(stateDir).armedFile(pid), alive) });
   }
   return out;
@@ -21634,7 +21924,7 @@ var LEFTOVER_TTL_MS = 6e4;
 var STAGED = ".arming-";
 var TOMBSTONE = ".dead-";
 async function readArmedHolder(dir) {
-  const raw = await readFile2(join3(dir, HOLDER_FILE), "utf8").catch(() => null);
+  const raw = await readFile3(join4(dir, HOLDER_FILE), "utf8").catch(() => null);
   if (!raw) return null;
   try {
     const pid = Number(JSON.parse(raw).pid);
@@ -21646,12 +21936,12 @@ async function readArmedHolder(dir) {
 async function reclaimArmed(dir, seen) {
   const tomb = `${dir}${TOMBSTONE}${randomBytes2(6).toString("hex")}`;
   try {
-    await rename2(dir, tomb);
+    await rename3(dir, tomb);
   } catch {
     return false;
   }
   if (await readArmedHolder(tomb) !== seen) {
-    await rename2(tomb, dir).catch(() => void 0);
+    await rename3(tomb, dir).catch(() => void 0);
     return false;
   }
   await rm2(tomb, { recursive: true, force: true });
@@ -21660,21 +21950,21 @@ async function reclaimArmed(dir, seen) {
 async function sweepLeftovers(parent) {
   for (const name of await readdir2(parent).catch(() => [])) {
     if (!name.includes(TOMBSTONE) && !name.includes(STAGED)) continue;
-    const info = await stat(join3(parent, name)).catch(() => null);
-    if (info && Date.now() - info.mtimeMs > LEFTOVER_TTL_MS) await rm2(join3(parent, name), { recursive: true, force: true });
+    const info = await stat(join4(parent, name)).catch(() => null);
+    if (info && Date.now() - info.mtimeMs > LEFTOVER_TTL_MS) await rm2(join4(parent, name), { recursive: true, force: true });
   }
 }
 async function armWatcher(stateDir, claudePid, pid, alive) {
   const dir = claudePaths(stateDir).armedFile(claudePid);
-  const parent = join3(dir, "..");
+  const parent = join4(dir, "..");
   const staged = `${dir}${STAGED}${randomBytes2(6).toString("hex")}`;
-  await mkdir2(staged, { recursive: true });
+  await mkdir3(staged, { recursive: true });
   try {
-    await writeFile2(join3(staged, HOLDER_FILE), `${JSON.stringify({ pid })}
+    await writeFile3(join4(staged, HOLDER_FILE), `${JSON.stringify({ pid })}
 `, "utf8");
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        await rename2(staged, dir);
+        await rename3(staged, dir);
         await sweepLeftovers(parent);
         return true;
       } catch (error62) {
@@ -21708,25 +21998,25 @@ function stateOf(name) {
   if (name.endsWith(PENDING)) return { state: "pending", base: name.slice(0, -PENDING.length), pickedAt: null };
   if (name.endsWith(FALLBACK)) return { state: "fallback", base: name.slice(0, -FALLBACK.length), pickedAt: null };
   if (name.endsWith(LEGACY_PICKED)) return { state: "picked", base: name.slice(0, -LEGACY_PICKED.length), pickedAt: null };
-  const at = name.lastIndexOf(PICKED);
-  if (at < 0) return null;
-  const pickedAt = Number(name.slice(at + PICKED.length));
-  return Number.isFinite(pickedAt) ? { state: "picked", base: name.slice(0, at), pickedAt } : null;
+  const at2 = name.lastIndexOf(PICKED);
+  if (at2 < 0) return null;
+  const pickedAt = Number(name.slice(at2 + PICKED.length));
+  return Number.isFinite(pickedAt) ? { state: "picked", base: name.slice(0, at2), pickedAt } : null;
 }
 function requestBase(request) {
   return safe(`${request.release}.${request.lock}`);
 }
 async function writeRequest(stateDir, request) {
   const dir = claudePaths(stateDir).inbox(request.session);
-  await mkdir2(dir, { recursive: true });
+  await mkdir3(dir, { recursive: true });
   const base = requestBase(request);
   const names = await readdir2(dir).catch(() => []);
   if (names.some((name) => stateOf(name)?.base === base)) return;
-  await publishExclusive(join3(dir, `${base}${PENDING}`), `${JSON.stringify(request)}
+  await publishExclusive(join4(dir, `${base}${PENDING}`), `${JSON.stringify(request)}
 `);
 }
 async function readRequest(path) {
-  const raw = await readFile2(path, "utf8").catch(() => null);
+  const raw = await readFile3(path, "utf8").catch(() => null);
   if (!raw) return null;
   try {
     const value = JSON.parse(raw);
@@ -21739,10 +22029,10 @@ async function pickRequest(stateDir, sessionId, now) {
   const dir = claudePaths(stateDir).inbox(sessionId);
   const names = (await readdir2(dir).catch(() => [])).filter((name) => stateOf(name)?.state === "pending").sort();
   for (const name of names) {
-    const from = join3(dir, name);
-    const to = join3(dir, `${name.slice(0, -PENDING.length)}${PICKED}${now.getTime()}`);
+    const from = join4(dir, name);
+    const to = join4(dir, `${name.slice(0, -PENDING.length)}${PICKED}${now.getTime()}`);
     try {
-      await rename2(from, to);
+      await rename3(from, to);
     } catch {
       continue;
     }
@@ -21757,11 +22047,11 @@ async function storedRequests(stateDir) {
   const root = claudePaths(stateDir).inboxRoot;
   const out = [];
   for (const session of await readdir2(root).catch(() => [])) {
-    for (const name of await readdir2(join3(root, session)).catch(() => [])) {
+    for (const name of await readdir2(join4(root, session)).catch(() => [])) {
       const parsed = stateOf(name);
       if (!parsed) continue;
-      const path = join3(root, session, name);
-      out.push({ path, dir: join3(root, session), ...parsed, request: await readRequest(path) });
+      const path = join4(root, session, name);
+      out.push({ path, dir: join4(root, session), ...parsed, request: await readRequest(path) });
     }
   }
   return out;
@@ -21769,7 +22059,7 @@ async function storedRequests(stateDir) {
 async function findTranscript(projectsDir, sessionId) {
   const file2 = `${sessionId}.jsonl`;
   for (const project of await readdir2(projectsDir).catch(() => [])) {
-    const path = join3(projectsDir, project, file2);
+    const path = join4(projectsDir, project, file2);
     if (existsSync2(path)) return path;
   }
   return null;
@@ -21836,6 +22126,11 @@ function createClaudeDelivery(deps) {
         text: text2,
         createdAt: deps.clock.now().toISOString()
       });
+    },
+    async isWorking(target) {
+      const transcript = await findTranscript(deps.projectsDir, target.id);
+      if (!transcript) return false;
+      return deps.clock.now().getTime() - (await stat(transcript)).mtimeMs < HEARTBEAT_MS;
     },
     async fallback(target, text2) {
       const transcript = await findTranscript(deps.projectsDir, target.id);
@@ -21919,7 +22214,7 @@ function createClaudeWatcher(deps) {
       try {
         const landed = await recordRecallFailure({
           exec: deps.exec,
-          gitDir: join3(deps.stateDir, "claude.git"),
+          gitDir: join4(deps.stateDir, "claude.git"),
           repository: config2.repository,
           notesRef: found.ref,
           token: await token(),
@@ -21940,8 +22235,8 @@ function createClaudeWatcher(deps) {
     }
   }
   async function followUp(host, blockedFresh) {
-    const at = clock.now();
-    const now = at.getTime();
+    const at2 = clock.now();
+    const now = at2.getTime();
     const releases = releaseHistory(tracker?.current() ?? null);
     const sessions = await liveSessions(deps.stateDir, deps.alive);
     for (const { path, dir, base, state, pickedAt, request } of await storedRequests(deps.stateDir)) {
@@ -21955,7 +22250,7 @@ function createClaudeWatcher(deps) {
       if (request.kind === "blocked" && !blockedFresh) continue;
       const found = noteFor(request);
       const blockedNote = request.kind === "blocked" ? found?.note ?? null : null;
-      const taken = confirmation(request, state, blockedNote, host, at, blockedNote ? shippedSince(blockedNote, releases) : null);
+      const taken = confirmation(request, state, blockedNote, host, at2, blockedNote ? shippedSince(blockedNote, releases) : null);
       if (taken === "unknown") continue;
       if (taken === "taken" || taken === "moot") {
         const verb = request.kind === "blocked" ? "assumiu" : "pegou";
@@ -21966,9 +22261,9 @@ function createClaudeWatcher(deps) {
       }
       if (!due(state, pickedAt, age, now, sessions.filter((entry) => entry.sessionId === request.session))) continue;
       await guard(async () => {
-        const claim2 = join3(dir, `${base}${FALLBACK}`);
+        const claim2 = join4(dir, `${base}${FALLBACK}`);
         try {
-          await rename2(path, claim2);
+          await rename3(path, claim2);
         } catch {
           return;
         }
@@ -21977,14 +22272,21 @@ function createClaudeWatcher(deps) {
       });
     }
     for (const session of await readdir2(paths.inboxRoot).catch(() => [])) {
-      await rmdir(join3(paths.inboxRoot, session)).catch(() => void 0);
+      await rmdir(join4(paths.inboxRoot, session)).catch(() => void 0);
     }
   }
   let pollerLock = null;
   let armed = false;
+  let updating = false;
   async function poll() {
     pollerLock ??= await acquireHostLock(deps.stateDir, POLLER_LOCK, log);
     if (!pollerLock) return;
+    if (deps.update && !updating) {
+      updating = true;
+      void deps.update().catch((error62) => log.warn(`autoatualiza\xE7\xE3o: ${describe3(error62)}`)).finally(() => {
+        updating = false;
+      });
+    }
     core ??= createWatcher({
       harness: "claude",
       host: (value) => value.instance,
@@ -22099,7 +22401,7 @@ var SESSION_ENV = [
   "CLAUDE_PROJECT_DIR"
 ];
 function fileLogger(path) {
-  mkdirSync(join4(path, ".."), { recursive: true });
+  mkdirSync(join5(path, ".."), { recursive: true });
   try {
     if (statSync(path).size > LOG_MAX_BYTES) renameSync(path, `${path}.1`);
   } catch {
@@ -22131,16 +22433,16 @@ function readStdin() {
 }
 function claudeCommand(home) {
   const candidates = [
-    ...(process.env["PATH"] ?? "").split(delimiter).filter(Boolean).map((dir) => join4(dir, "claude")),
-    join4(home, ".local", "bin", "claude"),
-    join4(home, ".claude", "local", "claude")
+    ...(process.env["PATH"] ?? "").split(delimiter).filter(Boolean).map((dir) => join5(dir, "claude")),
+    join5(home, ".local", "bin", "claude"),
+    join5(home, ".claude", "local", "claude")
   ];
   return candidates.find((path) => existsSync3(path)) ?? "claude";
 }
 async function main() {
   const home = homedir2();
   const stateDir = stateDirectory(home);
-  const log = fileLogger(join4(stateDir, "claude", "watch.log"));
+  const log = fileLogger(join5(stateDir, "claude", "watch.log"));
   const claudePid = Number(process.env["CLAUDE_PID"]);
   for (const name of SESSION_ENV) delete process.env[name];
   if (!Number.isInteger(claudePid) || claudePid <= 1) {
@@ -22154,15 +22456,16 @@ async function main() {
     stateDir,
     claudePid,
     pid: process.pid,
-    sha: true ? "8d5d4402b9140d3245fd9a692248cdcea5560dec" : "unknown",
+    sha: true ? "0c2cccbd86b540093ee0179ac399a7d376fd7b23" : "unknown",
     clock,
     fetch: (url2, init) => fetch(url2, init),
     exec: nodeExec,
     loadConfig: () => loadConfig(),
     log,
     alive: isAlive,
-    projectsDir: join4(process.env["CLAUDE_CONFIG_DIR"] || join4(home, ".claude"), "projects"),
-    claude: claudeCommand(home)
+    projectsDir: join5(process.env["CLAUDE_CONFIG_DIR"] || join5(home, ".claude"), "projects"),
+    claude: claudeCommand(home),
+    update: () => updateClaude({ exec: nodeExec, log, clock, claude: claudeCommand(home), stateDir })
   });
   for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) process.once(signal, () => process.exit(0));
   const result = await runWatcher(watcher, (ms) => new Promise((resolve) => setTimeout(resolve, ms)), log);

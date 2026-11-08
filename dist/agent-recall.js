@@ -19973,8 +19973,8 @@ function imageName(name) {
   return suffix ?? prefix.slice("images-".length);
 }
 function splitJobName(name) {
-  const at = name.indexOf(" / ");
-  return at < 0 ? [name.trim(), null] : [name.slice(0, at).trim(), name.slice(at + 3).trim()];
+  const at2 = name.indexOf(" / ");
+  return at2 < 0 ? [name.trim(), null] : [name.slice(0, at2).trim(), name.slice(at2 + 3).trim()];
 }
 function jobState(job) {
   if (job.status === "in_progress") return "running";
@@ -20160,8 +20160,8 @@ var NOT_STARTED = /* @__PURE__ */ new Set(["queued", "waiting"]);
 function releaseHandoffs(note, delivered) {
   if (!note) return delivered.filter((handoff2) => handoff2.role === "blocked");
   const out = [];
-  const add = (role, ref, at) => {
-    if (ref && !out.some((known) => sameSession(known.session, ref))) out.push({ role, session: toSession(ref), at });
+  const add = (role, ref, at2) => {
+    if (ref && !out.some((known) => sameSession(known.session, ref))) out.push({ role, session: toSession(ref), at: at2 });
   };
   const ordered = [...delivered].sort((a, b) => (time3(a.at) ?? 0) - (time3(b.at) ?? 0));
   for (const handoff2 of ordered) add(handoff2.role, handoff2.session, handoff2.at);
@@ -20294,7 +20294,9 @@ async function loadConfig(path = configPath()) {
     repository: text2("repository", "dboltbr/dbolt"),
     notesRef,
     // A drill reads the drill refs of both kinds unless the config names the blocked one.
-    blockedRef: text2("blockedRef", notesRef.endsWith("-drill") ? "refs/notes/release-blocked-drill" : "refs/notes/release-blocked")
+    blockedRef: text2("blockedRef", notesRef.endsWith("-drill") ? "refs/notes/release-blocked-drill" : "refs/notes/release-blocked"),
+    // An incident host without a checkout to open the agent in is not one.
+    ...value["incidentHost"] === true && text2("incidentCheckout", "") ? { incidentHost: true, incidentCheckout: text2("incidentCheckout", "") } : {}
   };
 }
 async function writeHeartbeat(stateDir, harness, beat) {
@@ -20490,6 +20492,24 @@ function firstIn(scope, key) {
   scope[key] = true;
   return true;
 }
+var UPDATE_INTERVAL_MS = 30 * 6e4;
+var unrefTimer = {
+  every: (run, ms) => void setInterval(run, ms).unref()
+};
+function scheduleUpdates(scope, key, update, timer2 = unrefTimer, intervalMs = UPDATE_INTERVAL_MS) {
+  if (!firstIn(scope, key)) return false;
+  let running = false;
+  const tick = () => {
+    if (running) return;
+    running = true;
+    void Promise.resolve().then(update).catch(() => void 0).finally(() => {
+      running = false;
+    });
+  };
+  tick();
+  timer2.every(tick, intervalMs);
+  return true;
+}
 function lastLine(text2) {
   return text2.trim().split("\n").filter(Boolean).pop()?.trim().slice(0, 400) ?? "";
 }
@@ -20500,9 +20520,9 @@ async function openCodeTarget(moduleUrl) {
   } catch {
     return null;
   }
-  const at = path.lastIndexOf(`${sep}node_modules${sep}${PACKAGE}${sep}`);
-  if (at < 0) return null;
-  const raw = await readFile2(join2(path.slice(0, at), "package.json"), "utf8").catch(() => null);
+  const at2 = path.lastIndexOf(`${sep}node_modules${sep}${PACKAGE}${sep}`);
+  if (at2 < 0) return null;
+  const raw = await readFile2(join2(path.slice(0, at2), "package.json"), "utf8").catch(() => null);
   if (raw === null) return null;
   try {
     const spec = JSON.parse(raw).dependencies?.[PACKAGE];
@@ -20556,6 +20576,8 @@ ${result.stderr}`;
     return "failed";
   }
 }
+var CLAUDE_MARKETPLACE = PACKAGE;
+var CLAUDE_PLUGIN = `${PACKAGE}@${CLAUDE_MARKETPLACE}`;
 
 // core/notes.ts
 import { existsSync } from "node:fs";
@@ -20609,12 +20631,17 @@ async function fetchNotes(input2, parse3 = parseNote) {
 var PUSH_ATTEMPTS = 3;
 var REJECTED = /rejected|non-fast-forward|fetch first|failed to update ref|cannot lock ref/i;
 async function recordRecallFailure(input2) {
+  const result = await updateNote({ ...input2, edit: (body) => ({ ...body, recall: input2.recall, updatedAt: input2.recall.failedAt }) });
+  return result === "written";
+}
+async function updateNote(input2) {
   const { exec, gitDir, notesRef, key } = input2;
   for (let attempt = 0; attempt < PUSH_ATTEMPTS; attempt++) {
     await fetchRef(input2);
     const shown = await exec("git", ["--git-dir", gitDir, "notes", "--ref", notesRef, "show", key], { timeoutMs: 1e4 });
-    if (shown.code !== 0 || !parseNote(shown.stdout)) return false;
-    const body = { ...JSON.parse(shown.stdout), recall: input2.recall, updatedAt: input2.recall.failedAt };
+    if (shown.code !== 0 || !parseNote(shown.stdout)) return "gone";
+    const body = input2.edit(JSON.parse(shown.stdout));
+    if (!body) return "unchanged";
     const identity = {
       GIT_AUTHOR_NAME: "agent-recall",
       GIT_AUTHOR_EMAIL: "agent-recall@dbolt.invalid",
@@ -20632,10 +20659,10 @@ async function recordRecallFailure(input2) {
       timeoutMs: FETCH_TIMEOUT_MS,
       env: gitEnv(input2.token)
     });
-    if (pushed.code === 0) return true;
+    if (pushed.code === 0) return "written";
     if (!REJECTED.test(pushed.stderr)) throw new Error(`git push ${notesRef} falhou: ${pushed.stderr.trim()}`);
   }
-  return false;
+  return "lost";
 }
 function parseNotesList(stdout) {
   return stdout.split("\n").map((line) => line.trim().split(/\s+/)).filter((parts) => parts.length === 2 && parts[0] !== "").map(([blob, key]) => ({ blob, key }));
@@ -20969,6 +20996,208 @@ function createReleaseTracker(options) {
   };
 }
 
+// core/route.ts
+var CATCH_UP_MS = 8 * 60 * 60 * 1e3;
+var ACK_TIMEOUT_MS = 2 * 6e4;
+var LEASE_MS = 20 * 6e4;
+var HEARTBEAT_MS = 10 * 6e4;
+var ROLLBACK_WAIT_MS = 10 * 60 * 1e3;
+function mine(ref, me) {
+  return ref.harness === me.harness && ref.host === me.host;
+}
+function noteOwner(note) {
+  return toSessionRef(note.owner);
+}
+function notifiedSessions(note) {
+  const owner = noteOwner(note);
+  const out = [];
+  for (const entry of Array.isArray(note.notified) ? note.notified : []) {
+    const ref = toSessionRef(entry);
+    if (ref && !(owner && sameSession(owner, ref)) && !out.some((seen) => sameSession(seen, ref))) out.push(ref);
+  }
+  return out;
+}
+function isRecent(note, now) {
+  const at2 = Date.parse(note.updatedAt);
+  return Number.isFinite(at2) && now.getTime() - at2 <= CATCH_UP_MS;
+}
+function isBlockedRecent(note, now) {
+  return isRecent(note, now) || typeof note.heartbeatAt === "string" && isRecent({ updatedAt: note.heartbeatAt }, now);
+}
+function rollbackSettled(note, now) {
+  if (note.rollback?.outcome !== "pending") return true;
+  const verdictAt = note.verdict?.at;
+  const at2 = Date.parse(typeof verdictAt === "string" ? verdictAt : note.updatedAt);
+  return !Number.isFinite(at2) || now.getTime() - at2 >= ROLLBACK_WAIT_MS;
+}
+function route(note, me, now) {
+  const owner = noteOwner(note);
+  if (!owner || note.resolvedBy) return [];
+  const release = releaseName(note);
+  const actions = [];
+  if (mine(owner, me) && rollbackSettled(note, now)) {
+    actions.push({ kind: "recall", release, role: "owner", target: owner, lock: `${owner.id}.owner` });
+  }
+  for (const target of notifiedSessions(note)) {
+    if (mine(target, me)) actions.push({ kind: "recall", release, role: "notified", target, lock: `${target.id}.notified` });
+  }
+  return actions;
+}
+function sameCommit(a, b) {
+  return a.length >= 7 && b.length >= 7 && (a.startsWith(b) || b.startsWith(a));
+}
+function list(value) {
+  return Array.isArray(value) ? value : [];
+}
+function text(value) {
+  return typeof value === "string" ? value : null;
+}
+function blockedSessions(note) {
+  const out = [];
+  for (const entry of list(note.sessions)) {
+    const ref = toSessionRef(entry);
+    if (!ref) continue;
+    const commits = list(entry.commits).filter((commit) => typeof commit === "string");
+    const known = out.find((seen) => sameSession(seen.ref, ref));
+    if (known) known.commits.push(...commits);
+    else out.push({ ref, commits: [...commits] });
+  }
+  return out;
+}
+function expiredSessions(note) {
+  const out = /* @__PURE__ */ new Set();
+  for (const entry of list(note.expired)) {
+    const session = entry && typeof entry === "object" ? text(entry.session) : null;
+    if (session) out.add(session);
+  }
+  return out;
+}
+function blockedCandidates(note) {
+  const sessions = blockedSessions(note);
+  const head = text(note.range?.to);
+  const atHead = head ? sessions.findIndex((entry) => entry.commits.some((commit) => sameCommit(commit, head))) : -1;
+  if (atHead > 0) sessions.unshift(...sessions.splice(atHead, 1));
+  return sessions.map((entry) => entry.ref);
+}
+function blockedTarget(note) {
+  const expired = expiredSessions(note);
+  return blockedCandidates(note).find((ref) => !expired.has(formatSession(ref))) ?? null;
+}
+function blockedLock(role, target, note) {
+  const generation = list(note.expired).length;
+  return `${target.id}.${role === "fix" ? "blocked-fix" : "blocked"}${generation ? `-${generation}` : ""}`;
+}
+function at(value) {
+  return typeof value === "string" ? Date.parse(value) : Number.NaN;
+}
+function newest(...values) {
+  const finite = values.filter(Number.isFinite);
+  return finite.length ? Math.max(...finite) : Number.NaN;
+}
+var minutes = (ms) => Math.floor(ms / 6e4);
+function blockedLease(note, now) {
+  const state = note.state;
+  if (state !== "red" && state !== "investigating" && state !== "fix-pending") return { kind: "none" };
+  const updated = at(note.updatedAt);
+  const fixSession = text(note.fix?.session);
+  const holder = state === "fix-pending" ? fixSession : text(note.owner);
+  if (holder) {
+    const idle2 = now.getTime() - newest(updated, at(note.heartbeatAt));
+    if (idle2 > LEASE_MS) return { kind: "expire", who: [holder], reason: `sem sinal de trabalho h\xE1 ${minutes(idle2)} min` };
+    const ref = parseSessionValue(holder);
+    return ref ? { kind: "held", holder: ref, heartbeatDue: !(idle2 < HEARTBEAT_MS) } : { kind: "none" };
+  }
+  const idle = now.getTime() - updated;
+  if (state === "fix-pending") {
+    if (!(idle > LEASE_MS)) return { kind: "none" };
+    const owner = parseSessionValue(text(note.owner));
+    const expired = expiredSessions(note);
+    const called = blockedCulprits(note).filter((ref) => !(owner && sameSession(owner, ref)) && !expired.has(formatSession(ref))).map(formatSession);
+    const who = called.length ? called : owner ? [formatSession(owner)] : [];
+    return { kind: "expire", who, reason: `corre\xE7\xE3o n\xE3o assumida em ${minutes(idle)} min` };
+  }
+  if (state === "investigating") {
+    return idle > LEASE_MS ? { kind: "expire", who: [], reason: `investiga\xE7\xE3o sem dona h\xE1 ${minutes(idle)} min` } : { kind: "none" };
+  }
+  const target = blockedTarget(note);
+  if (target) {
+    return idle > LEASE_MS ? { kind: "expire", who: [formatSession(target)], reason: `chamado n\xE3o assumido em ${minutes(idle)} min` } : { kind: "none" };
+  }
+  if (blockedSessions(note).length === 0) return { kind: "none" };
+  const incident = note.incident && typeof note.incident === "object" ? note.incident : null;
+  const agent = text(incident?.session);
+  const quiet = now.getTime() - newest(updated, at(incident?.at));
+  return { kind: "orphan", stale: agent !== null && expiredSessions(note).has(agent) || quiet > LEASE_MS };
+}
+function expireLease(body, who, reason, now) {
+  const { owner: _owner, fix: _fix, heartbeatAt: _heartbeat, ...rest } = body;
+  const stamp = now.toISOString();
+  return {
+    ...rest,
+    state: "red",
+    expired: [...list(body["expired"]), ...who.map((session) => ({ session, at: stamp, reason }))],
+    updatedAt: stamp
+  };
+}
+function blockedCulprits(note) {
+  const assessment = note.assessment;
+  const suspects = list(assessment?.suspects).map((suspect) => suspect && typeof suspect === "object" ? text(suspect.commit) : null).filter((commit) => commit !== null);
+  return blockedSessions(note).filter((entry) => entry.commits.some((commit) => suspects.some((suspect) => sameCommit(commit, suspect)))).map((entry) => entry.ref);
+}
+function routeBlocked(note, me) {
+  const release = releaseName(note);
+  const actions = [];
+  if (note.state === "red" && !note.owner) {
+    const target = blockedTarget(note);
+    if (target && mine(target, me)) actions.push({ kind: "blocked", release, role: "blocked", target, lock: blockedLock("blocked", target, note) });
+  }
+  if (note.state === "fix-pending") {
+    const owner = parseSessionValue(text(note.owner));
+    const expired = expiredSessions(note);
+    for (const target of blockedCulprits(note)) {
+      if (!mine(target, me) || owner && sameSession(owner, target) || expired.has(formatSession(target))) continue;
+      actions.push({ kind: "blocked", release, role: "fix", target, lock: blockedLock("fix", target, note) });
+    }
+  }
+  return actions;
+}
+function releaseNumber(note) {
+  return Number(/^release-(\d+)$/.exec(releaseName(note))?.[1]);
+}
+function releaseHistory(snapshot) {
+  return snapshot && !snapshot.error ? snapshot.releases : null;
+}
+function shippedSince(note, releases) {
+  if (!releases || releases.length === 0) return null;
+  const number4 = releaseNumber(note);
+  if (releases.some((release) => release.tag !== null && release.number >= number4)) return true;
+  const oldest = Math.min(...releases.map((release) => release.number));
+  return Number.isFinite(number4) && number4 >= oldest ? false : null;
+}
+function blockedConfirmation(role, target, note, shipped, now, candidate = target) {
+  if (!note || shipped === true || !isBlockedRecent(note, now)) return "moot";
+  const called = formatSession(target);
+  const fixSession = text(note.fix?.session);
+  if (text(note.owner) === called || fixSession === called) return "taken";
+  const expired = expiredSessions(note);
+  if (expired.has(called) || expired.has(formatSession(candidate))) return "moot";
+  const next = blockedTarget(note);
+  const callable = role === "fix" ? note.state === "fix-pending" && blockedCulprits(note).some((culprit) => sameSession(culprit, candidate)) : note.state === "red" && !note.owner && next !== null && sameSession(next, candidate);
+  if (!callable) return "moot";
+  return shipped === null ? "unknown" : "open";
+}
+function roleOf(action) {
+  return action.kind === "recall" ? action.role : "blocked";
+}
+function describeAction(action) {
+  switch (action.kind) {
+    case "recall":
+      return `${action.release} ${action.role} \u2192 ${formatSession(action.target)}`;
+    case "blocked":
+      return `${action.release} barrada (${action.role}) \u2192 ${formatSession(action.target)}`;
+  }
+}
+
 // core/factory-api.ts
 async function pollFactory(input2) {
   const url2 = new URL(input2.url);
@@ -21025,131 +21254,6 @@ function factoryPrompt(role, note, url2) {
 
 // core/watcher.ts
 import { join as join3 } from "node:path";
-
-// core/route.ts
-var CATCH_UP_MS = 8 * 60 * 60 * 1e3;
-var ACK_TIMEOUT_MS = 2 * 6e4;
-var ROLLBACK_WAIT_MS = 10 * 60 * 1e3;
-function mine(ref, me) {
-  return ref.harness === me.harness && ref.host === me.host;
-}
-function noteOwner(note) {
-  return toSessionRef(note.owner);
-}
-function notifiedSessions(note) {
-  const owner = noteOwner(note);
-  const out = [];
-  for (const entry of Array.isArray(note.notified) ? note.notified : []) {
-    const ref = toSessionRef(entry);
-    if (ref && !(owner && sameSession(owner, ref)) && !out.some((seen) => sameSession(seen, ref))) out.push(ref);
-  }
-  return out;
-}
-function isRecent(note, now) {
-  const at = Date.parse(note.updatedAt);
-  return Number.isFinite(at) && now.getTime() - at <= CATCH_UP_MS;
-}
-function rollbackSettled(note, now) {
-  if (note.rollback?.outcome !== "pending") return true;
-  const verdictAt = note.verdict?.at;
-  const at = Date.parse(typeof verdictAt === "string" ? verdictAt : note.updatedAt);
-  return !Number.isFinite(at) || now.getTime() - at >= ROLLBACK_WAIT_MS;
-}
-function route(note, me, now) {
-  const owner = noteOwner(note);
-  if (!owner || note.resolvedBy) return [];
-  const release = releaseName(note);
-  const actions = [];
-  if (mine(owner, me) && rollbackSettled(note, now)) {
-    actions.push({ kind: "recall", release, role: "owner", target: owner, lock: `${owner.id}.owner` });
-  }
-  for (const target of notifiedSessions(note)) {
-    if (mine(target, me)) actions.push({ kind: "recall", release, role: "notified", target, lock: `${target.id}.notified` });
-  }
-  return actions;
-}
-function sameCommit(a, b) {
-  return a.length >= 7 && b.length >= 7 && (a.startsWith(b) || b.startsWith(a));
-}
-function list(value) {
-  return Array.isArray(value) ? value : [];
-}
-function text(value) {
-  return typeof value === "string" ? value : null;
-}
-function blockedSessions(note) {
-  const out = [];
-  for (const entry of list(note.sessions)) {
-    const ref = toSessionRef(entry);
-    if (!ref) continue;
-    const commits = list(entry.commits).filter((commit) => typeof commit === "string");
-    const known = out.find((seen) => sameSession(seen.ref, ref));
-    if (known) known.commits.push(...commits);
-    else out.push({ ref, commits: [...commits] });
-  }
-  return out;
-}
-function blockedTarget(note) {
-  const sessions = blockedSessions(note);
-  if (sessions.length === 1) return sessions[0].ref;
-  const head = text(note.range?.to);
-  if (!head) return null;
-  return sessions.find((entry) => entry.commits.some((commit) => sameCommit(commit, head)))?.ref ?? null;
-}
-function blockedCulprits(note) {
-  const assessment = note.assessment;
-  const suspects = list(assessment?.suspects).map((suspect) => suspect && typeof suspect === "object" ? text(suspect.commit) : null).filter((commit) => commit !== null);
-  return blockedSessions(note).filter((entry) => entry.commits.some((commit) => suspects.some((suspect) => sameCommit(commit, suspect)))).map((entry) => entry.ref);
-}
-function routeBlocked(note, me) {
-  const release = releaseName(note);
-  const actions = [];
-  if (note.state === "red" && !note.owner) {
-    const target = blockedTarget(note);
-    if (target && mine(target, me)) actions.push({ kind: "blocked", release, role: "blocked", target, lock: `${target.id}.blocked` });
-  }
-  if (note.state === "fix-pending") {
-    const owner = parseSessionValue(text(note.owner));
-    for (const target of blockedCulprits(note)) {
-      if (!mine(target, me) || owner && sameSession(owner, target)) continue;
-      actions.push({ kind: "blocked", release, role: "fix", target, lock: `${target.id}.blocked-fix` });
-    }
-  }
-  return actions;
-}
-function releaseNumber(note) {
-  return Number(/^release-(\d+)$/.exec(releaseName(note))?.[1]);
-}
-function releaseHistory(snapshot) {
-  return snapshot && !snapshot.error ? snapshot.releases : null;
-}
-function shippedSince(note, releases) {
-  if (!releases || releases.length === 0) return null;
-  const number4 = releaseNumber(note);
-  if (releases.some((release) => release.tag !== null && release.number >= number4)) return true;
-  const oldest = Math.min(...releases.map((release) => release.number));
-  return Number.isFinite(number4) && number4 >= oldest ? false : null;
-}
-function blockedConfirmation(role, target, note, shipped, now) {
-  if (!note || shipped === true || !isRecent(note, now)) return "moot";
-  const called = formatSession(target);
-  const fixSession = text(note.fix?.session);
-  if (text(note.owner) === called || fixSession === called) return "taken";
-  const callable = role === "fix" ? note.state === "fix-pending" && blockedCulprits(note).some((culprit) => sameSession(culprit, target)) : note.state === "red" && !note.owner;
-  if (!callable) return "moot";
-  return shipped === null ? "unknown" : "open";
-}
-function roleOf(action) {
-  return action.kind === "recall" ? action.role : "blocked";
-}
-function describeAction(action) {
-  switch (action.kind) {
-    case "recall":
-      return `${action.release} ${action.role} \u2192 ${formatSession(action.target)}`;
-    case "blocked":
-      return `${action.release} barrada (${action.role}) \u2192 ${formatSession(action.target)}`;
-  }
-}
 
 // core/deliver.ts
 var ROLLBACK_REASONS = {
@@ -21256,6 +21360,12 @@ async function deliver(input2) {
 
 // core/watcher.ts
 var TOKEN_TTL_MS = 10 * 60 * 1e3;
+function asBlocked(body) {
+  return typeof body["state"] === "string" && typeof body["updatedAt"] === "string" ? body : null;
+}
+function isMine(ref, me) {
+  return ref.harness === me.harness && ref.host === me.host;
+}
 function createWatcher(options) {
   const { clock, exec, log: log2 } = options;
   let factoryEtag = null;
@@ -21346,7 +21456,7 @@ function createWatcher(options) {
       const note = blocked.get(waiting.key)?.note ?? null;
       let verdict;
       try {
-        verdict = blockedConfirmation(action.role, action.target, note, note ? shippedSince(note, releases) : null, now);
+        verdict = blockedConfirmation(action.role, action.target, note, note ? shippedSince(note, releases) : null, now, action.candidate);
       } catch (error62) {
         log2.error(`${action.release}: conferir o chamado: ${describe3(error62)}`);
         continue;
@@ -21401,6 +21511,128 @@ function createWatcher(options) {
     }
     return clean;
   }
+  function updateBlocked(key, config2, auth, edit) {
+    return updateNote({
+      exec,
+      gitDir: join3(options.stateDir, `${options.harness}.git`),
+      repository: config2.repository,
+      notesRef: config2.blockedRef,
+      token: auth,
+      key,
+      edit
+    });
+  }
+  async function keepLease(key, note, config2, me, auth, now, handled) {
+    const lease = blockedLease(note, now);
+    const release = releaseName(note);
+    switch (lease.kind) {
+      case "none":
+        return false;
+      case "held": {
+        const isWorking = options.delivery.isWorking;
+        if (!lease.heartbeatDue || !isMine(lease.holder, me) || !isWorking) return false;
+        let working = false;
+        try {
+          working = await isWorking(lease.holder);
+        } catch (error62) {
+          log2.warn(`${release}: estado de ${formatSession(lease.holder)}: ${describe3(error62)}`);
+        }
+        if (!working) return false;
+        const stamp = now.toISOString();
+        const result = await updateBlocked(key, config2, auth, (body) => {
+          const fresh = asBlocked(body);
+          const again = fresh ? blockedLease(fresh, now) : null;
+          return again?.kind === "held" && again.heartbeatDue && sameSession(again.holder, lease.holder) ? { ...body, heartbeatAt: stamp } : null;
+        });
+        if (result === "written") log2.info(`${release}: heartbeat de ${formatSession(lease.holder)}`);
+        return result === "written";
+      }
+      case "expire": {
+        let expired = null;
+        const result = await updateBlocked(key, config2, auth, (body) => {
+          const fresh = asBlocked(body);
+          expired = fresh ? blockedLease(fresh, now) : null;
+          return expired?.kind === "expire" ? expireLease(body, expired.who, expired.reason, now) : null;
+        });
+        if (result === "written") {
+          const done = expired ?? lease;
+          log2.warn(`${release}: posse expirada (${done.who.join(", ") || "sem sess\xE3o"}): ${done.reason}; a nota voltou a red`);
+        }
+        return result === "written";
+      }
+      case "orphan":
+        return orphan(key, note, lease, config2, me, auth, now, handled);
+    }
+  }
+  async function orphan(key, note, lease, config2, me, auth, now, handled) {
+    const release = releaseName(note);
+    const by = `${me.harness}/${me.host}`;
+    const incident = note.incident && typeof note.incident === "object" ? note.incident : null;
+    const abandon = (reason2) => updateBlocked(key, config2, auth, (body) => {
+      const fresh = asBlocked(body);
+      if (!fresh || blockedLease(fresh, now).kind !== "orphan" || fresh.recall?.abandoned === true) return null;
+      const recall = { failedAt: now.toISOString(), reason: reason2, by, role: "blocked", target: "", state: fresh.state, abandoned: true };
+      return { ...body, recall, updatedAt: recall.failedAt };
+    });
+    const open2 = options.delivery.open;
+    const checkout = config2.incidentCheckout;
+    if (!incident && config2.incidentHost && checkout && open2) {
+      const claimedAt = now.toISOString();
+      const claimed = await updateBlocked(key, config2, auth, (body) => {
+        const fresh = asBlocked(body);
+        return fresh && !fresh.incident && blockedLease(fresh, now).kind === "orphan" ? { ...body, incident: { by, at: claimedAt } } : null;
+      });
+      if (claimed !== "written") return false;
+      const run = async () => {
+        const title = `Release barrada ${release} [incidente]${note.drill ? " [ensaio]" : ""}`;
+        try {
+          const id = await open2(checkout, blockedPrompt(release, key, note), title);
+          const target = { harness: me.harness, host: me.host, id };
+          const action = { kind: "blocked", release, role: "blocked", target, lock: "incident" };
+          log2.warn(`${release}: nenhuma sess\xE3o da faixa assumiu; agente de incidente ${formatSession(target)} aberto em ${checkout}`);
+          handled.push({ action, outcome: "incident", session: id });
+          if (!note.drill) await recordHandoff(action, me, id);
+          await updateBlocked(key, config2, auth, (body) => {
+            const current = body["incident"];
+            return current?.by === by && current.at === claimedAt && !current.session ? { ...body, incident: { ...current, session: formatSession(target) } } : null;
+          }).catch((error62) => log2.warn(`${release}: gravar o agente de incidente: ${describe3(error62)}`));
+        } catch (error62) {
+          const reason2 = `host de incidente ${by}: ${describe3(error62)}`;
+          log2.error(`${note.drill ? "[ensaio] " : ""}${release}: n\xE3o consegui abrir o agente de incidente: ${describe3(error62)}`);
+          await abandon(reason2).catch((failure2) => log2.error(`${release}: gravar a falha na nota: ${describe3(failure2)}`));
+        }
+      };
+      await (options.guard ? options.guard(run) : run());
+      return true;
+    }
+    if (!lease.stale || note.recall?.abandoned === true) return false;
+    const reason = incident ? `o agente de incidente ${typeof incident.session === "string" ? incident.session : "(n\xE3o aberto)"} n\xE3o assumiu` : "nenhuma sess\xE3o da faixa fora de expired e nenhum host de incidente assumiu";
+    const result = await abandon(reason);
+    if (result === "written") log2.error(`${note.drill ? "[ensaio] " : ""}${release}: ningu\xE9m assumiu a release barrada: ${reason}`);
+    return result === "written";
+  }
+  async function rooted(action, key, note, config2, auth, now) {
+    const resolve = options.delivery.resolveRoot;
+    if (!resolve) return action;
+    const root = await resolve(action.target);
+    if (sameSession(root, action.target)) return action;
+    const rootName = formatSession(root);
+    if (expiredSessions(note).has(rootName)) {
+      if (action.role === "blocked") {
+        const lane = formatSession(action.target);
+        await updateBlocked(key, config2, auth, (body) => {
+          const fresh = asBlocked(body);
+          if (!fresh || fresh.state !== "red" || fresh.owner || !expiredSessions(fresh).has(rootName) || expiredSessions(fresh).has(lane)) return null;
+          return expireLease(body, [lane], `raiz ${rootName} expirada`, now);
+        });
+      }
+      return null;
+    }
+    const owner = parseSessionValue(typeof note.owner === "string" ? note.owner : null);
+    if (action.role === "fix" && owner && sameSession(owner, root)) return null;
+    log2.info(`${action.release}: ${formatSession(action.target)} \xE9 lane; chamando a raiz ${rootName}`);
+    return { ...action, target: root, candidate: action.target, lock: blockedLock(action.role, root, note) };
+  }
   async function pollBlocked(config2, auth) {
     const poll = await pollRef({ fetch: options.fetch, token: auth, repository: config2.repository, notesRef: config2.blockedRef, etag: blockedEtag });
     if (poll.kind === "error") {
@@ -21433,17 +21665,29 @@ function createWatcher(options) {
     await options.release.tick({ token: auth, notes, notesChanged: fetched || blockedPoll?.fetched === true }).catch((error62) => log2.warn(`release: ${describe3(error62)}`));
     const releases = releaseHistory(options.release.current());
     for (const [key, { raw, note }] of blockedPoll?.fresh ? blocked : []) {
-      if (blockedSeen.get(key) === raw) continue;
       let actions;
       try {
         const shipped = shippedSince(note, releases);
         if (shipped === null) continue;
-        actions = shipped || !isRecent(note, now) ? [] : routeBlocked(note, me);
+        const open2 = !shipped && isBlockedRecent(note, now);
+        if (open2) {
+          try {
+            if (await keepLease(key, note, config2, me, auth, now, handled)) continue;
+          } catch (error62) {
+            log2.warn(`${releaseName(note)}: posse: ${describe3(error62)}`);
+          }
+        }
+        if (blockedSeen.get(key) === raw) continue;
+        actions = open2 ? routeBlocked(note, me) : [];
       } catch (error62) {
         log2.error(`nota barrada ${key.slice(0, 12)}: ${describe3(error62)}`);
         continue;
       }
-      if (await attempt(actions, (action) => actBlocked(action, key, note, config2, me, auth), handled)) blockedSeen.set(key, raw);
+      const run = async (action) => {
+        const target = await rooted(action, key, note, config2, auth, now);
+        return target ? actBlocked(target, key, note, config2, me, auth) : null;
+      };
+      if (await attempt(actions, run, handled)) blockedSeen.set(key, raw);
     }
     if (blockedPoll?.fresh) handled.push(...await followUp(me, releases));
     return blockedPoll;
@@ -21597,6 +21841,7 @@ function createWatcher(options) {
 }
 
 // opencode/poller.ts
+var MAX_DEPTH = 10;
 function registryIn(scope, key) {
   return scope[key] ??= { ctx: null, poller: null };
 }
@@ -21635,6 +21880,25 @@ function createDelivery(registry3) {
   return {
     async prompt(target, text2) {
       await context().session.prompt({ sessionID: target.id, text: text2 });
+    },
+    async resolveRoot(target) {
+      const ctx = context();
+      let id = target.id;
+      for (let depth = 0; depth < MAX_DEPTH; depth++) {
+        const parent = (await ctx.session.get({ sessionID: id })).parentID;
+        if (!parent || parent === id) break;
+        id = parent;
+      }
+      return { ...target, id };
+    },
+    async isWorking(target) {
+      const time4 = (await context().session.get({ sessionID: target.id })).time;
+      if (!time4) return false;
+      if (typeof time4.busy === "number" && (typeof time4.idle !== "number" || time4.busy > time4.idle)) return true;
+      return typeof time4.updated === "number" && Date.now() - time4.updated < HEARTBEAT_MS;
+    },
+    async open(directory, text2, title) {
+      return promptNew(await context().session.create({ title, location: { directory } }), text2);
     },
     async fallback(target, text2, title) {
       const ctx = context();
@@ -21736,7 +22000,7 @@ var index_default = {
   // No dispose: the poller and the newest context outlive location eviction (see ./poller.ts).
   setup(ctx) {
     attach(registry2, ctx, {
-      sha: true ? "8d5d4402b9140d3245fd9a692248cdcea5560dec" : "unknown",
+      sha: true ? "0c2cccbd86b540093ee0179ac399a7d376fd7b23" : "unknown",
       stateDir: stateDirectory(),
       pid: process.pid,
       clock: { now: () => /* @__PURE__ */ new Date() },
@@ -21748,16 +22012,18 @@ var index_default = {
       timer,
       probeTimeoutMs: 1e4
     });
-    if (firstIn(globalThis, updateKey)) {
-      void updateOpenCode({
+    scheduleUpdates(
+      globalThis,
+      updateKey,
+      () => updateOpenCode({
         exec: nodeExec,
         log,
         clock: { now: () => /* @__PURE__ */ new Date() },
         sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms).unref()),
         moduleUrl: import.meta.url,
         command: openCodeCommand(process.execPath)
-      });
-    }
+      })
+    );
   }
 };
 export {
