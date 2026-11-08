@@ -1221,8 +1221,8 @@ function prefixIssues(path, issues) {
     return iss;
   });
 }
-function unwrapMessage(message) {
-  return typeof message === "string" ? message : message?.message;
+function unwrapMessage(message2) {
+  return typeof message2 === "string" ? message2 : message2?.message;
 }
 function sizeCaps(defChecks) {
   const caps = [];
@@ -1252,7 +1252,7 @@ function finalizeIssue(iss, ctx, config2) {
       iss.schema = iss.inst;
   }
   const schemaError = iss.schema !== iss.inst ? iss.schema?._zod.def?.error : void 0;
-  const message = iss.message ? iss.message : unwrapMessage(iss.inst?._zod.def?.error?.(iss)) ?? unwrapMessage(schemaError?.(iss)) ?? unwrapMessage(ctx?.error?.(iss)) ?? unwrapMessage(config2.customError?.(iss)) ?? unwrapMessage(config2.localeError?.(iss)) ?? "Invalid input";
+  const message2 = iss.message ? iss.message : unwrapMessage(iss.inst?._zod.def?.error?.(iss)) ?? unwrapMessage(schemaError?.(iss)) ?? unwrapMessage(ctx?.error?.(iss)) ?? unwrapMessage(config2.customError?.(iss)) ?? unwrapMessage(config2.localeError?.(iss)) ?? "Invalid input";
   const full = {};
   for (const k of Object.keys(iss)) {
     if (k === "inst" || k === "schema" || k === "continue" || k === "input" || k === "__proto__")
@@ -1260,7 +1260,7 @@ function finalizeIssue(iss, ctx, config2) {
     full[k] = iss[k];
   }
   full.path ?? (full.path = []);
-  full.message = message;
+  full.message = message2;
   if (ctx?.reportInput) {
     full.input = iss.input;
   }
@@ -12999,8 +12999,8 @@ var globalRegistry = globalThis.__zod_globalRegistry;
 var INVALID = Symbol.for("zod.compile.invalid");
 var FALLBACK_FLAG = Symbol.for("zod.compile.fallback");
 var ZodCompileAsyncError = class extends Error {
-  constructor(message = "z.compile does not support async refinements, transforms, or checks") {
-    super(message);
+  constructor(message2 = "z.compile does not support async refinements, transforms, or checks") {
+    super(message2);
     this.name = "ZodCompileAsyncError";
   }
 };
@@ -15700,12 +15700,12 @@ function initializeContext(params) {
     external: params?.external ?? void 0
   };
 }
-function handleUnrepresentable(schema, ctx, json2, params, message) {
-  const result = typeof ctx.unrepresentable === "function" ? ctx.unrepresentable({ zodSchema: schema, path: params.path, message }) : ctx.unrepresentable;
+function handleUnrepresentable(schema, ctx, json2, params, message2) {
+  const result = typeof ctx.unrepresentable === "function" ? ctx.unrepresentable({ zodSchema: schema, path: params.path, message: message2 }) : ctx.unrepresentable;
   if (result === "any")
     return false;
   if (result === void 0 || result === "throw")
-    throw new Error(message);
+    throw new Error(message2);
   Object.assign(json2, result);
   return true;
 }
@@ -19779,9 +19779,9 @@ function parseSessionValue(value) {
   if (!match) return null;
   return { harness: match[1], host: match[2], id: match[3] };
 }
-function parseAgentSession(message) {
+function parseAgentSession(message2) {
   let found = null;
-  for (const match of message.matchAll(LINE)) found = parseSessionValue(match[1]) ?? found;
+  for (const match of message2.matchAll(LINE)) found = parseSessionValue(match[1]) ?? found;
   return found;
 }
 function formatSession(ref) {
@@ -20170,8 +20170,8 @@ function watchVerdict(input2) {
 function releaseNameOf(runNumber) {
   return `release-${runNumber}`;
 }
-function firstLine(message) {
-  return (message ?? "").split("\n")[0].trim();
+function firstLine(message2) {
+  return (message2 ?? "").split("\n")[0].trim();
 }
 function toSession(ref) {
   return { harness: ref.harness, host: ref.host, id: ref.id };
@@ -20534,9 +20534,9 @@ async function pollRef(input2) {
 function describe3(error62) {
   if (error62 === null || typeof error62 !== "object") return String(error62);
   const fields = error62;
-  const message = typeof fields.message === "string" ? fields.message.trim() : "";
+  const message2 = typeof fields.message === "string" ? fields.message.trim() : "";
   const tag = typeof fields._tag === "string" ? fields._tag : typeof fields.name === "string" ? fields.name : "";
-  if (message) return tag && tag !== "Error" && !message.includes(tag) ? `${tag}: ${message}` : message;
+  if (message2) return tag && tag !== "Error" && !message2.includes(tag) ? `${tag}: ${message2}` : message2;
   if (tag && tag !== "Error") return tag;
   try {
     return JSON.stringify(error62).slice(0, 300);
@@ -20756,8 +20756,8 @@ var DEFAULT_RUNNER_GROUP = 1;
 var WATCH_CHECK = "release-watch";
 var GitHubError = class extends Error {
   status;
-  constructor(status, message) {
-    super(message);
+  constructor(status, message2) {
+    super(message2);
     this.status = status;
   }
 };
@@ -20957,8 +20957,8 @@ function createReleaseSource(options) {
       });
       snapshot = buildSnapshot({ repository, workflow, releases, runners, now });
     } catch (error62) {
-      const message = describe3(error62);
-      snapshot = snapshot ? { ...snapshot, error: message } : buildSnapshot({ repository, workflow, releases: [], runners: [], now, error: message });
+      const message2 = describe3(error62);
+      snapshot = snapshot ? { ...snapshot, error: message2 } : buildSnapshot({ repository, workflow, releases: [], runners: [], now, error: message2 });
     }
     return snapshot;
   }
@@ -21035,6 +21035,53 @@ function createReleaseTracker(options) {
       return snapshot && probeError && !snapshot.error ? { ...snapshot, error: probeError } : snapshot;
     }
   };
+}
+
+// core/candidates.ts
+var message = external_exports.object({
+  kind: external_exports.literal("candidate-result"),
+  key: external_exports.string().min(1),
+  session: external_exports.string(),
+  submittedSha: external_exports.string(),
+  result: external_exports.object({ candidateId: external_exports.string(), revisionId: external_exports.string().nullable(), outcome: external_exports.enum(["approved", "rejected"]), baseSha: external_exports.string().nullable(), candidateSha: external_exports.string().nullable(), evidence: external_exports.string(), finishedAt: external_exports.string() })
+});
+async function pollCandidates(input2) {
+  if (!input2.delivery.promptCandidate) return;
+  const base = new URL(input2.url);
+  if (base.username || base.password || base.search || base.hash || base.protocol !== "https:" && !(base.protocol === "http:" && ["127.0.0.1", "localhost"].includes(base.hostname)) || !input2.token) throw new Error("Configura\xE7\xE3o de retorno de candidato inv\xE1lida");
+  async function request(path, body) {
+    const response = await input2.fetch(new URL("/verification/recall" + path, base).href, {
+      method: body ? "POST" : "GET",
+      redirect: "error",
+      signal: AbortSignal.timeout(1e4),
+      headers: { Authorization: `Bearer ${input2.token}`, "Content-Type": "application/json" },
+      body: body ? JSON.stringify(body) : void 0
+    });
+    if (!response.ok) throw new Error(`Retorno de candidato: HTTP ${response.status}`);
+    return response.json();
+  }
+  const data = external_exports.object({ candidates: external_exports.array(message).max(1e3) }).parse(await request(""));
+  for (const event of data.candidates) {
+    const target = parseSessionValue(event.session);
+    if (!target || target.host !== input2.me.host || target.harness !== input2.me.harness) continue;
+    const claim2 = external_exports.object({ claimed: external_exports.boolean() }).parse(await request("/claim", { key: event.key }));
+    if (!claim2.claimed) continue;
+    const text2 = `Resultado do candidato ${event.result.candidateId}: ${event.result.outcome === "approved" ? "aprovado" : "recusado"}. SHA enviado ${event.submittedSha}; SHA verificado ${event.result.candidateSha ?? "n\xE3o preparado"}; base ${event.result.baseSha ?? "n\xE3o preparada"}. Evid\xEAncia: ${event.result.evidence}. Este retorno \xE9 da fila antes da publica\xE7\xE3o, n\xE3o \xE9 incidente de release; n\xE3o executar rollback nem congelar produ\xE7\xE3o.`;
+    const receipt = await input2.delivery.promptCandidate(target, text2, event.key);
+    if (!receipt) {
+      await request("/queued", { key: event.key });
+      continue;
+    }
+    external_exports.object({ receipt: external_exports.string().min(1) }).parse(await request("/confirm", { key: event.key, receipt }));
+  }
+}
+async function confirmCandidate(input2) {
+  const base = new URL(input2.url);
+  if (base.protocol !== "https:" || base.username || base.password || !input2.token) throw new Error("Configura\xE7\xE3o de confirma\xE7\xE3o inv\xE1lida");
+  const response = await input2.fetch(new URL("/verification/recall/confirm", base).href, { method: "POST", redirect: "error", signal: AbortSignal.timeout(1e4), headers: { Authorization: `Bearer ${input2.token}`, "Content-Type": "application/json" }, body: JSON.stringify({ key: input2.key, receipt: input2.receipt }) });
+  if (!response.ok) throw new Error(`Confirma\xE7\xE3o de candidato: HTTP ${response.status}`);
+  const body = external_exports.object({ receipt: external_exports.string() }).parse(await response.json());
+  if (body.receipt !== input2.receipt) throw new Error("Recibo de candidato divergente");
 }
 
 // core/route.ts
@@ -21804,6 +21851,11 @@ function createWatcher(options) {
     }
     const me = { harness: options.harness, host: options.host(config2) };
     if (config2.factoryApiUrl) {
+      try {
+        await pollCandidates({ fetch: options.fetch, url: config2.factoryApiUrl, token: config2.factoryToken ?? "", me, delivery: options.delivery });
+      } catch (error62) {
+        log.warn(`candidato pendente: ${describe3(error62)}`);
+      }
       if (factoryUrl !== config2.factoryApiUrl) {
         factoryUrl = config2.factoryApiUrl;
         factoryEtag = null;
@@ -22077,6 +22129,7 @@ async function disarmWatcher(stateDir, claudePid, pid) {
   if (await readArmedHolder(dir) === pid) await rm2(dir, { recursive: true, force: true });
 }
 function actionOf(request, target) {
+  if (request.kind === "candidate-result") throw new Error("Candidato n\xE3o usa a\xE7\xE3o de incidente");
   const { release, lock } = request;
   if (request.kind === "recall") return { kind: "recall", release, role: request.role, target, lock };
   return { kind: "blocked", release, role: request.role === "fix" ? "fix" : "blocked", target, lock };
@@ -22205,6 +22258,10 @@ function createClaudeDelivery(deps) {
     return session;
   }
   return {
+    async promptCandidate(target, text2, key) {
+      await writeRequest(deps.stateDir, { release: key, kind: "candidate-result", role: "candidate", lock: target.id, session: target.id, text: text2, createdAt: deps.clock.now().toISOString() });
+      return null;
+    },
     async prompt(target, text2, action) {
       const live = (await liveSessions(deps.stateDir, deps.alive)).filter((entry) => entry.sessionId === target.id);
       if (live.length === 0) throw new Error(`sess\xE3o ${target.id} sem processo do Claude Code vivo neste host`);
@@ -22332,6 +22389,13 @@ function createClaudeWatcher(deps) {
     const releases = releaseHistory(tracker?.current() ?? null);
     const sessions = await liveSessions(deps.stateDir, deps.alive);
     for (const { path, dir, base, state, pickedAt, request } of await storedRequests(deps.stateDir)) {
+      if (request?.kind === "candidate-result") {
+        if (state === "picked" && config2?.factoryApiUrl && config2.factoryToken) {
+          await confirmCandidate({ fetch: deps.fetch, url: config2.factoryApiUrl, token: config2.factoryToken, key: request.release, receipt: `claude:${request.release}` });
+          await rm2(path, { force: true });
+        }
+        continue;
+      }
       const created = request ? Date.parse(request.createdAt) : NaN;
       const age = Number.isFinite(created) ? now - created : Infinity;
       if (!request || age > CATCH_UP_MS || state === "fallback" && age > ACK_TIMEOUT_MS + PICKUP_LIMIT_MS + STALE_FALLBACK_MS) {
@@ -22498,9 +22562,9 @@ function fileLogger(path) {
     if (statSync(path).size > LOG_MAX_BYTES) renameSync(path, `${path}.1`);
   } catch {
   }
-  const write = (level, message) => {
+  const write = (level, message2) => {
     try {
-      appendFileSync(path, `${(/* @__PURE__ */ new Date()).toISOString()} ${process.pid} ${level} ${message}
+      appendFileSync(path, `${(/* @__PURE__ */ new Date()).toISOString()} ${process.pid} ${level} ${message2}
 `);
     } catch {
     }
@@ -22548,7 +22612,7 @@ async function main() {
     stateDir,
     claudePid,
     pid: process.pid,
-    sha: true ? "224e4f76a54d9cb6076dbe0d972694acd73aa388" : "unknown",
+    sha: true ? "e5d002d2e64334558c36a439b612dc8f2fdba0c9" : "unknown",
     clock,
     fetch: (url2, init) => fetch(url2, init),
     exec: nodeExec,

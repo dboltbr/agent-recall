@@ -26,6 +26,7 @@ import { acquireHostLock, publishExclusive, readHandoffs, writeHandoff, type Hos
 import { recordRecallFailure, releaseName } from "../core/notes.ts";
 import { describe, POLL_INTERVAL_MS } from "../core/poll.ts";
 import { createReleaseSource, createReleaseTracker, type ReleaseTracker } from "../core/release-fetch.ts";
+import { confirmCandidate } from '../core/candidates.ts';
 import { ACK_TIMEOUT_MS, blockedConfirmation, CATCH_UP_MS, HEARTBEAT_MS, releaseHistory, shippedSince, type Action } from "../core/route.ts";
 import { formatSession } from "../core/trailer.ts";
 import type { BlockedNote, Clock, Exec, Fetch, HostConfig, Logger, Note, Role, SessionRef } from "../core/types.ts";
@@ -255,9 +256,9 @@ async function disarmWatcher(stateDir: string, claudePid: number, pid: number): 
 /** A call waiting in, or picked from, a session's inbox. */
 export interface Request {
   readonly release: string;
-  readonly kind: Action["kind"];
+  readonly kind: Action["kind"] | 'candidate-result';
   /** The incident role, or `blocked` / `fix` for a blocked-release call. */
-  readonly role: Role | "blocked" | "fix";
+  readonly role: Role | "blocked" | "fix" | 'candidate';
   readonly lock: string;
   readonly session: string;
   readonly text: string;
@@ -266,6 +267,7 @@ export interface Request {
 
 /** The call a stored request stands for, to hand back to the delivery. */
 function actionOf(request: Request, target: SessionRef): Action {
+  if (request.kind === 'candidate-result') throw new Error('Candidato não usa ação de incidente');
   const { release, lock } = request;
   if (request.kind === "recall") return { kind: "recall", release, role: request.role as Role, target, lock };
   return { kind: "blocked", release, role: request.role === "fix" ? "fix" : "blocked", target, lock };
@@ -489,6 +491,10 @@ export function createClaudeDelivery(deps: ClaudeDeps): Delivery {
     return session;
   }
   return {
+    async promptCandidate(target, text, key) {
+      await writeRequest(deps.stateDir, { release: key, kind: 'candidate-result', role: 'candidate', lock: target.id, session: target.id, text, createdAt: deps.clock.now().toISOString() });
+      return null;
+    },
     async prompt(target, text, action) {
       const live = (await liveSessions(deps.stateDir, deps.alive)).filter((entry) => entry.sessionId === target.id);
       if (live.length === 0) throw new Error(`sessão ${target.id} sem processo do Claude Code vivo neste host`);
@@ -665,6 +671,14 @@ export function createClaudeWatcher(deps: ClaudeDeps): ClaudeWatcher {
     const releases = releaseHistory(tracker?.current() ?? null);
     const sessions = await liveSessions(deps.stateDir, deps.alive);
     for (const { path, dir, base, state, pickedAt, request } of await storedRequests(deps.stateDir)) {
+      if (request?.kind === 'candidate-result') {
+        // Reuse the inbox's existing picked acknowledgement; queued is never delivered.
+        if (state === 'picked' && config?.factoryApiUrl && config.factoryToken) {
+          await confirmCandidate({ fetch: deps.fetch, url: config.factoryApiUrl, token: config.factoryToken, key: request.release, receipt: `claude:${request.release}` });
+          await rm(path, { force: true });
+        }
+        continue;
+      }
       const created = request ? Date.parse(request.createdAt) : NaN;
       const age = Number.isFinite(created) ? now - created : Infinity;
       if (!request || age > CATCH_UP_MS || (state === "fallback" && age > ACK_TIMEOUT_MS + PICKUP_LIMIT_MS + STALE_FALLBACK_MS)) {

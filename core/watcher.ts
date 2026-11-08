@@ -1,4 +1,5 @@
 import { pollFactory, factoryPrompt, type FactoryRecord } from "./factory-api.ts";
+import { pollCandidates } from "./candidates.ts";
 import { join } from "node:path";
 import { blockedPrompt, deliver, promptFor, type Delivery, type Failure, type Outcome } from "./deliver.ts";
 import { acquireLock, writeHandoff, writeHeartbeat } from "./host.ts";
@@ -618,6 +619,9 @@ export function createWatcher(options: WatcherOptions): Watcher {
     }
     const me: Me = { harness: options.harness, host: options.host(config) };
     if (config.factoryApiUrl) {
+      try {
+        await pollCandidates({ fetch: options.fetch, url: config.factoryApiUrl, token: config.factoryToken ?? '', me, delivery: options.delivery });
+      } catch (error) { log.warn(`candidato pendente: ${describe(error)}`); }
       if (factoryUrl !== config.factoryApiUrl) { factoryUrl = config.factoryApiUrl; factoryEtag = null; factoryRecords.clear(); notes.clear(); }
       const handled: Handled[] = [];
       let kind: "changed" | "unchanged" | "error" = "error";

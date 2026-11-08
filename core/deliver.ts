@@ -118,6 +118,8 @@ export function blockedPrompt(release: string, key: string, note: BlockedNote): 
  * for a harness that hands the call over asynchronously and confirms it later (Claude Code).
  */
 export interface Delivery {
+  /** Candidate results do not use the release incident/fallback path. */
+  promptCandidate?(target: SessionRef, text: string, key: string): Promise<string | null>;
   /** Prompt the existing session. */
   prompt(target: SessionRef, text: string, action: Action): Promise<void>;
   /** Fork (OpenCode, Claude Code) or new agent in the session's workspace (Paseo), then prompt it. */

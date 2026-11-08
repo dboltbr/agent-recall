@@ -1216,8 +1216,8 @@ function prefixIssues(path, issues) {
     return iss;
   });
 }
-function unwrapMessage(message) {
-  return typeof message === "string" ? message : message?.message;
+function unwrapMessage(message2) {
+  return typeof message2 === "string" ? message2 : message2?.message;
 }
 function sizeCaps(defChecks) {
   const caps = [];
@@ -1247,7 +1247,7 @@ function finalizeIssue(iss, ctx, config2) {
       iss.schema = iss.inst;
   }
   const schemaError = iss.schema !== iss.inst ? iss.schema?._zod.def?.error : void 0;
-  const message = iss.message ? iss.message : unwrapMessage(iss.inst?._zod.def?.error?.(iss)) ?? unwrapMessage(schemaError?.(iss)) ?? unwrapMessage(ctx?.error?.(iss)) ?? unwrapMessage(config2.customError?.(iss)) ?? unwrapMessage(config2.localeError?.(iss)) ?? "Invalid input";
+  const message2 = iss.message ? iss.message : unwrapMessage(iss.inst?._zod.def?.error?.(iss)) ?? unwrapMessage(schemaError?.(iss)) ?? unwrapMessage(ctx?.error?.(iss)) ?? unwrapMessage(config2.customError?.(iss)) ?? unwrapMessage(config2.localeError?.(iss)) ?? "Invalid input";
   const full = {};
   for (const k of Object.keys(iss)) {
     if (k === "inst" || k === "schema" || k === "continue" || k === "input" || k === "__proto__")
@@ -1255,7 +1255,7 @@ function finalizeIssue(iss, ctx, config2) {
     full[k] = iss[k];
   }
   full.path ?? (full.path = []);
-  full.message = message;
+  full.message = message2;
   if (ctx?.reportInput) {
     full.input = iss.input;
   }
@@ -12994,8 +12994,8 @@ var globalRegistry = globalThis.__zod_globalRegistry;
 var INVALID = Symbol.for("zod.compile.invalid");
 var FALLBACK_FLAG = Symbol.for("zod.compile.fallback");
 var ZodCompileAsyncError = class extends Error {
-  constructor(message = "z.compile does not support async refinements, transforms, or checks") {
-    super(message);
+  constructor(message2 = "z.compile does not support async refinements, transforms, or checks") {
+    super(message2);
     this.name = "ZodCompileAsyncError";
   }
 };
@@ -15695,12 +15695,12 @@ function initializeContext(params) {
     external: params?.external ?? void 0
   };
 }
-function handleUnrepresentable(schema, ctx, json2, params, message) {
-  const result = typeof ctx.unrepresentable === "function" ? ctx.unrepresentable({ zodSchema: schema, path: params.path, message }) : ctx.unrepresentable;
+function handleUnrepresentable(schema, ctx, json2, params, message2) {
+  const result = typeof ctx.unrepresentable === "function" ? ctx.unrepresentable({ zodSchema: schema, path: params.path, message: message2 }) : ctx.unrepresentable;
   if (result === "any")
     return false;
   if (result === void 0 || result === "throw")
-    throw new Error(message);
+    throw new Error(message2);
   Object.assign(json2, result);
   return true;
 }
@@ -19774,9 +19774,9 @@ function parseSessionValue(value) {
   if (!match) return null;
   return { harness: match[1], host: match[2], id: match[3] };
 }
-function parseAgentSession(message) {
+function parseAgentSession(message2) {
   let found = null;
-  for (const match of message.matchAll(LINE)) found = parseSessionValue(match[1]) ?? found;
+  for (const match of message2.matchAll(LINE)) found = parseSessionValue(match[1]) ?? found;
   return found;
 }
 function formatSession(ref) {
@@ -20165,8 +20165,8 @@ function watchVerdict(input2) {
 function releaseNameOf(runNumber) {
   return `release-${runNumber}`;
 }
-function firstLine(message) {
-  return (message ?? "").split("\n")[0].trim();
+function firstLine(message2) {
+  return (message2 ?? "").split("\n")[0].trim();
 }
 function toSession(ref) {
   return { harness: ref.harness, host: ref.host, id: ref.id };
@@ -20503,9 +20503,9 @@ async function pollRef(input2) {
 function describe3(error62) {
   if (error62 === null || typeof error62 !== "object") return String(error62);
   const fields = error62;
-  const message = typeof fields.message === "string" ? fields.message.trim() : "";
+  const message2 = typeof fields.message === "string" ? fields.message.trim() : "";
   const tag = typeof fields._tag === "string" ? fields._tag : typeof fields.name === "string" ? fields.name : "";
-  if (message) return tag && tag !== "Error" && !message.includes(tag) ? `${tag}: ${message}` : message;
+  if (message2) return tag && tag !== "Error" && !message2.includes(tag) ? `${tag}: ${message2}` : message2;
   if (tag && tag !== "Error") return tag;
   try {
     return JSON.stringify(error62).slice(0, 300);
@@ -20768,8 +20768,8 @@ var DEFAULT_RUNNER_GROUP = 1;
 var WATCH_CHECK = "release-watch";
 var GitHubError = class extends Error {
   status;
-  constructor(status, message) {
-    super(message);
+  constructor(status, message2) {
+    super(message2);
     this.status = status;
   }
 };
@@ -20969,8 +20969,8 @@ function createReleaseSource(options) {
       });
       snapshot = buildSnapshot({ repository, workflow, releases, runners, now });
     } catch (error62) {
-      const message = describe3(error62);
-      snapshot = snapshot ? { ...snapshot, error: message } : buildSnapshot({ repository, workflow, releases: [], runners: [], now, error: message });
+      const message2 = describe3(error62);
+      snapshot = snapshot ? { ...snapshot, error: message2 } : buildSnapshot({ repository, workflow, releases: [], runners: [], now, error: message2 });
     }
     return snapshot;
   }
@@ -21310,6 +21310,45 @@ async function pollFactory(input2) {
 function factoryPrompt(role, note, url2) {
   const verdict = note.verdict;
   return `Incidente ${note.release}. Papel: ${role}. ${role === "owner" ? "Investigue a faixa e proponha a corre\xE7\xE3o." : "Aviso, sem pedido de a\xE7\xE3o; a sess\xE3o dona investiga."} Dono: ${JSON.stringify(note.owner ?? null)}. Fontes: ${JSON.stringify(verdict?.sources ?? {})}. Rollback: ${JSON.stringify(note.rollback ?? null)}. Main congelada: ${note.frozen ? "sim" : "n\xE3o"}. ${note.drill ? "Ensaio/dry-run: nenhuma escrita externa foi autorizada." : "Qualquer a\xE7\xE3o externa exige autoriza\xE7\xE3o da respons\xE1vel."} Estado atual e evid\xEAncias: consulte a API factory ${url2}; git notes n\xE3o \xE9 autoridade. Faixa: ${JSON.stringify(note.range ?? null)}.`;
+}
+
+// core/candidates.ts
+var message = external_exports.object({
+  kind: external_exports.literal("candidate-result"),
+  key: external_exports.string().min(1),
+  session: external_exports.string(),
+  submittedSha: external_exports.string(),
+  result: external_exports.object({ candidateId: external_exports.string(), revisionId: external_exports.string().nullable(), outcome: external_exports.enum(["approved", "rejected"]), baseSha: external_exports.string().nullable(), candidateSha: external_exports.string().nullable(), evidence: external_exports.string(), finishedAt: external_exports.string() })
+});
+async function pollCandidates(input2) {
+  if (!input2.delivery.promptCandidate) return;
+  const base = new URL(input2.url);
+  if (base.username || base.password || base.search || base.hash || base.protocol !== "https:" && !(base.protocol === "http:" && ["127.0.0.1", "localhost"].includes(base.hostname)) || !input2.token) throw new Error("Configura\xE7\xE3o de retorno de candidato inv\xE1lida");
+  async function request(path, body) {
+    const response = await input2.fetch(new URL("/verification/recall" + path, base).href, {
+      method: body ? "POST" : "GET",
+      redirect: "error",
+      signal: AbortSignal.timeout(1e4),
+      headers: { Authorization: `Bearer ${input2.token}`, "Content-Type": "application/json" },
+      body: body ? JSON.stringify(body) : void 0
+    });
+    if (!response.ok) throw new Error(`Retorno de candidato: HTTP ${response.status}`);
+    return response.json();
+  }
+  const data = external_exports.object({ candidates: external_exports.array(message).max(1e3) }).parse(await request(""));
+  for (const event of data.candidates) {
+    const target = parseSessionValue(event.session);
+    if (!target || target.host !== input2.me.host || target.harness !== input2.me.harness) continue;
+    const claim2 = external_exports.object({ claimed: external_exports.boolean() }).parse(await request("/claim", { key: event.key }));
+    if (!claim2.claimed) continue;
+    const text2 = `Resultado do candidato ${event.result.candidateId}: ${event.result.outcome === "approved" ? "aprovado" : "recusado"}. SHA enviado ${event.submittedSha}; SHA verificado ${event.result.candidateSha ?? "n\xE3o preparado"}; base ${event.result.baseSha ?? "n\xE3o preparada"}. Evid\xEAncia: ${event.result.evidence}. Este retorno \xE9 da fila antes da publica\xE7\xE3o, n\xE3o \xE9 incidente de release; n\xE3o executar rollback nem congelar produ\xE7\xE3o.`;
+    const receipt = await input2.delivery.promptCandidate(target, text2, event.key);
+    if (!receipt) {
+      await request("/queued", { key: event.key });
+      continue;
+    }
+    external_exports.object({ receipt: external_exports.string().min(1) }).parse(await request("/confirm", { key: event.key, receipt }));
+  }
 }
 
 // core/watcher.ts
@@ -21816,6 +21855,11 @@ function createWatcher(options) {
     }
     const me = { harness: options.harness, host: options.host(config2) };
     if (config2.factoryApiUrl) {
+      try {
+        await pollCandidates({ fetch: options.fetch, url: config2.factoryApiUrl, token: config2.factoryToken ?? "", me, delivery: options.delivery });
+      } catch (error62) {
+        log2.warn(`candidato pendente: ${describe3(error62)}`);
+      }
       if (factoryUrl !== config2.factoryApiUrl) {
         factoryUrl = config2.factoryApiUrl;
         factoryEtag = null;
@@ -22000,6 +22044,10 @@ function createDelivery(registry3, limits = { timer: defaultTimer, timeoutMs: 1e
     return session.id;
   }
   return {
+    async promptCandidate(target, text2, key) {
+      await bounded(context().session.prompt({ sessionID: target.id, text: text2 }), "candidate.prompt");
+      return `opencode:${key}`;
+    },
     async prompt(target, text2) {
       await context().session.prompt({ sessionID: target.id, text: text2 });
     },
@@ -22122,9 +22170,9 @@ function startPoller(registry3, deps, handover) {
 
 // opencode/index.ts
 var log = {
-  info: (message) => console.log(`[agent-recall] ${message}`),
-  warn: (message) => console.warn(`[agent-recall] ${message}`),
-  error: (message) => console.error(`[agent-recall] ${message}`)
+  info: (message2) => console.log(`[agent-recall] ${message2}`),
+  warn: (message2) => console.warn(`[agent-recall] ${message2}`),
+  error: (message2) => console.error(`[agent-recall] ${message2}`)
 };
 var timer = {
   set: (run, ms) => setTimeout(run, ms).unref(),
@@ -22137,7 +22185,7 @@ var index_default = {
   // No dispose: the poller and the newest context outlive location eviction (see ./poller.ts).
   setup(ctx) {
     attach(registry2, ctx, {
-      sha: true ? "224e4f76a54d9cb6076dbe0d972694acd73aa388" : "unknown",
+      sha: true ? "e5d002d2e64334558c36a439b612dc8f2fdba0c9" : "unknown",
       stateDir: stateDirectory(),
       pid: process.pid,
       clock: { now: () => /* @__PURE__ */ new Date() },

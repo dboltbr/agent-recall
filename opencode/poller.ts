@@ -149,6 +149,10 @@ export function createDelivery(registry: Registry, limits: { timer: Timer; timeo
     return session.id;
   }
   return {
+    async promptCandidate(target: SessionRef, text: string, key: string) {
+      await bounded(context().session.prompt({ sessionID: target.id, text }), 'candidate.prompt');
+      return `opencode:${key}`;
+    },
     async prompt(target: SessionRef, text: string) {
       await context().session.prompt({ sessionID: target.id, text });
     },

@@ -142,6 +142,14 @@ export function createDelivery(exec: Exec, stateDir: string, serverId: string): 
     return id;
   }
   return {
+    async promptCandidate(target: SessionRef, text: string, key: string) {
+      const file = join(stateDir, `candidate-${process.pid}-${Date.now()}.txt`);
+      await writeFile(file, text, 'utf8');
+      try {
+        await paseo(exec, ['send', target.id, '--prompt-file', file, '--behavior', 'steer', '--no-wait']);
+        return `paseo:${key}`;
+      } finally { await rm(file, { force: true }); }
+    },
     async prompt(target: SessionRef, text: string) {
       const file = join(stateDir, `prompt-${process.pid}-${Date.now()}.txt`);
       await writeFile(file, text, "utf8");
