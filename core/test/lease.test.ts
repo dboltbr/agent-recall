@@ -178,11 +178,12 @@ async function setup(options: {
   releases?: Release[] | null;
   /** The note another host already rewrote (the CAS reads it, the fetch did not). */
   remote?: Record<string, BlockedNote>;
+  push?: "ok" | "reject" | "deny";
 }) {
   const stateDir = await tempState();
   const configFile = await writeConfig(await tempState(), { ...config, ...options.config });
   const remote = options.remote;
-  const git = fakeExec(() => ({}), { blocked: () => options.blocked, applyBlocked: true, blockedRemote: remote ? () => remote : undefined });
+  const git = fakeExec(() => ({}), { blocked: () => options.blocked, applyBlocked: true, blockedRemote: remote ? () => remote : undefined, push: options.push });
   // Every fetch sees the ref move: the watcher reads what the last tick wrote.
   const github = fakeGitHub([{ status: 404 }], options.blockedRefs ?? [1, 2, 3, 4, 5, 6].map((n) => ({ status: 200, etag: `"b${n}"` })));
   const delivery = options.delivery ?? fakeDelivery();
@@ -279,17 +280,70 @@ test("watcher: raiz já expirada → a lane entra em expired e a próxima sessã
   assert.deepEqual(delivery.recorded.prompts.map((prompt) => prompt.target.id), ["agent-b"]);
 });
 
-test("watcher: chamado de correção cuja raiz é a dona não sai", async () => {
+test("watcher: culpada que é lane da dona → a correção é da dona, chamada uma vez", async () => {
   const note = blockedNote({
     state: "fix-pending",
     owner: "paseo/srv/agent-root",
-    sessions: [session("paseo", "srv", "agent-lane", ["aaaaaaa1"])],
-    assessment: { suspects: [{ commit: "aaaaaaa1" }] },
+    sessions: [session("paseo", "srv", "agent-lane", ["aaaaaaa1"]), session("paseo", "srv", "agent-lane2", ["bbbbbbb2"])],
+    assessment: { suspects: [{ commit: "aaaaaaa1" }, { commit: "bbbbbbb2" }] },
     updatedAt: ago(1),
   });
-  const { watcher, delivery } = await setup({ blocked: { [HEAD]: note }, harness: "paseo", delivery: fakeDelivery({ roots: { "agent-lane": "agent-root" } }) });
+  const roots = { "agent-lane": "agent-root", "agent-lane2": "agent-root" };
+  const { watcher, delivery, stateDir } = await setup({ blocked: { [HEAD]: note }, harness: "paseo", delivery: fakeDelivery({ roots }) });
+  await watcher.tick();
+  assert.deepEqual(delivery.recorded.prompts.map((prompt) => prompt.target.id), ["agent-root"]);
+  assert.ok(existsSync(join(stateDir, "release-292", "agent-root.blocked-fix")));
+  const taken = await setup({
+    blocked: { [HEAD]: { ...note, fix: { session: "paseo/srv/agent-root" } } },
+    harness: "paseo",
+    delivery: fakeDelivery({ roots }),
+  });
+  await taken.watcher.tick();
+  assert.equal(taken.delivery.recorded.prompts.length, 0, "correção já assumida: a dona não é chamada");
+});
+
+test("watcher: a raiz já chamada por uma lane expirada é a próxima candidata → expira, sem chamado", async () => {
+  const note = blockedNote({
+    sessions: [session("paseo", "srv", "agent-root", ["bbbbbbb2"]), session("paseo", "srv", "agent-lane1", ["aaaaaaa1"])],
+    expired: expired("paseo/srv/agent-lane1"),
+  });
+  const { watcher, delivery, git } = await setup({ blocked: { [HEAD]: note }, harness: "paseo", delivery: fakeDelivery({ roots: { "agent-lane1": "agent-root" } }) });
   await watcher.tick();
   assert.equal(delivery.recorded.prompts.length, 0);
+  const entries = git.written[0]!.body["expired"] as Array<{ session: string; reason: string }>;
+  assert.deepEqual(entries.at(-1), { session: "paseo/srv/agent-root", at: NOW.toISOString(), reason: "raiz paseo/srv/agent-root expirada" });
+  await watcher.tick();
+  assert.equal(delivery.recorded.prompts.length, 0, "órfã: ninguém da faixa");
+});
+
+test("watcher: posse que não grava por erro (push sem permissão) não segura a nota", async () => {
+  const { watcher, delivery, git, github } = await setup({ blocked: { [HEAD]: blockedNote({ updatedAt: ago(21) }) }, push: "deny" });
+  await watcher.tick();
+  assert.equal(git.written.length, 0);
+  assert.deepEqual(delivery.recorded.prompts.map((prompt) => prompt.target.id), ["ses_a"], "a cópia em cache é roteada");
+  await watcher.tick();
+  const polls = github.blockedCalls();
+  assert.equal(polls[1]!.headers["If-None-Match"], '"b1"', "a ETag fica: nada mudou no remoto");
+});
+
+test("watcher: sem número na release, com histórico, nem o heartbeat sai", async () => {
+  const owned = blockedNote({ release: "release-hotfix", state: "investigating", owner: "opencode/archdev/ses_a", updatedAt: ago(15) });
+  const { watcher, git, delivery } = await setup({ blocked: { [HEAD]: owned }, delivery: fakeDelivery({ working: ["ses_a"] }) });
+  await watcher.tick();
+  assert.equal(git.written.length, 0);
+  assert.deepEqual(delivery.recorded.asked, []);
+});
+
+test("watcher: a volta que grava a posse não faz fallback do chamado com a cópia velha", async () => {
+  const { watcher, delivery, later } = await setup({ blocked: { [HEAD]: blockedNote() } });
+  await watcher.tick();
+  assert.deepEqual(delivery.recorded.prompts.map((prompt) => prompt.target.id), ["ses_a"]);
+  later(16 * 60_000);
+  await watcher.tick();
+  assert.equal(delivery.recorded.fallbacks.length, 0, "ses_a expirou nesta volta: o chamado dela é moot");
+  await watcher.tick();
+  assert.equal(delivery.recorded.fallbacks.length, 0);
+  assert.deepEqual(delivery.recorded.prompts.map((prompt) => prompt.target.id), ["ses_a", "ses_b"]);
 });
 
 const orphanNote = (partial: Partial<BlockedNote> = {}) =>
@@ -457,4 +511,21 @@ test("recordRecallFailure: em nota barrada não move updatedAt (o relógio da po
   assert.equal(await recordRecallFailure({ ...input, recall, keepUpdatedAt: true }), true);
   assert.equal(git.written[0]!.body["updatedAt"], ago(5));
   assert.deepEqual(git.written[0]!.body["recall"], recall);
+});
+
+test("recordRecallFailure: em nota barrada abandonada, a falha nova mantém abandoned", async () => {
+  const notes: Record<string, BlockedNote> = { [HEAD]: blockedNote({ recall: { abandoned: true, reason: "ninguém assumiu" } }) };
+  const git = fakeExec(() => ({}), { blocked: () => notes, applyBlocked: true });
+  const input = { exec: git.exec, gitDir: join(await tempState(), "g.git"), repository: "dboltbr/dbolt", notesRef: "refs/notes/release-blocked", token: "t", key: HEAD };
+  const recall = { failedAt: NOW.toISOString(), reason: "r", by: "opencode/archdev", role: "blocked", target: "opencode/archdev/ses_a" };
+  assert.equal(await recordRecallFailure({ ...input, recall, keepUpdatedAt: true }), true);
+  assert.deepEqual(git.written[0]!.body["recall"], { ...recall, abandoned: true });
+});
+
+test("blockedConfirmation: o chamado de correção da própria dona fica aberto até alguém assumir a correção", () => {
+  const owner = ref("opencode", "archdev", "ses_a");
+  const note = blockedNote({ state: "fix-pending", owner: "opencode/archdev/ses_a", assessment: { suspects: [{ commit: "bbbbbbb2" }] }, expired: expired("opencode/archdev/ses_b"), updatedAt: ago(1) });
+  assert.equal(blockedConfirmation("fix", owner, note, false, NOW), "open");
+  assert.equal(blockedConfirmation("fix", owner, { ...note, fix: { session: "opencode/archdev/ses_a" } }, false, NOW), "taken");
+  assert.equal(blockedConfirmation("fix", owner, { ...note, fix: { session: "opencode/archdev/ses_c" } }, false, NOW), "moot");
 });

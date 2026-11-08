@@ -95,7 +95,8 @@ export function fakeGitHub(refs: RefReply[], blocked: RefReply[] = [{ status: 40
 /**
  * git/gh fake serving `notes` (key → body) on the incident ref and `behaviour.blocked` on any
  * `release-blocked` ref, through `notes list`, `notes show` and `cat-file --batch`. `notes add` +
- * `push` record what the plugin wrote (and on which ref); `push: "reject"` loses every CAS.
+ * `push` record what the plugin wrote (and on which ref); `push: "reject"` loses every CAS,
+ * `push: "deny"` fails every push outright (no rights).
  * `applyBlocked`: a blocked write replaces the note `blocked()` serves (the map must be mutable).
  * `blockedRemote`: what the CAS read (`notes show`) of a blocked note sees, when another host already
  * changed it after this one fetched.
@@ -103,7 +104,7 @@ export function fakeGitHub(refs: RefReply[], blocked: RefReply[] = [{ status: 40
 export function fakeExec(
   notes: () => Record<string, Note | string>,
   behaviour: {
-    push?: "ok" | "reject";
+    push?: "ok" | "reject" | "deny";
     blocked?: () => Record<string, BlockedNote | string>;
     applyBlocked?: boolean;
     blockedRemote?: () => Record<string, BlockedNote | string>;
@@ -152,6 +153,7 @@ export function fakeExec(
     if (sub === "notes") return ok(entries.map((e) => `${e.blob} ${e.key}`).join("\n"));
     if (sub === "push") {
       if (behaviour.push === "reject") return { code: 1, stdout: "", stderr: " ! [rejected] (fetch first)" };
+      if (behaviour.push === "deny") return { code: 128, stdout: "", stderr: "remote: Permission to dboltbr/dbolt.git denied to agent." };
       if (staged) {
         written.push(staged);
         if (behaviour.applyBlocked && staged.ref.includes("release-blocked")) behaviour.blocked!()[staged.key] = staged.body as unknown as BlockedNote;

@@ -61,6 +61,11 @@ interface AgentRecord {
   readonly config?: { readonly model?: string; readonly modeId?: string; readonly thinkingOptionId?: string };
   readonly persistence?: { readonly sessionId?: string | null } | null;
   readonly labels?: Readonly<Record<string, string>> | null;
+  /** `running` while in a turn; the daemon rewrites the record as the agent works. */
+  readonly lastStatus?: string;
+  readonly updatedAt?: string;
+  /** Set once archived: the agent cannot be called and works no more. */
+  readonly archivedAt?: string | null;
 }
 
 /** A lane's label: the agent that spawned it. */
@@ -95,19 +100,41 @@ async function agentOfSession(sessionId: string): Promise<string | null> {
   return null;
 }
 
-/** `paseo ls --json` entry. */
-interface ListedAgent {
-  readonly id?: string;
-  readonly status?: string;
+/** Every agent record of this daemon, in one pass over the files; unreadable ones are skipped. */
+async function agentRecords(): Promise<AgentRecord[]> {
+  const root = join(paseoHome(), "agents");
+  const out: AgentRecord[] = [];
+  for (const project of await readdir(root).catch(() => [] as string[])) {
+    const files = (await readdir(join(root, project)).catch(() => [] as string[])).filter((file) => file.endsWith(".json"));
+    const raws = await Promise.all(files.map((file) => readFile(join(root, project, file), "utf8").catch(() => null)));
+    raws.forEach((raw, index) => {
+      if (!raw) return;
+      try {
+        const record = JSON.parse(raw) as AgentRecord;
+        out.push({ ...record, id: record.id ?? files[index]!.slice(0, -5) });
+      } catch {
+        // A record being rewritten right now: the next tick reads it whole.
+      }
+    });
+  }
+  return out;
+}
+
+/** The live (not archived) lanes of each agent on this daemon, by parent id. */
+async function lanesByParent(serverId: string): Promise<Map<string, AgentRecord[]>> {
+  const lanes = new Map<string, AgentRecord[]>();
+  for (const record of await agentRecords()) {
+    if (record.archivedAt) continue;
+    const parent = record.labels?.[PARENT_LABEL];
+    const server = record.labels?.[PARENT_SERVER_LABEL];
+    if (typeof parent !== "string" || !parent || parent === record.id) continue;
+    if (typeof server === "string" && server && server !== serverId) continue;
+    lanes.set(parent, [...(lanes.get(parent) ?? []), record]);
+  }
+  return lanes;
 }
 
 export function createDelivery(exec: Exec, stateDir: string, serverId: string): Delivery {
-  /** Live agents whose parent is `id` (`paseo ls` leaves archived ones out). */
-  async function children(id: string): Promise<ListedAgent[]> {
-    const out = await paseo(exec, ["ls", "--global", "--background", "--label", `${PARENT_LABEL}=${id}`, "--json"]);
-    const listed = JSON.parse(out) as unknown;
-    return Array.isArray(listed) ? (listed as ListedAgent[]) : [];
-  }
   async function run(args: string[], text: string): Promise<string> {
     const out = await paseo(exec, ["run", "--no-wait", "--json", ...args, text]);
     const id = (JSON.parse(out) as { agentId?: string }).agentId;
@@ -126,8 +153,8 @@ export function createDelivery(exec: Exec, stateDir: string, serverId: string): 
         await rm(file, { force: true });
       }
     },
-    // Up the parents this daemon holds: a parent on another daemon (`paseo.parent-server-id`) or
-    // without a record here cannot be called from here, the last one that can is the root.
+    // Up the parents this daemon holds: a parent on another daemon (`paseo.parent-server-id`),
+    // without a record here, or archived cannot be called from here, the last one that can is the root.
     async resolveRoot(target: SessionRef) {
       let id = target.id;
       for (let depth = 0; depth < MAX_DEPTH; depth++) {
@@ -136,29 +163,36 @@ export function createDelivery(exec: Exec, stateDir: string, serverId: string): 
         if (typeof parent !== "string" || !parent || parent === id) break;
         const server = labels?.[PARENT_SERVER_LABEL];
         if (typeof server === "string" && server && server !== serverId) break;
-        if (!(await agentRecord(parent))) break;
+        const record = await agentRecord(parent);
+        if (!record || record.archivedAt) break;
         id = parent;
       }
       return { ...target, id };
     },
-    // In a turn or active in the last 10 min, or one of its lanes (down the parent label) running:
-    // an orchestrator waits idle while its lanes do the work.
+    // In a turn or active in the last 10 min (`paseo inspect`: the daemon's live view of the agent
+    // itself), or one of its live lanes (down the parent label) likewise: an orchestrator waits
+    // idle while its lanes do the work. The lanes come from one pass over the agent records, not a
+    // CLI call per lane: an orchestrator may hold dozens.
     async isWorking(target: SessionRef) {
+      const now = Date.now();
+      const active = (status: unknown, updatedAt: unknown): boolean => {
+        if (status === "running") return true;
+        const updated = typeof updatedAt === "string" ? Date.parse(updatedAt) : Number.NaN;
+        return Number.isFinite(updated) && now - updated < HEARTBEAT_MS;
+      };
       const agent = JSON.parse(await paseo(exec, ["inspect", target.id, "--json"])) as { Status?: unknown; UpdatedAt?: unknown };
-      if (agent.Status === "running") return true;
-      const updated = typeof agent.UpdatedAt === "string" ? Date.parse(agent.UpdatedAt) : Number.NaN;
-      if (Number.isFinite(updated) && Date.now() - updated < HEARTBEAT_MS) return true;
+      if (active(agent.Status, agent.UpdatedAt)) return true;
+      const lanes = await lanesByParent(serverId);
       let level = [target.id];
       const seen = new Set(level);
       for (let depth = 0; depth < MAX_DEPTH && level.length > 0; depth++) {
         const next: string[] = [];
         for (const id of level) {
-          for (const child of await children(id)) {
-            if (child.status === "running") return true;
-            if (child.id && !seen.has(child.id)) {
-              seen.add(child.id);
-              next.push(child.id);
-            }
+          for (const lane of lanes.get(id) ?? []) {
+            if (!lane.id || seen.has(lane.id)) continue;
+            if (active(lane.lastStatus, lane.updatedAt)) return true;
+            seen.add(lane.id);
+            next.push(lane.id);
           }
         }
         level = next;
@@ -243,8 +277,14 @@ export function startPaseoRecall(): PaseoRecall {
     async stop() {
       stopped = true;
       await boot;
-      cancelUpdates(globalThis as Record<symbol, unknown>, UPDATE_KEY);
-      await stop?.();
+      // The watcher stops whatever the schedule under the key turns out to be.
+      try {
+        cancelUpdates(globalThis as Record<symbol, unknown>, UPDATE_KEY);
+      } catch (error) {
+        log.warn(`autoatualização: cancelar: ${describe(error)}`);
+      } finally {
+        await stop?.();
+      }
     },
   };
 }

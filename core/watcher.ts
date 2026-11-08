@@ -444,8 +444,10 @@ export function createWatcher(options: WatcherOptions): Watcher {
 
   /**
    * The session a blocked call goes to: a lane gives way to its root (`Delivery.resolveRoot`),
-   * which takes the lane's place. A root already in `expired` is not called again: the lane joins it
-   * there (red calls only), so every host walks on to the next session. Null: nobody to call now.
+   * which takes the lane's place. A root already in `expired`, or already called for an expired
+   * lane (the root itself being the candidate included), is not called again: the candidate joins
+   * `expired` (red calls only), so every host walks on to the next session. A fix call whose root
+   * is the owner becomes the owner's own fix call. Null: nobody to call now.
    */
   async function rooted(action: BlockedAction, key: string, note: BlockedNote, config: HostConfig, auth: string, now: Date): Promise<BlockedAction | null> {
     const resolve = options.delivery.resolveRoot;
@@ -460,14 +462,17 @@ export function createWatcher(options: WatcherOptions): Watcher {
       }
     };
     const root = await rootOf(action.target);
-    if (sameSession(root, action.target)) return action;
+    const self = sameSession(root, action.target);
+    // A session that is its own root may still have been called for an expired lane: a red call
+    // checks that too, so a root in the range is not called twice.
+    if (self && action.role !== "blocked") return action;
     const rootName = formatSession(root);
     // The root is expired when it is in `expired` itself or stood in for a lane that is: one call
     // per root, however many of its lanes the range holds.
-    let rootExpired = expiredSessions(note).has(rootName);
+    let rootExpired = !self && expiredSessions(note).has(rootName);
     for (const name of rootExpired ? [] : expiredSessions(note)) {
       const lane = parseSessionValue(name);
-      if (!lane || !sameSession({ ...lane, id: root.id }, root)) continue;
+      if (!lane || name === rootName || !sameSession({ ...lane, id: root.id }, root)) continue;
       if (sameSession(await rootOf(lane), root)) {
         rootExpired = true;
         break;
@@ -486,8 +491,16 @@ export function createWatcher(options: WatcherOptions): Watcher {
       }
       return null;
     }
+    if (self) return action;
     const owner = parseSessionValue(typeof note.owner === "string" ? note.owner : null);
-    if (action.role === "fix" && owner && sameSession(owner, root)) return null;
+    if (action.role === "fix" && owner && sameSession(owner, root)) {
+      // A culprit lane of the owner: the fix is the owner's own (as `routeBlocked` tells it when
+      // every other culprit expired), under the same lock, so it goes out once.
+      const fixSession = (note.fix as { session?: unknown } | null | undefined)?.session;
+      if (typeof fixSession === "string" || expiredSessions(note).has(rootName)) return null;
+      log.info(`${action.release}: ${formatSession(action.target)} é lane da dona; a correção é da dona ${rootName}`);
+      return { ...action, target: owner, candidate: action.target, lock: blockedLock("fix", owner, note) };
+    }
     log.info(`${action.release}: ${formatSession(action.target)} é lane; chamando a raiz ${rootName}`);
     return { ...action, target: root, candidate: action.target, lock: blockedLock(action.role, root, note) };
   }
@@ -531,6 +544,10 @@ export function createWatcher(options: WatcherOptions): Watcher {
       .tick({ token: auth, notes, notesChanged: fetched || blockedPoll?.fetched === true })
       .catch((error) => log.warn(`release: ${describe(error)}`));
     const releases = releaseHistory(options.release.current());
+    // No release history on this host: only the holder's heartbeat goes out (other hosts may have
+    // one and would expire it). A history that cannot place a note (a release name without a
+    // number, older than the history) leaves that note alone entirely.
+    const historyUnknown = releases === null || releases.length === 0;
     // Routed only from notes fetched this tick (a cached copy may be stale: someone took it) and a
     // release history refreshed this tick (an older one may miss the release that shipped);
     // otherwise the notes wait for the next tick, unseen.
@@ -541,14 +558,14 @@ export function createWatcher(options: WatcherOptions): Watcher {
       try {
         const shipped = shippedSince(note, releases);
         const open = shipped === false && isBlockedRecent(note, now);
-        // Every tick, not only on change: the lease runs on the clock. Without a release history
-        // the holder's heartbeat still goes out (other hosts may have one and would expire it).
-        if (open || (shipped === null && isBlockedRecent(note, now))) {
+        // Every tick, not only on change: the lease runs on the clock.
+        if (open || (historyUnknown && isBlockedRecent(note, now))) {
           let step: LeaseStep = "none";
           try {
-            step = await keepLease(key, note, config, me, auth, now, handled, shipped === null);
+            step = await keepLease(key, note, config, me, auth, now, handled, historyUnknown);
           } catch (error) {
-            step = "stale";
+            // Not a CAS outcome (a push this host may not make, git missing): nothing is known to
+            // differ on the remote, so the cached note stands and is routed.
             log.warn(`${releaseName(note)}: posse: ${describe(error)}`);
           }
           if (step !== "none") {

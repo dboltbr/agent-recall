@@ -347,7 +347,7 @@ export function shippedSince(note: Pick<BlockedNote, "release">, releases: reado
 
 /**
  * Whether a delivered blocked call was taken: the note names the called session as `owner` or
- * `fix.session`. Moot when the note is gone, closed by a tagged release, out of the 8 h window, or
+ * `fix.session` (a fix call: `fix.session` only). Moot when the note is gone, closed by a tagged release, out of the 8 h window, or
  * left the state the call was for (someone else took it, the skill escalated, or the assessment no
  * longer names the fix call's session). Unknown when it would be open but whether a later release
  * shipped cannot be told (`shipped` null): the caller waits, keeping the call and starting no
@@ -364,16 +364,20 @@ export function blockedConfirmation(
   if (!note || shipped === true || !isBlockedRecent(note, now)) return "moot";
   const called = formatSession(target);
   const fixSession = text((note.fix as { session?: unknown } | null | undefined)?.session);
-  if (text(note.owner) === called || fixSession === called) return "taken";
+  // A fix call is taken by `fix.session` alone: the owner's own fix call targets the owner.
+  if (fixSession === called || (role === "blocked" && text(note.owner) === called)) return "taken";
   const expired = expiredSessions(note);
   if (expired.has(called) || expired.has(formatSession(candidate))) return "moot";
   // A fix call stays open only while its session is still among the note's culprits: an
   // assessment that moved on to other commits makes it moot. A red call, while the note still
   // calls that session.
+  // The owner's own fix call (every other culprit expired, or the culprit is its lane) stays open
+  // while nobody took the fix.
   const next = blockedTarget(note);
+  const ownFix = !fixSession && text(note.owner) === formatSession(candidate);
   const callable =
     role === "fix"
-      ? note.state === "fix-pending" && blockedCulprits(note).some((culprit) => sameSession(culprit, candidate))
+      ? note.state === "fix-pending" && (ownFix || blockedCulprits(note).some((culprit) => sameSession(culprit, candidate)))
       : note.state === "red" && !note.owner && next !== null && sameSession(next, candidate);
   if (!callable) return "moot";
   return shipped === null ? "unknown" : "open";

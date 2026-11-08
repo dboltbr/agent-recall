@@ -68,8 +68,9 @@ export function scheduleUpdates(
   timer: UpdateTimer = unrefTimer,
   intervalMs = UPDATE_INTERVAL_MS,
 ): boolean {
-  const current = scope[key] as Schedule | undefined;
-  if (current) {
+  const current = scope[key] as Partial<Schedule> | null | undefined;
+  // Anything else under the key (the `true` an older version stored) is no schedule: start one.
+  if (isSchedule(current)) {
     current.update = update;
     return false;
   }
@@ -93,10 +94,16 @@ export function scheduleUpdates(
 
 /** Stops the schedule of `key` (a plugin being stopped); the next `scheduleUpdates` starts anew. */
 export function cancelUpdates(scope: Record<symbol, unknown>, key: symbol): void {
-  const current = scope[key] as Schedule | undefined;
-  if (!current) return;
-  current.cancel();
-  delete scope[key];
+  const current = scope[key] as Partial<Schedule> | null | undefined;
+  try {
+    if (isSchedule(current)) current.cancel();
+  } finally {
+    delete scope[key];
+  }
+}
+
+function isSchedule(value: Partial<Schedule> | null | undefined): value is Schedule {
+  return typeof value === "object" && value !== null && typeof value.cancel === "function";
 }
 
 function lastLine(text: string): string {

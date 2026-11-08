@@ -280,6 +280,31 @@ test("scheduleUpdates: agora e a cada 30 min, uma agenda por processo, sem sobre
   assert.equal(ticks.length, 2);
 });
 
+test("scheduleUpdates/cancelUpdates: o `true` da versão anterior na chave não é agenda", async () => {
+  const key = Symbol("u");
+  const ticks: Array<() => void> = [];
+  let cancelled = 0;
+  const timer = {
+    every: (run: () => void) => {
+      ticks.push(run);
+      return () => void cancelled++;
+    },
+  };
+  const calls: string[] = [];
+  const scope: Record<symbol, unknown> = { [key]: true };
+  assert.equal(scheduleUpdates(scope, key, async () => void calls.push("novo"), timer), true, "começa uma agenda nova");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(calls, ["novo"]);
+  assert.equal(ticks.length, 1);
+  assert.equal(typeof (scope[key] as { cancel?: unknown }).cancel, "function", "a chave passa a guardar a agenda");
+  cancelUpdates(scope, key);
+  assert.equal(cancelled, 1);
+  assert.equal(key in scope, false);
+  const old: Record<symbol, unknown> = { [key]: true };
+  assert.doesNotThrow(() => cancelUpdates(old, key));
+  assert.equal(key in old, false, "a marca velha sai da chave");
+});
+
 test("Claude: marketplace do GitHub → marketplace update e plugin update; a cada 30 min no host", async () => {
   const stateDir = await tempState();
   const clock = fixedClock();

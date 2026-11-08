@@ -119,7 +119,12 @@ const REJECTED = /rejected|non-fast-forward|fetch first|failed to update ref|can
 export async function recordRecallFailure(input: RecordFailureInput): Promise<boolean> {
   const result = await updateNote({
     ...input,
-    edit: (body) => (input.keepUpdatedAt ? { ...body, recall: input.recall } : { ...body, recall: input.recall, updatedAt: input.recall.failedAt }),
+    edit: (body) => {
+      if (!input.keepUpdatedAt) return { ...body, recall: input.recall, updatedAt: input.recall.failedAt };
+      // A blocked note abandoned stays so: a later failed call must not reopen the final failure.
+      const abandoned = (body["recall"] as { abandoned?: unknown } | null | undefined)?.abandoned === true;
+      return { ...body, recall: abandoned ? { ...input.recall, abandoned: true } : input.recall };
+    },
   });
   return result === "written";
 }
