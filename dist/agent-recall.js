@@ -19951,12 +19951,13 @@ function classifyJob(name) {
   if (prefix === "verify-production") return "verify";
   if (prefix === "images") return rest !== null && /^shard \d+$/.test(rest) ? "images" : null;
   if (prefix.startsWith("images-")) return rest !== null && /^build-push/.test(rest) ? "images" : null;
-  if (DEPLOY_TIERS.has(prefix) || name === "flags" || name === PINS || name === PREVIOUS_WATCH) return "deploy";
+  if (DEPLOY_TIERS.has(prefix) || name === "flags" || name === PINS || name === PREVIOUS_WATCH || name === PREVIOUS_INVESTIGATION) return "deploy";
   if (name === "release-tag" || name === WATCH_DISPATCH) return "tag";
   return null;
 }
 var PINS = "pins";
 var PREVIOUS_WATCH = "previous-watch";
+var PREVIOUS_INVESTIGATION = "previous-investigation";
 var WATCH_DISPATCH = "watch";
 var WATCH_WORKFLOW = "release-watch";
 function watchRunNumber(run) {
@@ -20021,7 +20022,7 @@ function buildStep(id, jobs, runDone, now, attemptStart = null) {
   });
   const timed = current.length ? current : live;
   const ran = timed.filter((job) => job.state !== "queued" && job.state !== "waiting");
-  const publishing = ran.filter((job) => job.name !== PREVIOUS_WATCH);
+  const publishing = ran.filter((job) => job.name !== PREVIOUS_WATCH && job.name !== PREVIOUS_INVESTIGATION);
   const starts = (publishing.length ? publishing : ran).map((job) => time3(job.startedAt)).filter((ms) => ms !== null);
   const startedMs = starts.length ? Math.min(...starts) : null;
   let state;
@@ -20134,8 +20135,23 @@ function parseWatchProgress(checkRun) {
     )
   };
 }
+function noteVerdictValue(note) {
+  const verdict = record2(note?.verdict)?.["verdict"];
+  return typeof verdict === "string" ? verdict : null;
+}
+function noteStateValue(note) {
+  const state = note?.state;
+  return typeof state === "string" ? state : null;
+}
+var FACTORY_ACTIVE_STATES = /* @__PURE__ */ new Set(["pending", "waiting_metadata", "initializing", "observing", "finalizing"]);
 function watchVerdict(input2) {
-  if (input2.note) return noteRevert(input2.note) ? "reverted" : "red";
+  const noteVerdict = noteVerdictValue(input2.note);
+  if (input2.note) {
+    if (noteVerdict === "green") return "green";
+    if (noteVerdict === "inconclusive") return "inconclusive";
+    if (noteVerdict === "pending" || FACTORY_ACTIVE_STATES.has(noteStateValue(input2.note) ?? "")) return null;
+    return noteRevert(input2.note) ? "reverted" : "red";
+  }
   if (!input2.completed) return null;
   if (input2.steps.some((step) => step.id !== "watch" && step.state === "failed")) return "failed";
   const watch = input2.jobs.find((job) => job.step === "watch" && job.state !== "skipped");
@@ -20158,7 +20174,8 @@ function toSession(ref) {
 var WATCH_DISPATCH_GRACE_MS = 10 * 60 * 1e3;
 var NOT_STARTED = /* @__PURE__ */ new Set(["queued", "waiting"]);
 function releaseHandoffs(note, delivered) {
-  if (!note) return delivered.filter((handoff2) => handoff2.role === "blocked");
+  const verdict = noteVerdictValue(note);
+  if (!note || verdict !== null && verdict !== "red") return delivered.filter((handoff2) => handoff2.role === "blocked");
   const out = [];
   const add = (role, ref, at2) => {
     if (ref && !out.some((known) => sameSession(known.session, ref))) out.push({ role, session: toSession(ref), at: at2 });
@@ -20180,12 +20197,30 @@ function buildRelease(input2) {
   const jobs = [...input2.jobs.map((job) => toJob(job)), ...(input2.watch?.jobs ?? []).map((job) => toJob(job, "watch"))];
   const dispatch = jobs.find((job) => job.name === WATCH_DISPATCH && job.step === "tag");
   const dispatchedAt = time3(dispatch?.state === "success" ? dispatch.completedAt : null);
-  const watchOpen = watchRun ? watchRun.status !== "completed" : dispatchedAt !== null && now.getTime() - dispatchedAt < WATCH_DISPATCH_GRACE_MS;
+  const noteState = noteStateValue(note);
+  const noteVerdict = noteVerdictValue(note);
+  const factoryWatchOpen = note !== null && (noteVerdict === "pending" || noteState !== null && FACTORY_ACTIVE_STATES.has(noteState));
+  const watchOpen = watchRun ? watchRun.status !== "completed" : factoryWatchOpen || dispatchedAt !== null && now.getTime() - dispatchedAt < WATCH_DISPATCH_GRACE_MS;
   const completed = run.status === "completed" && !watchOpen;
   const started = run.status === "in_progress" || watchOpen || jobs.some((job) => !NOT_STARTED.has(job.state));
   const attemptStart = (run.run_attempt ?? 1) > 1 ? run.run_started_at ?? null : null;
-  const steps = STEP_IDS.map((id) => buildStep(id, jobs, id === "watch" ? completed : run.status === "completed", now, attemptStart));
-  const verdict = watchVerdict({ completed, conclusion: run.conclusion, steps, jobs, note });
+  const rawSteps = STEP_IDS.map((id) => buildStep(id, jobs, id === "watch" ? completed : run.status === "completed", now, attemptStart));
+  const verdict = watchVerdict({ completed, conclusion: run.conclusion, steps: rawSteps, jobs, note });
+  const tagStep = rawSteps.find((step) => step.id === "tag") ?? null;
+  const steps = rawSteps.map((step) => {
+    if (step.id !== "watch" || watchRun || !note) return step;
+    const startMs = time3(tagStep?.completedAt ?? run.updated_at);
+    const endIso = typeof record2(note.verdict)?.["at"] === "string" ? record2(note.verdict)?.["at"] : note.updatedAt;
+    const endMs = completed ? time3(endIso) : null;
+    const state = factoryWatchOpen ? "running" : verdict === "red" ? "failed" : verdict === "green" || verdict === "reverted" || verdict === "inconclusive" ? "done" : step.state;
+    return {
+      ...step,
+      state,
+      startedAt: startMs === null ? null : iso(startMs),
+      completedAt: endMs === null ? null : iso(endMs),
+      durationMs: startMs === null ? null : Math.max(0, (endMs ?? now.getTime()) - startMs)
+    };
+  });
   const failed = jobs.find((job) => job.step !== null && job.step !== "watch" && job.state === "failure");
   const tagged = input2.tagged === true || jobs.some((job) => job.step === "tag" && job.state === "success");
   const sessions = [];
@@ -20212,7 +20247,10 @@ function buildRelease(input2) {
     createdAt: run.created_at,
     updatedAt: run.updated_at,
     startedAt: run.run_started_at ?? null,
-    completedAt: completed ? latest(run.updated_at, watchRun?.updated_at ?? null) : null,
+    completedAt: completed ? latest(
+      run.updated_at,
+      watchRun?.updated_at ?? (typeof record2(note?.verdict)?.["at"] === "string" ? record2(note?.verdict)?.["at"] : note?.updatedAt ?? null)
+    ) : null,
     steps,
     current,
     verdict,
@@ -22099,7 +22137,7 @@ var index_default = {
   // No dispose: the poller and the newest context outlive location eviction (see ./poller.ts).
   setup(ctx) {
     attach(registry2, ctx, {
-      sha: true ? "13828d3a141bee335ffc83c2353552c948ace842" : "unknown",
+      sha: true ? "224e4f76a54d9cb6076dbe0d972694acd73aa388" : "unknown",
       stateDir: stateDirectory(),
       pid: process.pid,
       clock: { now: () => /* @__PURE__ */ new Date() },
