@@ -13,10 +13,13 @@ import { constants, tmpdir } from "node:os";
 import { join } from "node:path";
 
 const dirs = ["core/test/", "opencode/test/", "openchamber/test/", "client/test/", "claude/test/"];
+const files = dirs.flatMap((directory) => readdirSync(directory, { recursive: true })
+  .filter((file) => /\.test\.[cm]?[jt]sx?$/.test(file))
+  .map((file) => join(directory, file))).sort();
 const root = mkdtempSync(join(tmpdir(), "agent-recall-suite-"));
 let code = 1;
 try {
-  const child = spawn(process.execPath, ["--test", ...process.argv.slice(2), ...dirs], {
+  const child = spawn(process.execPath, ["--test", ...process.argv.slice(2), ...files], {
     stdio: "inherit",
     detached: true,
     env: { ...process.env, TMPDIR: root, TMP: root, TEMP: root },
