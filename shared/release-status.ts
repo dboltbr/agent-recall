@@ -306,7 +306,7 @@ export function classifyJob(name: string): StepId | null {
   if (prefix === "verify-production") return "verify";
   if (prefix === "images") return rest !== null && /^shard \d+$/.test(rest) ? "images" : null;
   if (prefix.startsWith("images-")) return rest !== null && /^build-push/.test(rest) ? "images" : null;
-  if (DEPLOY_TIERS.has(prefix) || name === "flags" || name === PINS || name === PREVIOUS_WATCH) return "deploy";
+  if (DEPLOY_TIERS.has(prefix) || name === "flags" || name === PINS || name === PREVIOUS_WATCH || name === PREVIOUS_INVESTIGATION) return "deploy";
   if (name === "release-tag" || name === WATCH_DISPATCH) return "tag";
   return null;
 }
@@ -315,6 +315,7 @@ export function classifyJob(name: string): StepId | null {
 export const PINS = "pins";
 /** The release run's job that waits for the previous release's watch (concurrency release-watch). */
 export const PREVIOUS_WATCH = "previous-watch";
+export const PREVIOUS_INVESTIGATION = "previous-investigation";
 /** The release run's job that dispatches the watch run. */
 export const WATCH_DISPATCH = "watch";
 /** The watch workflow's run name: `watch release-<n>`. */
@@ -401,9 +402,9 @@ export function buildStep(id: StepId, jobs: readonly Job[], runDone: boolean, no
   const timed = current.length ? current : live;
   // A queued or waiting job's `started_at` is when it was queued: only jobs that ran start the step.
   const ran = timed.filter((job) => job.state !== "queued" && job.state !== "waiting");
-  // previous-watch runs at the start of the run, beside verify: once a tier or the pins ran, the
-  // deploy starts with them (release-380 counted 24m from previous-watch for ~6m of deploy).
-  const publishing = ran.filter((job) => job.name !== PREVIOUS_WATCH);
+  // previous-watch / previous-investigation runs at the start of the run, beside verify: once a
+  // tier or the pins ran, the deploy starts with them (release-380 counted 24m from previous-watch for ~6m of deploy).
+  const publishing = ran.filter((job) => job.name !== PREVIOUS_WATCH && job.name !== PREVIOUS_INVESTIGATION);
   const starts = (publishing.length ? publishing : ran)
     .map((job) => time(job.startedAt))
     .filter((ms): ms is number => ms !== null);
@@ -550,14 +551,34 @@ export interface VerdictInput {
   readonly note: Note | null;
 }
 
+function noteVerdictValue(note: Note | null): string | null {
+  const verdict = record(note?.verdict)?.["verdict"];
+  return typeof verdict === "string" ? verdict : null;
+}
+
+function noteStateValue(note: Note | null): string | null {
+  const state = (note as { state?: unknown } | null)?.state;
+  return typeof state === "string" ? state : null;
+}
+
+const FACTORY_ACTIVE_STATES = new Set(["pending", "waiting_metadata", "initializing", "observing", "finalizing"]);
+
 /**
- * The vigia mapping. An incident note exists only on red: `rollback.outcome` reverted → reverted,
- * any other → red. Without a note: an earlier step failed → failed; the watch passed → green; the
+ * The vigia mapping. An incident note in git notes exists only on red; a factory record exists for
+ * every release (`verdict`: `green`, `red`, `inconclusive`, `pending`). On red: `rollback.outcome`
+ * reverted → reverted, any other → red. On factory `green` or `inconclusive` → that verdict.
+ * Without a settled note verdict: an earlier step failed → failed; the watch passed → green; the
  * watch ended otherwise (failed or cancelled) → inconclusive; a cancelled run → cancelled; only
  * `plan` ran → none.
  */
 export function watchVerdict(input: VerdictInput): Verdict | null {
-  if (input.note) return noteRevert(input.note) ? "reverted" : "red";
+  const noteVerdict = noteVerdictValue(input.note);
+  if (input.note) {
+    if (noteVerdict === "green") return "green";
+    if (noteVerdict === "inconclusive") return "inconclusive";
+    if (noteVerdict === "pending" || FACTORY_ACTIVE_STATES.has(noteStateValue(input.note) ?? "")) return null;
+    return noteRevert(input.note) ? "reverted" : "red";
+  }
   if (!input.completed) return null;
   if (input.steps.some((step) => step.id !== "watch" && step.state === "failed")) return "failed";
   const watch = input.jobs.find((job) => job.step === "watch" && job.state !== "skipped");
@@ -609,12 +630,14 @@ export const WATCH_DISPATCH_GRACE_MS = 10 * 60 * 1000;
 const NOT_STARTED = new Set<JobState>(["queued", "waiting"]);
 
 /**
- * Delivered calls oldest first, then the note's owner and notified sessions; one entry per session.
- * Without an incident note only the `blocked` call of a run that failed before the tag (a drill's
- * calls stay out: they write no handoff).
+ * Delivered calls oldest first, then the note's owner and notified sessions on a red/reverted
+ * incident; one entry per session. A green or inconclusive factory record is not an incident, so
+ * its owner/notified are not listed as incident handoffs. Without an incident note only the
+ * `blocked` call of a run that failed before the tag (a drill's calls stay out: they write no handoff).
  */
 export function releaseHandoffs(note: Note | null, delivered: readonly Handoff[]): Handoff[] {
-  if (!note) return delivered.filter((handoff) => handoff.role === "blocked");
+  const verdict = noteVerdictValue(note);
+  if (!note || (verdict !== null && verdict !== "red")) return delivered.filter((handoff) => handoff.role === "blocked");
   const out: Handoff[] = [];
   const add = (role: HandoffRole, ref: SessionRef | null, at: string | null) => {
     if (ref && !out.some((known) => sameSession(known.session, ref))) out.push({ role, session: toSession(ref), at });
@@ -637,18 +660,42 @@ export function buildRelease(input: ReleaseInput): Release {
   const { run, note, now } = input;
   const watchRun = input.watch?.run ?? null;
   const jobs = [...input.jobs.map((job) => toJob(job)), ...(input.watch?.jobs ?? []).map((job) => toJob(job, "watch"))];
-  // The release run ends at the dispatch; the release goes on until its watch run ends.
+  // The release run ends at the dispatch; the release goes on until its watch run or factory investigation ends.
   const dispatch = jobs.find((job) => job.name === WATCH_DISPATCH && job.step === "tag");
   const dispatchedAt = time(dispatch?.state === "success" ? dispatch.completedAt : null);
+  const noteState = noteStateValue(note);
+  const noteVerdict = noteVerdictValue(note);
+  const factoryWatchOpen = note !== null && (noteVerdict === "pending" || (noteState !== null && FACTORY_ACTIVE_STATES.has(noteState)));
   const watchOpen = watchRun
     ? watchRun.status !== "completed"
-    : dispatchedAt !== null && now.getTime() - dispatchedAt < WATCH_DISPATCH_GRACE_MS;
+    : factoryWatchOpen || (dispatchedAt !== null && now.getTime() - dispatchedAt < WATCH_DISPATCH_GRACE_MS);
   const completed = run.status === "completed" && !watchOpen;
   const started = run.status === "in_progress" || watchOpen || jobs.some((job) => !NOT_STARTED.has(job.state));
-  // verify→tag end with the release run; only the watch step waits for the watch run.
+  // verify→tag end with the release run; only the watch step waits for the watch run or factory investigation.
   const attemptStart = (run.run_attempt ?? 1) > 1 ? (run.run_started_at ?? null) : null;
-  const steps = STEP_IDS.map((id) => buildStep(id, jobs, id === "watch" ? completed : run.status === "completed", now, attemptStart));
-  const verdict = watchVerdict({ completed, conclusion: run.conclusion, steps, jobs, note });
+  const rawSteps = STEP_IDS.map((id) => buildStep(id, jobs, id === "watch" ? completed : run.status === "completed", now, attemptStart));
+  const verdict = watchVerdict({ completed, conclusion: run.conclusion, steps: rawSteps, jobs, note });
+  const tagStep = rawSteps.find((step) => step.id === "tag") ?? null;
+  const steps = rawSteps.map((step): Step => {
+    if (step.id !== "watch" || watchRun || !note) return step;
+    const startMs = time(tagStep?.completedAt ?? run.updated_at);
+    const endIso = typeof (record(note.verdict)?.["at"]) === "string" ? (record(note.verdict)?.["at"] as string) : note.updatedAt;
+    const endMs = completed ? time(endIso) : null;
+    const state: StepState = factoryWatchOpen
+      ? "running"
+      : verdict === "red"
+        ? "failed"
+        : verdict === "green" || verdict === "reverted" || verdict === "inconclusive"
+          ? "done"
+          : step.state;
+    return {
+      ...step,
+      state,
+      startedAt: startMs === null ? null : iso(startMs),
+      completedAt: endMs === null ? null : iso(endMs),
+      durationMs: startMs === null ? null : Math.max(0, (endMs ?? now.getTime()) - startMs),
+    };
+  });
   const failed = jobs.find((job) => job.step !== null && job.step !== "watch" && job.state === "failure");
   const tagged = input.tagged === true || jobs.some((job) => job.step === "tag" && job.state === "success");
   const sessions: Session[] = [];
@@ -676,7 +723,12 @@ export function buildRelease(input: ReleaseInput): Release {
     createdAt: run.created_at,
     updatedAt: run.updated_at,
     startedAt: run.run_started_at ?? null,
-    completedAt: completed ? latest(run.updated_at, watchRun?.updated_at ?? null) : null,
+    completedAt: completed
+      ? latest(
+          run.updated_at,
+          watchRun?.updated_at ?? (typeof record(note?.verdict)?.["at"] === "string" ? (record(note?.verdict)?.["at"] as string) : note?.updatedAt ?? null),
+        )
+      : null,
     steps,
     current,
     verdict,
@@ -794,7 +846,12 @@ export function waitingFor(snapshot: ReleaseSnapshot, release: Release): string 
     const holder = ahead(snapshot, release, "pipeline");
     return holder ? `na fila · atrás de #${holder.number}` : "na fila";
   }
-  if (release.jobs.some((job) => job.name === PREVIOUS_WATCH && job.step === "deploy" && job.state === "waiting")) {
+  if (
+    release.jobs.some(
+      (job) => (job.name === PREVIOUS_WATCH || job.name === PREVIOUS_INVESTIGATION) && job.step === "deploy" && (job.state === "waiting" || job.state === "running"),
+    ) &&
+    !release.jobs.some((job) => job.step === "deploy" && job.name !== PREVIOUS_WATCH && job.name !== PREVIOUS_INVESTIGATION && job.state === "running")
+  ) {
     const watch = ahead(snapshot, release, "watch");
     return watch ? `esperando o vigia de #${watch.number}` : "esperando o vigia anterior";
   }

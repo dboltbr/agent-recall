@@ -86,6 +86,7 @@ test("classifyJob: o mapeamento job → etapa do workflow release", () => {
     ["infrastructure / check", "deploy"],
     ["mobile / android", "deploy"],
     ["previous-watch", "deploy"],
+    ["previous-investigation", "deploy"],
     ["release-tag", "tag"],
     ["watch", "tag"],
   ];
@@ -296,6 +297,52 @@ test("inconclusivo, cancelado e sem publicação", () => {
   const paused = completed(189, [job("trigger", "success", [3, 2.8]), job("flags", "skipped", [2.8, 2.8])]);
   assert.equal(paused.verdict, "none");
   assert.deepEqual(new Set(paused.steps.map((step) => step.state)), new Set(["skipped"]));
+});
+
+test("factory: nota com veredito green, inconclusive ou pending não vira vigia vermelho nem incidente", () => {
+  const jobs = [
+    ...VERIFY_DONE,
+    job("previous-investigation", "success", [20, 19]),
+    job("images / shard 0", "success", [19, 15]),
+    job("pins", "success", [15, 14]),
+    job("release-tag", "success", [14, 13.8]),
+  ];
+  const greenNote: Note = {
+    ...redNote(),
+    release: "release-582",
+    verdict: {
+      verdict: "green",
+      at: minutesAgo(0.2),
+      sources: {
+        deployment: { outcome: "green", reason: "Flux e workloads convergiram na revisão publicada" },
+        sentry: { outcome: "green", reason: "Janela Sentry concluída" },
+      },
+    },
+  } as Note;
+  const green = buildRelease({ run: run({ run_number: 582, status: "completed", conclusion: "success", updated_at: minutesAgo(13.8) }), jobs, note: greenNote, commits: null, now: NOW });
+  assert.equal(green.status, "completed");
+  assert.equal(green.verdict, "green");
+  assert.equal(stepOf(green, "watch").state, "done");
+  assert.equal(verdictDetail(green), "vigia sem regressão");
+  assert.deepEqual(green.handoffs, []);
+
+  const observingNote: Note = {
+    ...redNote(),
+    release: "release-583",
+    state: "observing",
+    verdict: {
+      verdict: "pending",
+      at: minutesAgo(1),
+      sources: {
+        deployment: { outcome: "green", reason: "Flux e workloads convergiram" },
+      },
+    },
+  } as unknown as Note;
+  const observing = buildRelease({ run: run({ run_number: 583, status: "completed", conclusion: "success", updated_at: minutesAgo(5) }), jobs, note: observingNote, commits: null, now: NOW });
+  assert.equal(observing.status, "running");
+  assert.equal(observing.current, "watch");
+  assert.equal(observing.verdict, null);
+  assert.equal(stepOf(observing, "watch").state, "running");
 });
 
 test("quem fez o push: trailer do head commit, senão o trailer mais novo da faixa", () => {
