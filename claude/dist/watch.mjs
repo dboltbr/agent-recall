@@ -22612,7 +22612,7 @@ async function main() {
     stateDir,
     claudePid,
     pid: process.pid,
-    sha: true ? "e5d002d2e64334558c36a439b612dc8f2fdba0c9" : "unknown",
+    sha: true ? "457fd4c47b911db2a8f2beead07bc033869fd8a8" : "unknown",
     clock,
     fetch: (url2, init) => fetch(url2, init),
     exec: nodeExec,
