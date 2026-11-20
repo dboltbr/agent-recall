@@ -9,7 +9,7 @@ import type {
 } from "@getpaseo/plugin/client";
 import { Icon } from "@getpaseo/plugin/client/ui";
 import { View } from "react-native";
-import { prForBranch, prPillLabel, prStageBadge, type PullRequestStatus } from "../shared/queue-status.ts";
+import { prPillLabel, prStageBadge, type PullRequestStatus } from "../shared/queue-status.ts";
 import { releaseBadge, releaseRowBadge } from "../shared/release-copy.ts";
 import { isActive, pillLabel, type Release } from "../shared/release-status.ts";
 import type { ReleaseView } from "../shared/rpc.ts";
@@ -19,7 +19,7 @@ import { toneColor } from "./kit.tsx";
 import { hopToAgent, RELEASES_SCREEN } from "./navigate.ts";
 import { QueuePopover } from "./queue-popover.tsx";
 import { ReleasePopover } from "./release-popover.tsx";
-import { releaseForWorkspace } from "./workspace-badge-model.ts";
+import { prForWorkspace, releaseForWorkspace } from "./workspace-badge-model.ts";
 
 const BUTTON_ID = "pipeline";
 const RETRY_COOLDOWN_MS = 15_000;
@@ -30,8 +30,8 @@ function prOfWorkspace(view: ReleaseView | null, workspaceId: string): PullReque
   const snapshot = view?.snapshot;
   if (!snapshot?.queue) return null;
   const workspace = directorySnapshot().workspaces.get(workspaceId);
-  if (!workspace?.branch || !matchesRepository(workspace.remoteUrl, snapshot.repository)) return null;
-  return prForBranch(snapshot.queue, workspace.branch);
+  const branch = workspace?.branch && matchesRepository(workspace.remoteUrl, snapshot.repository) ? workspace.branch : null;
+  return prForWorkspace(view, workspaceId, branch);
 }
 
 /** Active release → PR in merge queue (or failing/running CI) → recent release (<= 2 h). */

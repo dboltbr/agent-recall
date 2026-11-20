@@ -1,6 +1,8 @@
 // Pull requests, Mergify merge queue batches and `ci.yml` runs for the repository.
 // Pure: built from raw GitHub REST API JSON; synced to `server/core/` and `shared/`.
 import { z } from "zod";
+import { sameSession } from "./trailer.ts";
+import type { SessionRef } from "./types.ts";
 
 export const CI_WORKFLOW = "ci";
 export const MERGIFY_BRANCH_PREFIX = "mergify/merge-queue/";
@@ -39,6 +41,13 @@ export const QueueBatchSchema = z.object({
 });
 export type QueueBatch = z.infer<typeof QueueBatchSchema>;
 
+export const PrSessionSchema = z.object({
+  harness: z.enum(["paseo", "opencode", "claude"]),
+  host: z.string(),
+  id: z.string(),
+});
+export type PrSession = z.infer<typeof PrSessionSchema>;
+
 export const PullRequestStatusSchema = z.object({
   number: z.number(),
   title: z.string(),
@@ -57,6 +66,8 @@ export const PullRequestStatusSchema = z.object({
   runningJobs: z.array(z.string()),
   failedJob: z.string().nullable(),
   jobs: z.array(CiJobSchema),
+  /** `Agent-Session` trailer(s) on the PR's head commit, so agents match even off-branch. */
+  sessions: z.array(PrSessionSchema).optional(),
   updatedAt: z.string(),
 });
 export type PullRequestStatus = z.infer<typeof PullRequestStatusSchema>;
@@ -180,11 +191,19 @@ export interface BuildMergeQueueInput {
   readonly pulls: readonly GitHubPullRequest[];
   readonly ciRuns: readonly GitHubCiRun[];
   readonly jobsByRunId?: ReadonlyMap<number, readonly GitHubCiJob[]>;
+  /** `Agent-Session` refs parsed from each PR's head commit, keyed by `head.sha`. */
+  readonly sessionsBySha?: ReadonlyMap<string, readonly SessionRef[]>;
 }
 
 export function buildMergeQueue(input: BuildMergeQueueInput): MergeQueueSnapshot {
   const runs = [...input.ciRuns].sort((a, b) => b.id - a.id);
   const jobsByRunId = input.jobsByRunId ?? new Map<number, readonly GitHubCiJob[]>();
+  const sessionsBySha = input.sessionsBySha ?? new Map<string, readonly SessionRef[]>();
+  const sessionsOf = (sha: string): PrSession[] | undefined => {
+    const found = sessionsBySha.get(sha);
+    if (!found?.length) return undefined;
+    return found.map((ref) => ({ harness: ref.harness, host: ref.host, id: ref.id }));
+  };
   const rawBatches: GitHubPullRequest[] = [];
   const rawPrs: GitHubPullRequest[] = [];
   for (const pr of input.pulls) {
@@ -227,6 +246,7 @@ export function buildMergeQueue(input: BuildMergeQueueInput): MergeQueueSnapshot
   const prs: PullRequestStatus[] = rawPrs.map((pr) => {
     const labels = (pr.labels ?? []).map((label) => label.name ?? "").filter(Boolean);
     const batch = batchByPr.get(pr.number) ?? null;
+    const sessions = sessionsOf(pr.head.sha);
     if (batch) {
       return {
         number: pr.number,
@@ -246,6 +266,7 @@ export function buildMergeQueue(input: BuildMergeQueueInput): MergeQueueSnapshot
         runningJobs: batch.runningJobs,
         failedJob: batch.failedJob,
         jobs: batch.jobs,
+        ...(sessions ? { sessions } : {}),
         updatedAt: pr.updated_at,
       };
     }
@@ -269,6 +290,7 @@ export function buildMergeQueue(input: BuildMergeQueueInput): MergeQueueSnapshot
       ciState: ciRunState(run),
       runUrl: run?.html_url ?? null,
       ...summary,
+      ...(sessions ? { sessions } : {}),
       updatedAt: pr.updated_at,
     };
   });
@@ -281,6 +303,16 @@ export function buildMergeQueue(input: BuildMergeQueueInput): MergeQueueSnapshot
 export function prForBranch(queue: MergeQueueSnapshot | null | undefined, branch: string | null | undefined): PullRequestStatus | null {
   if (!queue || !branch) return null;
   return queue.prs.find((pr) => pr.branch === branch) ?? null;
+}
+
+const STAGE_PRIORITY: Record<QueueStage, number> = { checking: 0, queued: 1, waiting: 2, dequeued: 3, open: 4 };
+
+/** Best open PR authored by `session` (`Agent-Session` on head commit): active queue stage first, else newest PR. */
+export function prForSession(queue: MergeQueueSnapshot | null | undefined, session: SessionRef): PullRequestStatus | null {
+  if (!queue) return null;
+  const matched = queue.prs.filter((pr) => pr.sessions?.some((known) => sameSession(known, session)));
+  if (!matched.length) return null;
+  return matched.sort((a, b) => STAGE_PRIORITY[a.stage] - STAGE_PRIORITY[b.stage] || b.number - a.number)[0] ?? null;
 }
 
 /** PRs currently in or waiting for the merge queue (checking, queued, waiting, dequeued). */

@@ -1,9 +1,25 @@
 // Pure workspace badge & release selector shared by `workspace-badge.tsx` and `header-buttons.tsx`.
-import { prForBranch, prRowBadge, type RowBadgeDescriptor } from "../shared/queue-status.ts";
+import { prForBranch, prForSession, prRowBadge, type PullRequestStatus, type RowBadgeDescriptor } from "../shared/queue-status.ts";
 import { releaseRowBadge } from "../shared/release-copy.ts";
 import { isActive, releaseForSession, type Release } from "../shared/release-status.ts";
 import type { ReleaseView } from "../shared/rpc.ts";
 import { sessionsOfAgent } from "./navigate.ts";
+
+/** Best PR linked to `workspaceId`: matching branch first, else any PR authored by an agent in this workspace. */
+export function prForWorkspace(view: ReleaseView | null, workspaceId: string, branch: string | null): PullRequestStatus | null {
+  const queue = view?.snapshot?.queue;
+  if (!view || !queue) return null;
+  const byBranch = prForBranch(queue, branch);
+  if (byBranch) return byBranch;
+  for (const agent of view.agents) {
+    if (agent.workspaceId !== workspaceId) continue;
+    for (const session of sessionsOfAgent(view, agent.id)) {
+      const bySession = prForSession(queue, session);
+      if (bySession) return bySession;
+    }
+  }
+  return null;
+}
 
 /** Best release linked to any agent of `workspaceId`: active first, else newest finished. */
 export function releaseForWorkspace(view: ReleaseView | null, workspaceId: string, now: Date = new Date()): Release | null {
@@ -34,7 +50,7 @@ export function selectWorkspaceRowBadge(
   if (!view || !snapshot) return null;
   const release = releaseForWorkspace(view, workspaceId, now);
   if (release && isActive(release)) return releaseRowBadge(release, now);
-  const pr = prForBranch(snapshot.queue, branch);
+  const pr = prForWorkspace(view, workspaceId, branch);
   if (pr) {
     const queueBadge = prRowBadge(pr);
     if (queueBadge) return queueBadge;

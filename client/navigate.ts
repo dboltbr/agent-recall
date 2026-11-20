@@ -55,6 +55,10 @@ export function sessionsOfAgent(view: ReleaseView, agentId: string): Session[] {
     const session = release.sessions.find((known) => known.harness === "opencode" && known.id === openCode);
     if (session && !refs.some((known) => known.harness === session.harness && known.host === session.host)) refs.push(session);
   }
+  for (const pr of view.snapshot?.queue?.prs ?? []) {
+    const session = pr.sessions?.find((known) => known.harness === "opencode" && known.id === openCode);
+    if (session && !refs.some((known) => known.harness === session.harness && known.host === session.host)) refs.push(session);
+  }
   return refs;
 }
 

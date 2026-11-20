@@ -10,7 +10,7 @@ import type {
 } from "@getpaseo/plugin/client";
 import { Icon } from "@getpaseo/plugin/client/ui";
 import { View } from "react-native";
-import { prForBranch, prPillLabel, prStageBadge, type PullRequestStatus } from "../shared/queue-status.ts";
+import { prForBranch, prForSession, prPillLabel, prStageBadge, type PullRequestStatus } from "../shared/queue-status.ts";
 import { releaseBadge } from "../shared/release-copy.ts";
 import { isActive, pillLabel, releaseForSession, type Release } from "../shared/release-status.ts";
 import type { ReleaseView } from "../shared/rpc.ts";
@@ -37,15 +37,19 @@ export function releaseOfAgent(view: ReleaseView | null, agentId: string): Relea
   return null;
 }
 
-function prOfWorkspace(view: ReleaseView | null, workspaceId: string): PullRequestStatus | null {
+function prOfAgent(view: ReleaseView | null, agentId: string, workspaceId: string): PullRequestStatus | null {
   const snapshot = view?.snapshot;
-  if (!snapshot?.queue) return null;
+  if (!view || !snapshot?.queue) return null;
+  for (const session of sessionsOfAgent(view, agentId)) {
+    const bySession = prForSession(snapshot.queue, session);
+    if (bySession) return bySession;
+  }
   const workspace = directorySnapshot().workspaces.get(workspaceId);
   if (!workspace?.branch || !matchesRepository(workspace.remoteUrl, snapshot.repository)) return null;
   return prForBranch(snapshot.queue, workspace.branch);
 }
 
-/** Active release → open PR / merge queue on workspace branch → finished release in snapshot. */
+/** Active release → open PR / merge queue (by session trailer or workspace branch) → finished release in snapshot. */
 function targetOfAgent(
   view: ReleaseView | null,
   agentId: string,
@@ -55,7 +59,7 @@ function targetOfAgent(
   if (release && isActive(release)) {
     return { mode: "release", release, label: pillLabel(release) };
   }
-  const pr = prOfWorkspace(view, workspaceId);
+  const pr = prOfAgent(view, agentId, workspaceId);
   if (pr) {
     return { mode: "queue", pr, label: prPillLabel(pr) };
   }
@@ -135,10 +139,11 @@ export function startReleasePills(client: PluginClientContext): () => void {
   function QueueContent(props: PluginButtonContentProps) {
     const { theme, close } = props;
     const workspaceId = props.workspaceId;
+    const agentId = props.context === "agent" ? props.agentId : null;
     return (
       <QueuePopover
         theme={theme}
-        pick={(view) => prOfWorkspace(view, workspaceId)}
+        pick={(view) => (agentId ? prOfAgent(view, agentId, workspaceId) : null)}
         openReleases={() => {
           close();
           client.openScreen({ screenId: RELEASES_SCREEN });

@@ -36,7 +36,8 @@ import {
   type ReleaseSnapshot,
   type WatchProgress,
 } from "./release-status.ts";
-import type { Clock, Fetch, Logger, Note } from "./types.ts";
+import { parseAgentSession } from "./trailer.ts";
+import type { Clock, Fetch, Logger, Note, SessionRef } from "./types.ts";
 
 export const GITHUB_TIMEOUT_MS = 25_000;
 /**
@@ -207,6 +208,8 @@ export function createReleaseSource(options: ReleaseSourceOptions): ReleaseSourc
   const finishedJobs = new Map<string, readonly GitHubJob[]>();
   /** Compare ranges are immutable: keyed `<base>...<head>`. */
   const ranges = new Map<string, readonly GitHubCommit[]>();
+  /** PR head commit trailers are immutable: keyed by `head.sha`. */
+  const headCommitSessions = new Map<string, readonly SessionRef[]>();
   let snapshot: ReleaseSnapshot | null = null;
   let runners: readonly GitHubRunner[] = [];
   let loadedRuns: unknown = null;
@@ -369,7 +372,31 @@ export function createReleaseSource(options: ReleaseSourceOptions): ReleaseSourc
           }
         });
       }
-      lastQueue = buildMergeQueue({ pulls, ciRuns: runs, jobsByRunId });
+      const sessionsBySha = new Map<string, readonly SessionRef[]>();
+      const uncachedPulls: GitHubPullRequest[] = [];
+      for (const pr of pulls) {
+        if (isMergifyBatchBranch(pr.head.ref)) continue;
+        const cached = headCommitSessions.get(pr.head.sha);
+        if (cached !== undefined) {
+          if (cached.length) sessionsBySha.set(pr.head.sha, cached);
+        } else {
+          uncachedPulls.push(pr);
+        }
+      }
+      if (uncachedPulls.length > 0) {
+        await pool(uncachedPulls, async (pr) => {
+          try {
+            const commit = await get<GitHubCommit>(`repos/${repository}/commits/${pr.head.sha}`, token);
+            const ref = parseAgentSession(commit.commit.message);
+            const refs = ref ? [ref] : [];
+            headCommitSessions.set(pr.head.sha, refs);
+            if (refs.length) sessionsBySha.set(pr.head.sha, refs);
+          } catch {
+            // Transient failure or mock without commit route: leave uncached to retry later.
+          }
+        });
+      }
+      lastQueue = buildMergeQueue({ pulls, ciRuns: runs, jobsByRunId, sessionsBySha });
       return lastQueue;
     } catch {
       return lastQueue;

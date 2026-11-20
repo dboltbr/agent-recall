@@ -7,6 +7,7 @@ import {
   parseBatchName,
   parseBatchPrNumbers,
   prForBranch,
+  prForSession,
   prPillLabel,
   prRowBadge,
   queuedPrs,
@@ -111,4 +112,20 @@ test("buildMergeQueue: batch em ci-queue, fila ordenada, ejetado, aguardando e P
     [228, 226, 177, 145],
   );
   assert.equal(queueFooterLabel(queue), "Fila · #228 2/3 +3");
+});
+
+test("prForSession casa PR pelo trailer Agent-Session do head commit mesmo em outra branch", () => {
+  const session = { harness: "paseo" as const, host: "srv_KkHRlgUn9pdj", id: "agent-a" };
+  const pulls: GitHubPullRequest[] = [
+    pr({ number: 235, ref: "obs/factory-sandbox-probe", labels: [{ name: "queue" }] }),
+    pr({ number: 237, ref: "perf/solid-srv-ram-balloon-gradle", labels: [{ name: "queue" }, { name: "queued" }] }),
+  ];
+  const sessionsBySha = new Map([
+    ["sha235", [session]],
+    ["sha237", [session]],
+  ]);
+  const queue = buildMergeQueue({ pulls, ciRuns: [], sessionsBySha });
+  assert.deepEqual(MergeQueueSnapshotSchema.parse(JSON.parse(JSON.stringify(queue))), queue);
+  assert.equal(prForSession(queue, session)?.number, 237, "prefere PR mais avançado na fila (queued > waiting)");
+  assert.equal(prForSession(queue, { harness: "paseo", host: "srv_KkHRlgUn9pdj", id: "other" }), null);
 });

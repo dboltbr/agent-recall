@@ -129,6 +129,12 @@ export function createReleaseService(options: ReleaseServiceOptions): ReleaseSer
         if (session.harness === "opencode") openCode.set(session.id, session);
       }
     }
+    for (const pr of snapshot?.queue?.prs ?? []) {
+      for (const session of pr.sessions ?? []) {
+        if (session.harness === "paseo" && session.host === host) ids.set(session.id, ids.get(session.id) ?? null);
+        if (session.harness === "opencode") openCode.set(session.id, session);
+      }
+    }
     for (const session of openCode.values()) {
       const agentId = await resolve(session);
       if (agentId) ids.set(agentId, session.id);
