@@ -5969,6 +5969,200 @@ function superRefine(fn, params) {
 // openchamber/scripts/zod-slim.ts
 var z = { array, boolean: boolean2, enum: _enum, literal, number: number2, object, string: string2 };
 
+// core/queue-status.ts
+var CI_WORKFLOW = "ci";
+var MERGIFY_BRANCH_PREFIX = "mergify/merge-queue/";
+var PrCiStateSchema = z.enum(["queued", "running", "success", "failure", "cancelled", "none"]);
+var QueueStageSchema = z.enum(["checking", "queued", "waiting", "dequeued", "open"]);
+var CiJobStateSchema = z.enum(["queued", "running", "success", "failure", "cancelled", "skipped"]);
+var CiJobSchema = z.object({
+  name: z.string(),
+  state: CiJobStateSchema,
+  url: z.string().nullable()
+});
+var QueueBatchSchema = z.object({
+  prNumber: z.number(),
+  title: z.string(),
+  branch: z.string(),
+  headSha: z.string(),
+  url: z.string(),
+  prNumbers: z.array(z.number()),
+  batchName: z.string().nullable(),
+  ciState: PrCiStateSchema,
+  runUrl: z.string().nullable(),
+  done: z.number(),
+  total: z.number(),
+  runningJobs: z.array(z.string()),
+  failedJob: z.string().nullable(),
+  jobs: z.array(CiJobSchema)
+});
+var PullRequestStatusSchema = z.object({
+  number: z.number(),
+  title: z.string(),
+  branch: z.string(),
+  headSha: z.string(),
+  url: z.string(),
+  draft: z.boolean(),
+  labels: z.array(z.string()),
+  stage: QueueStageSchema,
+  position: z.number().nullable(),
+  batchPrNumber: z.number().nullable(),
+  ciState: PrCiStateSchema,
+  runUrl: z.string().nullable(),
+  done: z.number(),
+  total: z.number(),
+  runningJobs: z.array(z.string()),
+  failedJob: z.string().nullable(),
+  jobs: z.array(CiJobSchema),
+  updatedAt: z.string()
+});
+var MergeQueueSnapshotSchema = z.object({
+  batches: z.array(QueueBatchSchema),
+  prs: z.array(PullRequestStatusSchema)
+});
+function isMergifyBatchBranch(branch) {
+  return branch.startsWith(MERGIFY_BRANCH_PREFIX);
+}
+function parseBatchPrNumbers(title, body) {
+  const numbers = [];
+  const add = (text) => {
+    for (const match of text.matchAll(/#(\d+)/g)) {
+      const value = Number(match[1]);
+      if (Number.isInteger(value) && value > 0 && !numbers.includes(value)) numbers.push(value);
+    }
+  };
+  add(title);
+  if (numbers.length === 0 && body) {
+    const head = body.split("\n\n")[0] ?? body;
+    add(head);
+  }
+  return numbers;
+}
+function parseBatchName(body) {
+  if (!body) return null;
+  return /for batch \*\*([^*]+)\*\*/i.exec(body)?.[1]?.trim() ?? null;
+}
+function ciRunState(run) {
+  if (!run) return "none";
+  if (run.status === "in_progress") return "running";
+  if (run.status !== "completed") return "queued";
+  if (run.conclusion === "success" || run.conclusion === "neutral" || run.conclusion === "skipped") return "success";
+  if (run.conclusion === "cancelled") return "cancelled";
+  return "failure";
+}
+function toCiJobState(job) {
+  if (job.status === "in_progress") return "running";
+  if (job.status !== "completed") return "queued";
+  if (job.conclusion === "success" || job.conclusion === "neutral") return "success";
+  if (job.conclusion === "skipped") return "skipped";
+  if (job.conclusion === "cancelled") return "cancelled";
+  return "failure";
+}
+function summarizeJobs(rawJobs) {
+  if (!rawJobs?.length) return { done: 0, total: 0, runningJobs: [], failedJob: null, jobs: [] };
+  const jobs = [];
+  for (const job of rawJobs) {
+    const state = toCiJobState(job);
+    if (state === "skipped") continue;
+    jobs.push({ name: job.name, state, url: job.html_url ?? null });
+  }
+  const done = jobs.filter((job) => job.state === "success").length;
+  const runningJobs = jobs.filter((job) => job.state === "running").map((job) => job.name);
+  const failedJob = jobs.find((job) => job.state === "failure")?.name ?? null;
+  return { done, total: jobs.length, runningJobs, failedJob, jobs };
+}
+function matchCiRun(runs, branch, headSha, allowBranchFallback = false) {
+  const exact = runs.find((run) => run.head_branch === branch && run.head_sha === headSha);
+  if (exact) return exact;
+  return allowBranchFallback ? runs.find((run) => run.head_branch === branch) ?? null : null;
+}
+function buildMergeQueue(input) {
+  const runs = [...input.ciRuns].sort((a, b) => b.id - a.id);
+  const jobsByRunId = input.jobsByRunId ?? /* @__PURE__ */ new Map();
+  const rawBatches = [];
+  const rawPrs = [];
+  for (const pr of input.pulls) {
+    if (isMergifyBatchBranch(pr.head.ref)) rawBatches.push(pr);
+    else rawPrs.push(pr);
+  }
+  rawBatches.sort((a, b) => a.number - b.number);
+  const batches = rawBatches.map((pr) => {
+    const run = matchCiRun(runs, pr.head.ref, pr.head.sha, true);
+    const summary = summarizeJobs(run ? jobsByRunId.get(run.id) : void 0);
+    return {
+      prNumber: pr.number,
+      title: pr.title,
+      branch: pr.head.ref,
+      headSha: pr.head.sha,
+      url: pr.html_url,
+      prNumbers: parseBatchPrNumbers(pr.title, pr.body),
+      batchName: parseBatchName(pr.body),
+      ciState: ciRunState(run),
+      runUrl: run?.html_url ?? null,
+      ...summary
+    };
+  });
+  const batchByPr = /* @__PURE__ */ new Map();
+  for (const batch of batches) {
+    for (const num of batch.prNumbers) {
+      if (!batchByPr.has(num)) batchByPr.set(num, batch);
+    }
+  }
+  const queuedOrder = rawPrs.filter((pr) => !batchByPr.has(pr.number) && (pr.labels ?? []).some((label) => label.name === "queued")).sort((a, b) => Date.parse(a.updated_at) - Date.parse(b.updated_at) || a.number - b.number);
+  const queuedPositions = /* @__PURE__ */ new Map();
+  const offset = batches.length > 0 ? batches.length : 0;
+  queuedOrder.forEach((pr, index) => queuedPositions.set(pr.number, offset + index + 1));
+  const prs = rawPrs.map((pr) => {
+    const labels = (pr.labels ?? []).map((label) => label.name ?? "").filter(Boolean);
+    const batch = batchByPr.get(pr.number) ?? null;
+    if (batch) {
+      return {
+        number: pr.number,
+        title: pr.title,
+        branch: pr.head.ref,
+        headSha: pr.head.sha,
+        url: pr.html_url,
+        draft: pr.draft === true,
+        labels,
+        stage: "checking",
+        position: 1,
+        batchPrNumber: batch.prNumber,
+        ciState: batch.ciState,
+        runUrl: batch.runUrl,
+        done: batch.done,
+        total: batch.total,
+        runningJobs: batch.runningJobs,
+        failedJob: batch.failedJob,
+        jobs: batch.jobs,
+        updatedAt: pr.updated_at
+      };
+    }
+    const run = matchCiRun(runs, pr.head.ref, pr.head.sha);
+    const summary = summarizeJobs(run ? jobsByRunId.get(run.id) : void 0);
+    const hasQueue = labels.includes("queue");
+    const hasQueued = labels.includes("queued");
+    const hasDequeued = labels.includes("dequeued");
+    const stage = hasDequeued ? "dequeued" : hasQueued ? "queued" : hasQueue ? "waiting" : "open";
+    return {
+      number: pr.number,
+      title: pr.title,
+      branch: pr.head.ref,
+      headSha: pr.head.sha,
+      url: pr.html_url,
+      draft: pr.draft === true,
+      labels,
+      stage,
+      position: queuedPositions.get(pr.number) ?? null,
+      batchPrNumber: null,
+      ciState: ciRunState(run),
+      runUrl: run?.html_url ?? null,
+      ...summary,
+      updatedAt: pr.updated_at
+    };
+  });
+  return { batches, prs };
+}
+
 // core/trailer.ts
 var HARNESSES = ["paseo", "opencode", "claude"];
 var VALUE = /^(paseo|opencode|claude)\/([^/\s]+)\/([^/\s]+)$/;
@@ -6004,7 +6198,7 @@ var STEP_IDS = ["verify", "images", "deploy", "tag", "watch"];
 var StepIdSchema = z.enum(STEP_IDS);
 var StepStateSchema = z.enum(["pending", "running", "done", "failed", "cancelled", "skipped"]);
 var JobStateSchema = z.enum(["queued", "waiting", "running", "success", "failure", "cancelled", "skipped"]);
-var VerdictSchema = z.enum(["green", "reverted", "red", "inconclusive", "failed", "cancelled", "none"]);
+var VerdictSchema = z.enum(["green", "published", "reverted", "red", "inconclusive", "failed", "cancelled", "none"]);
 var SessionSchema = z.object({
   harness: z.enum(["paseo", "opencode", "claude"]),
   host: z.string(),
@@ -6133,6 +6327,8 @@ var ReleaseSnapshotSchema = z.object({
   /** Self-hosted runners of the org. */
   runners: z.array(RunnerSchema),
   queued: z.array(QueuedJobSchema),
+  /** Open pull requests, Mergify merge queue batches and `ci.yml` status. */
+  queue: MergeQueueSnapshotSchema.optional(),
   /** pt-BR reason the last refresh failed; the rest is the last good data. */
   error: z.string().nullable()
 });
@@ -6360,6 +6556,7 @@ function watchVerdict(input) {
   if (watch?.state === "failure" || watch?.state === "cancelled") return "inconclusive";
   if (!watch && input.jobs.some((job) => job.name === WATCH_DISPATCH && job.step === "tag" && job.state === "success")) return "inconclusive";
   if (input.conclusion === "cancelled") return "cancelled";
+  if (!watch && input.jobs.some((job) => job.name === "release-tag" && job.step === "tag" && job.state === "success")) return "published";
   if (!input.jobs.some((job) => job.step !== null && job.state !== "skipped")) return "none";
   return input.conclusion === "success" ? "none" : watch ? "inconclusive" : "failed";
 }
@@ -6492,6 +6689,7 @@ function buildSnapshot(input) {
     queued: active.flatMap(
       (release) => release.jobs.filter((job) => job.state === "queued").map((job) => ({ name: job.name, runNumber: release.number, labels: job.labels }))
     ),
+    ...input.queue ? { queue: input.queue } : {},
     error: input.error ?? null
   };
 }
@@ -6716,10 +6914,15 @@ function createReleaseSource(options) {
   let snapshot = null;
   let runners = [];
   let loadedRuns = null;
+  let loadedPulls = null;
+  let loadedCiRuns = null;
+  let lastQueue;
   let watchRuns = /* @__PURE__ */ new Map();
   const progress = /* @__PURE__ */ new Map();
   const settled = /* @__PURE__ */ new Set();
   const runsPath = (perPage, page = 1, name = workflow) => `repos/${repository}/actions/workflows/${name}.yml/runs?per_page=${perPage}&page=${page}`;
+  const pullsPath = () => `repos/${repository}/pulls?state=open&per_page=100`;
+  const ciRunsPath = () => `repos/${repository}/actions/workflows/${CI_WORKFLOW}.yml/runs?per_page=30&page=1`;
   async function watchPage(perPage, token) {
     const body = await get(runsPath(perPage, 1, watchWorkflow), token);
     const byNumber = /* @__PURE__ */ new Map();
@@ -6800,18 +7003,70 @@ function createReleaseSource(options) {
       now: options.clock.now()
     });
   }
+  async function loadQueue(token) {
+    try {
+      const [pulls, ciPage] = await Promise.all([
+        get(pullsPath(), token),
+        get(ciRunsPath(), token).catch(() => ({ workflow_runs: [] }))
+      ]);
+      loadedPulls = pulls;
+      loadedCiRuns = ciPage;
+      const runs = [...ciPage.workflow_runs].sort((a, b) => b.id - a.id);
+      const toInspect = /* @__PURE__ */ new Map();
+      for (const pr of pulls) {
+        if (isMergifyBatchBranch(pr.head.ref)) {
+          const run = matchCiRun(runs, pr.head.ref, pr.head.sha, true);
+          if (run) toInspect.set(run.id, run);
+        }
+      }
+      let extra = 0;
+      for (const pr of pulls) {
+        if (isMergifyBatchBranch(pr.head.ref) || extra >= 3) continue;
+        const labels = (pr.labels ?? []).map((label) => label.name ?? "");
+        const run = matchCiRun(runs, pr.head.ref, pr.head.sha);
+        if (!run || toInspect.has(run.id)) continue;
+        if (labels.includes("queue") || run.status === "in_progress" || run.conclusion === "failure") {
+          toInspect.set(run.id, run);
+          extra++;
+        }
+      }
+      const jobsByRunId = /* @__PURE__ */ new Map();
+      if (toInspect.size > 0) {
+        await pool([...toInspect.values()], async (run) => {
+          const key = `ci:${run.id}`;
+          const done = finishedJobs.get(key);
+          if (done) {
+            jobsByRunId.set(run.id, done);
+            return;
+          }
+          try {
+            const body = await get(`repos/${repository}/actions/runs/${run.id}/jobs?per_page=100&page=1`, token);
+            if (run.status === "completed") finishedJobs.set(key, body.jobs);
+            jobsByRunId.set(run.id, body.jobs);
+          } catch (error2) {
+            options.log.warn(`jobs do CI ${run.id}: ${describe2(error2)}`);
+          }
+        });
+      }
+      lastQueue = buildMergeQueue({ pulls, ciRuns: runs, jobsByRunId });
+      return lastQueue;
+    } catch {
+      return lastQueue;
+    }
+  }
   async function load(input) {
     const now = options.clock.now();
     const notes = notesByRelease(input.notes);
     try {
-      const [page, tags, watches] = await Promise.all([
+      const [page, tags, watches, queue] = await Promise.all([
         get(runsPath(RELEASE_HISTORY), input.token),
         tagList(input.token),
         // Room for re-dispatched watches; a failure keeps the last watch runs instead of the whole load.
         watchPage(RELEASE_HISTORY * 2, input.token).catch((error2) => {
           options.log.warn(`runs do vigia: ${describe2(error2)}`);
           return watchRuns;
-        })
+        }),
+        loadQueue(input.token)
       ]);
       loadedRuns = page;
       watchRuns = watches;
@@ -6839,7 +7094,7 @@ function createReleaseSource(options) {
         options.log.warn(`runners: ${describe2(error2)}`);
         return runners;
       });
-      snapshot = buildSnapshot({ repository, workflow, releases, runners, now });
+      snapshot = buildSnapshot({ repository, workflow, releases, runners, ...queue ? { queue } : {}, now });
     } catch (error2) {
       const message = describe2(error2);
       snapshot = snapshot ? { ...snapshot, error: message } : buildSnapshot({ repository, workflow, releases: [], runners: [], now, error: message });
@@ -6865,7 +7120,17 @@ function createReleaseSource(options) {
     return null;
   }
   async function probe(token) {
-    return await get(runsPath(RELEASE_HISTORY), token) !== loadedRuns;
+    const runsMoved = await get(runsPath(RELEASE_HISTORY), token) !== loadedRuns;
+    if (runsMoved) return true;
+    if (loadedPulls !== null) {
+      const pullsMoved = await get(pullsPath(), token).then((body) => body !== loadedPulls).catch(() => false);
+      if (pullsMoved) return true;
+    }
+    if (loadedCiRuns !== null) {
+      const ciMoved = await get(ciRunsPath(), token).then((body) => body !== loadedCiRuns).catch(() => false);
+      if (ciMoved) return true;
+    }
+    return false;
   }
   return { load, lookup, probe, current: () => snapshot };
 }

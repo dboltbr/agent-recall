@@ -19765,6 +19765,207 @@ function date4(params) {
   return _coercedDate(ZodDate, params);
 }
 
+// core/queue-status.ts
+var CI_WORKFLOW = "ci";
+var MERGIFY_BRANCH_PREFIX = "mergify/merge-queue/";
+var PrCiStateSchema = external_exports.enum(["queued", "running", "success", "failure", "cancelled", "none"]);
+var QueueStageSchema = external_exports.enum(["checking", "queued", "waiting", "dequeued", "open"]);
+var CiJobStateSchema = external_exports.enum(["queued", "running", "success", "failure", "cancelled", "skipped"]);
+var CiJobSchema = external_exports.object({
+  name: external_exports.string(),
+  state: CiJobStateSchema,
+  url: external_exports.string().nullable()
+});
+var QueueBatchSchema = external_exports.object({
+  prNumber: external_exports.number(),
+  title: external_exports.string(),
+  branch: external_exports.string(),
+  headSha: external_exports.string(),
+  url: external_exports.string(),
+  prNumbers: external_exports.array(external_exports.number()),
+  batchName: external_exports.string().nullable(),
+  ciState: PrCiStateSchema,
+  runUrl: external_exports.string().nullable(),
+  done: external_exports.number(),
+  total: external_exports.number(),
+  runningJobs: external_exports.array(external_exports.string()),
+  failedJob: external_exports.string().nullable(),
+  jobs: external_exports.array(CiJobSchema)
+});
+var PullRequestStatusSchema = external_exports.object({
+  number: external_exports.number(),
+  title: external_exports.string(),
+  branch: external_exports.string(),
+  headSha: external_exports.string(),
+  url: external_exports.string(),
+  draft: external_exports.boolean(),
+  labels: external_exports.array(external_exports.string()),
+  stage: QueueStageSchema,
+  position: external_exports.number().nullable(),
+  batchPrNumber: external_exports.number().nullable(),
+  ciState: PrCiStateSchema,
+  runUrl: external_exports.string().nullable(),
+  done: external_exports.number(),
+  total: external_exports.number(),
+  runningJobs: external_exports.array(external_exports.string()),
+  failedJob: external_exports.string().nullable(),
+  jobs: external_exports.array(CiJobSchema),
+  updatedAt: external_exports.string()
+});
+var MergeQueueSnapshotSchema = external_exports.object({
+  batches: external_exports.array(QueueBatchSchema),
+  prs: external_exports.array(PullRequestStatusSchema)
+});
+function isMergifyBatchBranch(branch) {
+  return branch.startsWith(MERGIFY_BRANCH_PREFIX);
+}
+function parseBatchPrNumbers(title, body) {
+  const numbers = [];
+  const add = (text2) => {
+    for (const match of text2.matchAll(/#(\d+)/g)) {
+      const value = Number(match[1]);
+      if (Number.isInteger(value) && value > 0 && !numbers.includes(value)) numbers.push(value);
+    }
+  };
+  add(title);
+  if (numbers.length === 0 && body) {
+    const head = body.split("\n\n")[0] ?? body;
+    add(head);
+  }
+  return numbers;
+}
+function parseBatchName(body) {
+  if (!body) return null;
+  return /for batch \*\*([^*]+)\*\*/i.exec(body)?.[1]?.trim() ?? null;
+}
+function ciRunState(run) {
+  if (!run) return "none";
+  if (run.status === "in_progress") return "running";
+  if (run.status !== "completed") return "queued";
+  if (run.conclusion === "success" || run.conclusion === "neutral" || run.conclusion === "skipped") return "success";
+  if (run.conclusion === "cancelled") return "cancelled";
+  return "failure";
+}
+function toCiJobState(job) {
+  if (job.status === "in_progress") return "running";
+  if (job.status !== "completed") return "queued";
+  if (job.conclusion === "success" || job.conclusion === "neutral") return "success";
+  if (job.conclusion === "skipped") return "skipped";
+  if (job.conclusion === "cancelled") return "cancelled";
+  return "failure";
+}
+function summarizeJobs(rawJobs) {
+  if (!rawJobs?.length) return { done: 0, total: 0, runningJobs: [], failedJob: null, jobs: [] };
+  const jobs = [];
+  for (const job of rawJobs) {
+    const state = toCiJobState(job);
+    if (state === "skipped") continue;
+    jobs.push({ name: job.name, state, url: job.html_url ?? null });
+  }
+  const done = jobs.filter((job) => job.state === "success").length;
+  const runningJobs = jobs.filter((job) => job.state === "running").map((job) => job.name);
+  const failedJob = jobs.find((job) => job.state === "failure")?.name ?? null;
+  return { done, total: jobs.length, runningJobs, failedJob, jobs };
+}
+function matchCiRun(runs, branch, headSha, allowBranchFallback = false) {
+  const exact = runs.find((run) => run.head_branch === branch && run.head_sha === headSha);
+  if (exact) return exact;
+  return allowBranchFallback ? runs.find((run) => run.head_branch === branch) ?? null : null;
+}
+function buildMergeQueue(input2) {
+  const runs = [...input2.ciRuns].sort((a, b) => b.id - a.id);
+  const jobsByRunId = input2.jobsByRunId ?? /* @__PURE__ */ new Map();
+  const rawBatches = [];
+  const rawPrs = [];
+  for (const pr of input2.pulls) {
+    if (isMergifyBatchBranch(pr.head.ref)) rawBatches.push(pr);
+    else rawPrs.push(pr);
+  }
+  rawBatches.sort((a, b) => a.number - b.number);
+  const batches = rawBatches.map((pr) => {
+    const run = matchCiRun(runs, pr.head.ref, pr.head.sha, true);
+    const summary = summarizeJobs(run ? jobsByRunId.get(run.id) : void 0);
+    return {
+      prNumber: pr.number,
+      title: pr.title,
+      branch: pr.head.ref,
+      headSha: pr.head.sha,
+      url: pr.html_url,
+      prNumbers: parseBatchPrNumbers(pr.title, pr.body),
+      batchName: parseBatchName(pr.body),
+      ciState: ciRunState(run),
+      runUrl: run?.html_url ?? null,
+      ...summary
+    };
+  });
+  const batchByPr = /* @__PURE__ */ new Map();
+  for (const batch of batches) {
+    for (const num of batch.prNumbers) {
+      if (!batchByPr.has(num)) batchByPr.set(num, batch);
+    }
+  }
+  const queuedOrder = rawPrs.filter((pr) => !batchByPr.has(pr.number) && (pr.labels ?? []).some((label) => label.name === "queued")).sort((a, b) => Date.parse(a.updated_at) - Date.parse(b.updated_at) || a.number - b.number);
+  const queuedPositions = /* @__PURE__ */ new Map();
+  const offset = batches.length > 0 ? batches.length : 0;
+  queuedOrder.forEach((pr, index) => queuedPositions.set(pr.number, offset + index + 1));
+  const prs = rawPrs.map((pr) => {
+    const labels = (pr.labels ?? []).map((label) => label.name ?? "").filter(Boolean);
+    const batch = batchByPr.get(pr.number) ?? null;
+    if (batch) {
+      return {
+        number: pr.number,
+        title: pr.title,
+        branch: pr.head.ref,
+        headSha: pr.head.sha,
+        url: pr.html_url,
+        draft: pr.draft === true,
+        labels,
+        stage: "checking",
+        position: 1,
+        batchPrNumber: batch.prNumber,
+        ciState: batch.ciState,
+        runUrl: batch.runUrl,
+        done: batch.done,
+        total: batch.total,
+        runningJobs: batch.runningJobs,
+        failedJob: batch.failedJob,
+        jobs: batch.jobs,
+        updatedAt: pr.updated_at
+      };
+    }
+    const run = matchCiRun(runs, pr.head.ref, pr.head.sha);
+    const summary = summarizeJobs(run ? jobsByRunId.get(run.id) : void 0);
+    const hasQueue = labels.includes("queue");
+    const hasQueued = labels.includes("queued");
+    const hasDequeued = labels.includes("dequeued");
+    const stage = hasDequeued ? "dequeued" : hasQueued ? "queued" : hasQueue ? "waiting" : "open";
+    return {
+      number: pr.number,
+      title: pr.title,
+      branch: pr.head.ref,
+      headSha: pr.head.sha,
+      url: pr.html_url,
+      draft: pr.draft === true,
+      labels,
+      stage,
+      position: queuedPositions.get(pr.number) ?? null,
+      batchPrNumber: null,
+      ciState: ciRunState(run),
+      runUrl: run?.html_url ?? null,
+      ...summary,
+      updatedAt: pr.updated_at
+    };
+  });
+  return { batches, prs };
+}
+function hasActiveQueueWork(queue) {
+  if (!queue) return false;
+  if (queue.batches.length > 0) return true;
+  return queue.prs.some(
+    (pr) => pr.stage === "checking" || pr.stage === "queued" || pr.ciState === "running" || pr.ciState === "queued"
+  );
+}
+
 // core/trailer.ts
 var HARNESSES = ["paseo", "opencode", "claude"];
 var VALUE = /^(paseo|opencode|claude)\/([^/\s]+)\/([^/\s]+)$/;
@@ -19803,7 +20004,7 @@ var STEP_IDS = ["verify", "images", "deploy", "tag", "watch"];
 var StepIdSchema = external_exports.enum(STEP_IDS);
 var StepStateSchema = external_exports.enum(["pending", "running", "done", "failed", "cancelled", "skipped"]);
 var JobStateSchema = external_exports.enum(["queued", "waiting", "running", "success", "failure", "cancelled", "skipped"]);
-var VerdictSchema = external_exports.enum(["green", "reverted", "red", "inconclusive", "failed", "cancelled", "none"]);
+var VerdictSchema = external_exports.enum(["green", "published", "reverted", "red", "inconclusive", "failed", "cancelled", "none"]);
 var SessionSchema = external_exports.object({
   harness: external_exports.enum(["paseo", "opencode", "claude"]),
   host: external_exports.string(),
@@ -19932,6 +20133,8 @@ var ReleaseSnapshotSchema = external_exports.object({
   /** Self-hosted runners of the org. */
   runners: external_exports.array(RunnerSchema),
   queued: external_exports.array(QueuedJobSchema),
+  /** Open pull requests, Mergify merge queue batches and `ci.yml` status. */
+  queue: MergeQueueSnapshotSchema.optional(),
   /** pt-BR reason the last refresh failed; the rest is the last good data. */
   error: external_exports.string().nullable()
 });
@@ -20159,6 +20362,7 @@ function watchVerdict(input2) {
   if (watch?.state === "failure" || watch?.state === "cancelled") return "inconclusive";
   if (!watch && input2.jobs.some((job) => job.name === WATCH_DISPATCH && job.step === "tag" && job.state === "success")) return "inconclusive";
   if (input2.conclusion === "cancelled") return "cancelled";
+  if (!watch && input2.jobs.some((job) => job.name === "release-tag" && job.step === "tag" && job.state === "success")) return "published";
   if (!input2.jobs.some((job) => job.step !== null && job.state !== "skipped")) return "none";
   return input2.conclusion === "success" ? "none" : watch ? "inconclusive" : "failed";
 }
@@ -20291,6 +20495,7 @@ function buildSnapshot(input2) {
     queued: active.flatMap(
       (release) => release.jobs.filter((job) => job.state === "queued").map((job) => ({ name: job.name, runNumber: release.number, labels: job.labels }))
     ),
+    ...input2.queue ? { queue: input2.queue } : {},
     error: input2.error ?? null
   };
 }
@@ -20844,10 +21049,15 @@ function createReleaseSource(options) {
   let snapshot = null;
   let runners = [];
   let loadedRuns = null;
+  let loadedPulls = null;
+  let loadedCiRuns = null;
+  let lastQueue;
   let watchRuns = /* @__PURE__ */ new Map();
   const progress = /* @__PURE__ */ new Map();
   const settled = /* @__PURE__ */ new Set();
   const runsPath = (perPage, page = 1, name = workflow) => `repos/${repository}/actions/workflows/${name}.yml/runs?per_page=${perPage}&page=${page}`;
+  const pullsPath = () => `repos/${repository}/pulls?state=open&per_page=100`;
+  const ciRunsPath = () => `repos/${repository}/actions/workflows/${CI_WORKFLOW}.yml/runs?per_page=30&page=1`;
   async function watchPage(perPage, token) {
     const body = await get(runsPath(perPage, 1, watchWorkflow), token);
     const byNumber = /* @__PURE__ */ new Map();
@@ -20928,18 +21138,70 @@ function createReleaseSource(options) {
       now: options.clock.now()
     });
   }
+  async function loadQueue(token) {
+    try {
+      const [pulls, ciPage] = await Promise.all([
+        get(pullsPath(), token),
+        get(ciRunsPath(), token).catch(() => ({ workflow_runs: [] }))
+      ]);
+      loadedPulls = pulls;
+      loadedCiRuns = ciPage;
+      const runs = [...ciPage.workflow_runs].sort((a, b) => b.id - a.id);
+      const toInspect = /* @__PURE__ */ new Map();
+      for (const pr of pulls) {
+        if (isMergifyBatchBranch(pr.head.ref)) {
+          const run = matchCiRun(runs, pr.head.ref, pr.head.sha, true);
+          if (run) toInspect.set(run.id, run);
+        }
+      }
+      let extra = 0;
+      for (const pr of pulls) {
+        if (isMergifyBatchBranch(pr.head.ref) || extra >= 3) continue;
+        const labels = (pr.labels ?? []).map((label) => label.name ?? "");
+        const run = matchCiRun(runs, pr.head.ref, pr.head.sha);
+        if (!run || toInspect.has(run.id)) continue;
+        if (labels.includes("queue") || run.status === "in_progress" || run.conclusion === "failure") {
+          toInspect.set(run.id, run);
+          extra++;
+        }
+      }
+      const jobsByRunId = /* @__PURE__ */ new Map();
+      if (toInspect.size > 0) {
+        await pool([...toInspect.values()], async (run) => {
+          const key = `ci:${run.id}`;
+          const done = finishedJobs.get(key);
+          if (done) {
+            jobsByRunId.set(run.id, done);
+            return;
+          }
+          try {
+            const body = await get(`repos/${repository}/actions/runs/${run.id}/jobs?per_page=100&page=1`, token);
+            if (run.status === "completed") finishedJobs.set(key, body.jobs);
+            jobsByRunId.set(run.id, body.jobs);
+          } catch (error62) {
+            options.log.warn(`jobs do CI ${run.id}: ${describe3(error62)}`);
+          }
+        });
+      }
+      lastQueue = buildMergeQueue({ pulls, ciRuns: runs, jobsByRunId });
+      return lastQueue;
+    } catch {
+      return lastQueue;
+    }
+  }
   async function load(input2) {
     const now = options.clock.now();
     const notes = notesByRelease(input2.notes);
     try {
-      const [page, tags, watches] = await Promise.all([
+      const [page, tags, watches, queue] = await Promise.all([
         get(runsPath(RELEASE_HISTORY), input2.token),
         tagList(input2.token),
         // Room for re-dispatched watches; a failure keeps the last watch runs instead of the whole load.
         watchPage(RELEASE_HISTORY * 2, input2.token).catch((error62) => {
           options.log.warn(`runs do vigia: ${describe3(error62)}`);
           return watchRuns;
-        })
+        }),
+        loadQueue(input2.token)
       ]);
       loadedRuns = page;
       watchRuns = watches;
@@ -20967,7 +21229,7 @@ function createReleaseSource(options) {
         options.log.warn(`runners: ${describe3(error62)}`);
         return runners;
       });
-      snapshot = buildSnapshot({ repository, workflow, releases, runners, now });
+      snapshot = buildSnapshot({ repository, workflow, releases, runners, ...queue ? { queue } : {}, now });
     } catch (error62) {
       const message2 = describe3(error62);
       snapshot = snapshot ? { ...snapshot, error: message2 } : buildSnapshot({ repository, workflow, releases: [], runners: [], now, error: message2 });
@@ -20993,7 +21255,17 @@ function createReleaseSource(options) {
     return null;
   }
   async function probe(token) {
-    return await get(runsPath(RELEASE_HISTORY), token) !== loadedRuns;
+    const runsMoved = await get(runsPath(RELEASE_HISTORY), token) !== loadedRuns;
+    if (runsMoved) return true;
+    if (loadedPulls !== null) {
+      const pullsMoved = await get(pullsPath(), token).then((body) => body !== loadedPulls).catch(() => false);
+      if (pullsMoved) return true;
+    }
+    if (loadedCiRuns !== null) {
+      const ciMoved = await get(ciRunsPath(), token).then((body) => body !== loadedCiRuns).catch(() => false);
+      if (ciMoved) return true;
+    }
+    return false;
   }
   return { load, lookup, probe, current: () => snapshot };
 }
@@ -21021,7 +21293,7 @@ function createReleaseTracker(options) {
     async tick(input2) {
       last = input2;
       const current = options.source.current();
-      const scheduled = ticks++ % IDLE_EVERY_TICKS === 0 || current === null || current.releases.some(isActive) || input2.notesChanged;
+      const scheduled = ticks++ % IDLE_EVERY_TICKS === 0 || current === null || current.releases.some(isActive) || hasActiveQueueWork(current.queue) || input2.notesChanged;
       const due = scheduled || await options.source.probe(input2.token).then(
         (moved) => {
           probeError = null;
@@ -21321,7 +21593,7 @@ var message = external_exports.object({
   result: external_exports.object({ candidateId: external_exports.string(), revisionId: external_exports.string().nullable(), outcome: external_exports.enum(["approved", "rejected"]), baseSha: external_exports.string().nullable(), candidateSha: external_exports.string().nullable(), evidence: external_exports.string(), finishedAt: external_exports.string() })
 });
 async function pollCandidates(input2) {
-  if (!input2.delivery.promptCandidate) return;
+  if (!input2.delivery.promptCandidate) return true;
   const base = new URL(input2.url);
   if (base.username || base.password || base.search || base.hash || base.protocol !== "https:" && !(base.protocol === "http:" && ["127.0.0.1", "localhost"].includes(base.hostname)) || !input2.token) throw new Error("Configura\xE7\xE3o de retorno de candidato inv\xE1lida");
   async function request(path, body) {
@@ -21332,14 +21604,17 @@ async function pollCandidates(input2) {
       headers: { Authorization: `Bearer ${input2.token}`, "Content-Type": "application/json" },
       body: body ? JSON.stringify(body) : void 0
     });
+    if (response.status === 404 && !body && path === "") return { status: 404, body: null };
     if (!response.ok) throw new Error(`Retorno de candidato: HTTP ${response.status}`);
-    return response.json();
+    return { status: response.status, body: await response.json() };
   }
-  const data = external_exports.object({ candidates: external_exports.array(message).max(1e3) }).parse(await request(""));
+  const initial = await request("");
+  if (initial.status === 404) return false;
+  const data = external_exports.object({ candidates: external_exports.array(message).max(1e3) }).parse(initial.body);
   for (const event of data.candidates) {
     const target = parseSessionValue(event.session);
     if (!target || target.host !== input2.me.host || target.harness !== input2.me.harness) continue;
-    const claim2 = external_exports.object({ claimed: external_exports.boolean() }).parse(await request("/claim", { key: event.key }));
+    const claim2 = external_exports.object({ claimed: external_exports.boolean() }).parse((await request("/claim", { key: event.key })).body);
     if (!claim2.claimed) continue;
     const text2 = `Resultado do candidato ${event.result.candidateId}: ${event.result.outcome === "approved" ? "aprovado" : "recusado"}. SHA enviado ${event.submittedSha}; SHA verificado ${event.result.candidateSha ?? "n\xE3o preparado"}; base ${event.result.baseSha ?? "n\xE3o preparada"}. Evid\xEAncia: ${event.result.evidence}. Este retorno \xE9 da fila antes da publica\xE7\xE3o, n\xE3o \xE9 incidente de release; n\xE3o executar rollback nem congelar produ\xE7\xE3o.`;
     const receipt = await input2.delivery.promptCandidate(target, text2, event.key);
@@ -21347,8 +21622,9 @@ async function pollCandidates(input2) {
       await request("/queued", { key: event.key });
       continue;
     }
-    external_exports.object({ receipt: external_exports.string().min(1) }).parse(await request("/confirm", { key: event.key, receipt }));
+    external_exports.object({ receipt: external_exports.string().min(1) }).parse((await request("/confirm", { key: event.key, receipt })).body);
   }
+  return true;
 }
 
 // core/watcher.ts
@@ -21459,6 +21735,7 @@ async function deliver(input2) {
 
 // core/watcher.ts
 var TOKEN_TTL_MS = 10 * 60 * 1e3;
+var CANDIDATES_404_BACKOFF_MS = 30 * 60 * 1e3;
 function asBlocked(body) {
   return typeof body["state"] === "string" && typeof body["updatedAt"] === "string" ? body : null;
 }
@@ -21469,6 +21746,7 @@ function createWatcher(options) {
   const { clock, exec, log: log2 } = options;
   let factoryEtag = null;
   let factoryUrl = null;
+  let candidatesDisabledUntil = -Infinity;
   const factoryRecords = /* @__PURE__ */ new Map();
   let etag = null;
   let notesRef = null;
@@ -21855,16 +22133,20 @@ function createWatcher(options) {
     }
     const me = { harness: options.harness, host: options.host(config2) };
     if (config2.factoryApiUrl) {
-      try {
-        await pollCandidates({ fetch: options.fetch, url: config2.factoryApiUrl, token: config2.factoryToken ?? "", me, delivery: options.delivery });
-      } catch (error62) {
-        log2.warn(`candidato pendente: ${describe3(error62)}`);
-      }
       if (factoryUrl !== config2.factoryApiUrl) {
         factoryUrl = config2.factoryApiUrl;
         factoryEtag = null;
+        candidatesDisabledUntil = -Infinity;
         factoryRecords.clear();
         notes.clear();
+      }
+      if (now.getTime() >= candidatesDisabledUntil) {
+        try {
+          const supported = await pollCandidates({ fetch: options.fetch, url: config2.factoryApiUrl, token: config2.factoryToken ?? "", me, delivery: options.delivery });
+          if (!supported) candidatesDisabledUntil = now.getTime() + CANDIDATES_404_BACKOFF_MS;
+        } catch (error62) {
+          log2.warn(`candidato pendente: ${describe3(error62)}`);
+        }
       }
       const handled2 = [];
       let kind = "error";
@@ -22185,7 +22467,7 @@ var index_default = {
   // No dispose: the poller and the newest context outlive location eviction (see ./poller.ts).
   setup(ctx) {
     attach(registry2, ctx, {
-      sha: true ? "457fd4c47b911db2a8f2beead07bc033869fd8a8" : "unknown",
+      sha: true ? "fd054e5329b9f1eb530cad00c31c4761fe38294d" : "unknown",
       stateDir: stateDirectory(),
       pid: process.pid,
       clock: { now: () => /* @__PURE__ */ new Date() },
