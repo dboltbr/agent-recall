@@ -8,6 +8,7 @@ import { copyText, Icon, Loading, ScrollView, useToast } from "@getpaseo/plugin/
 import { openExternalUrl } from "@getpaseo/plugin/client";
 import { useEffect, type ReactNode } from "react";
 import { Pressable, Text, View } from "react-native";
+import { prStageBadge, queuedPrs, type MergeQueueSnapshot } from "../shared/queue-status.ts";
 import {
   commitUrl,
   freshness,
@@ -362,6 +363,50 @@ function VerdictsPanel({ theme, view, compact, now }: { theme: PluginTheme; view
   );
 }
 
+function MergeQueuePanel({ theme, queue }: { theme: PluginTheme; queue: MergeQueueSnapshot | undefined }) {
+  const items = queuedPrs(queue);
+  if (!items.length && !queue?.batches.length) return null;
+  const count = items.length;
+  return (
+    <Panel theme={theme} icon="GitMerge" title="Fila de merge (Mergify)" trailing={count ? `${count} ${count === 1 ? "PR" : "PRs"}` : null}>
+      <View style={{ gap: 8 }}>
+        {items.map((pr) => {
+          const badge = prStageBadge(pr);
+          const detail =
+            pr.stage === "checking" && pr.runningJobs.length
+              ? `rodando: ${pr.runningJobs.join(", ")}`
+              : pr.failedJob
+                ? `${pr.failedJob} falhou`
+                : pr.branch;
+          return (
+            <View
+              key={pr.number}
+              style={{
+                flexDirection: "row",
+                alignItems: "center",
+                gap: 10,
+                paddingVertical: 4,
+                minWidth: 0,
+              }}
+            >
+              <Text style={{ color: theme.colors.foreground, fontWeight: "600", fontSize: 12.5 }}>{`#${pr.number}`}</Text>
+              <Badge theme={theme} tone={badge.tone} label={badge.label} />
+              <Text numberOfLines={1} style={{ color: theme.colors.foreground, fontSize: 12.5, flex: 1, minWidth: 0 }}>
+                {pr.title}
+              </Text>
+              <Text numberOfLines={1} style={{ color: theme.colors.foregroundMuted, fontSize: 11.5, maxWidth: 220 }}>
+                {pr.total > 0 && pr.stage === "checking" ? `${pr.done}/${pr.total} · ${detail}` : detail}
+              </Text>
+              {pr.runUrl ? <LinkText theme={theme} href={pr.runUrl} label="CI" muted /> : null}
+              <LinkText theme={theme} href={pr.url} label="PR" />
+            </View>
+          );
+        })}
+      </View>
+    </Panel>
+  );
+}
+
 export function ReleasesScreen({ theme, layout, params, navigation }: PluginScreenProps) {
   const { view, error, loading, refreshing } = useReleaseState();
   const toast = useToast();
@@ -437,6 +482,7 @@ export function ReleasesScreen({ theme, layout, params, navigation }: PluginScre
           </Panel>
         ) : (
           <>
+            <MergeQueuePanel theme={theme} queue={snapshot.queue} />
             <View style={{ flexDirection: compact ? "column" : "row", gap: 16, alignItems: "flex-start" }}>
               <View style={{ flex: compact ? undefined : 1, alignSelf: "stretch", minWidth: 0 }}>
                 {featured ? (

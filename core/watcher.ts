@@ -31,6 +31,8 @@ import { formatSession, parseSessionValue, sameSession } from "./trailer.ts";
 import type { BlockedNote, Clock, Exec, Fetch, Harness, HostConfig, Logger, Me, Note, SessionRef } from "./types.ts";
 
 const TOKEN_TTL_MS = 10 * 60 * 1000;
+/** Re-probe `/verification/recall` slowly after a 404 (not exposed on this factory). */
+const CANDIDATES_404_BACKOFF_MS = 30 * 60 * 1000;
 
 /** A note body as a blocked note, or null (JSON from another repository). */
 function asBlocked(body: Record<string, unknown>): BlockedNote | null {
@@ -118,6 +120,7 @@ export function createWatcher(options: WatcherOptions): Watcher {
   const { clock, exec, log } = options;
   let factoryEtag: string | null = null;
   let factoryUrl: string | null = null;
+  let candidatesDisabledUntil = -Infinity;
   const factoryRecords = new Map<string, FactoryRecord>();
   let etag: string | null = null;
   let notesRef: string | null = null;
@@ -619,10 +622,19 @@ export function createWatcher(options: WatcherOptions): Watcher {
     }
     const me: Me = { harness: options.harness, host: options.host(config) };
     if (config.factoryApiUrl) {
-      try {
-        await pollCandidates({ fetch: options.fetch, url: config.factoryApiUrl, token: config.factoryToken ?? '', me, delivery: options.delivery });
-      } catch (error) { log.warn(`candidato pendente: ${describe(error)}`); }
-      if (factoryUrl !== config.factoryApiUrl) { factoryUrl = config.factoryApiUrl; factoryEtag = null; factoryRecords.clear(); notes.clear(); }
+      if (factoryUrl !== config.factoryApiUrl) {
+        factoryUrl = config.factoryApiUrl;
+        factoryEtag = null;
+        candidatesDisabledUntil = -Infinity;
+        factoryRecords.clear();
+        notes.clear();
+      }
+      if (now.getTime() >= candidatesDisabledUntil) {
+        try {
+          const supported = await pollCandidates({ fetch: options.fetch, url: config.factoryApiUrl, token: config.factoryToken ?? '', me, delivery: options.delivery });
+          if (!supported) candidatesDisabledUntil = now.getTime() + CANDIDATES_404_BACKOFF_MS;
+        } catch (error) { log.warn(`candidato pendente: ${describe(error)}`); }
+      }
       const handled: Handled[] = [];
       let kind: "changed" | "unchanged" | "error" = "error";
       try {

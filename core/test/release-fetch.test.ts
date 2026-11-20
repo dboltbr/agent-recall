@@ -17,6 +17,8 @@ import { commit, jobsInput, released, midImages, run, RUNNERS, watchRun, type Re
 
 const RUNS = "repos/dboltbr/dbolt/actions/workflows/release.yml/runs?per_page=15&page=1";
 const WATCH_RUNS = (perPage: number) => `repos/dboltbr/dbolt/actions/workflows/release-watch.yml/runs?per_page=${perPage}&page=1`;
+const PULLS_PATH = "repos/dboltbr/dbolt/pulls?state=open&per_page=100";
+const CI_RUNS_PATH = "repos/dboltbr/dbolt/actions/workflows/ci.yml/runs?per_page=30&page=1";
 const TAGS = "repos/dboltbr/dbolt/git/matching-refs/tags/release-";
 const RUNNERS_PATH = "orgs/dboltbr/actions/runner-groups/1/runners?per_page=100";
 const jobsPath = (r: GitHubRun) => `repos/dboltbr/dbolt/actions/runs/${r.id}/jobs?per_page=100&page=1`;
@@ -39,6 +41,8 @@ function api(state: State) {
   const routes: Record<string, ApiReply | (() => ApiReply)> = {
     [WATCH_RUNS(30)]: watchList,
     [WATCH_RUNS(100)]: watchList,
+    [PULLS_PATH]: { body: [], etag: '"pulls-1"' },
+    [CI_RUNS_PATH]: { body: { total_count: 0, workflow_runs: [] }, etag: '"ci-runs-1"' },
     [RUNS]: () => ({ status: state.runsStatus ?? 200, body: { total_count: state.runs.length, workflow_runs: state.runs }, etag: state.runsEtag ?? '"runs-1"' }),
     [TAGS]: { body: [{ ref: "refs/tags/release-170" }, { ref: "refs/tags/release-171" }], etag: '"tags"' },
     [RUNNERS_PATH]: { body: { total_count: 3, runners: RUNNERS }, etag: '"runners"' },

@@ -3,6 +3,7 @@
 // release-watch notes. The Paseo UI (via `shared/release-status.ts`, a sync copy) and the
 // OpenChamber extension import it; `core/release-fetch.ts` is the fetcher that feeds it.
 import { z } from "zod";
+import { MergeQueueSnapshotSchema, type MergeQueueSnapshot } from "./queue-status.ts";
 import { parseAgentSession, sameSession, toSessionRef } from "./trailer.ts";
 import type { Note, SessionRef } from "./types.ts";
 
@@ -29,8 +30,8 @@ export type StepState = z.infer<typeof StepStateSchema>;
 export const JobStateSchema = z.enum(["queued", "waiting", "running", "success", "failure", "cancelled", "skipped"]);
 export type JobState = z.infer<typeof JobStateSchema>;
 
-/** The watch's (vigia) word on a finished release, or why there is none. */
-export const VerdictSchema = z.enum(["green", "reverted", "red", "inconclusive", "failed", "cancelled", "none"]);
+/** The watch's (vigia) word on a finished release, or why there is none. `published`: tagged and deployed, outside the factory's verdict window. */
+export const VerdictSchema = z.enum(["green", "published", "reverted", "red", "inconclusive", "failed", "cancelled", "none"]);
 export type Verdict = z.infer<typeof VerdictSchema>;
 
 export const SessionSchema = z.object({
@@ -194,6 +195,8 @@ export const ReleaseSnapshotSchema = z.object({
   /** Self-hosted runners of the org. */
   runners: z.array(RunnerSchema),
   queued: z.array(QueuedJobSchema),
+  /** Open pull requests, Mergify merge queue batches and `ci.yml` status. */
+  queue: MergeQueueSnapshotSchema.optional(),
   /** pt-BR reason the last refresh failed; the rest is the last good data. */
   error: z.string().nullable(),
 });
@@ -264,6 +267,7 @@ export const STEP_LABELS: Record<StepId, string> = {
 
 export const VERDICT_LABELS: Record<Verdict, string> = {
   green: "verde",
+  published: "publicado",
   reverted: "revertido",
   red: "vermelho",
   inconclusive: "inconclusivo",
@@ -588,6 +592,8 @@ export function watchVerdict(input: VerdictInput): Verdict | null {
   // Dispatched, but no watch run showed up within the grace window: published, never judged.
   if (!watch && input.jobs.some((job) => job.name === WATCH_DISPATCH && job.step === "tag" && job.state === "success")) return "inconclusive";
   if (input.conclusion === "cancelled") return "cancelled";
+  // Tagged and published without a watch run or factory record (e.g. outside the factory's recent window).
+  if (!watch && input.jobs.some((job) => job.name === "release-tag" && job.step === "tag" && job.state === "success")) return "published";
   if (!input.jobs.some((job) => job.step !== null && job.state !== "skipped")) return "none";
   return input.conclusion === "success" ? "none" : watch ? "inconclusive" : "failed";
 }
@@ -767,6 +773,7 @@ export interface SnapshotInput {
   readonly workflow: string;
   readonly releases: readonly Release[];
   readonly runners: readonly GitHubRunner[];
+  readonly queue?: MergeQueueSnapshot;
   readonly now: Date;
   readonly error?: string | null;
 }
@@ -790,6 +797,7 @@ export function buildSnapshot(input: SnapshotInput): ReleaseSnapshot {
         .filter((job) => job.state === "queued")
         .map((job) => ({ name: job.name, runNumber: release.number, labels: job.labels })),
     ),
+    ...(input.queue ? { queue: input.queue } : {}),
     error: input.error ?? null,
   };
 }
@@ -913,12 +921,23 @@ export function footerRelease(snapshot: ReleaseSnapshot, now: Date): Release | n
   return last && ended !== null && now.getTime() - ended <= RECENT_VERDICT_MS ? last : null;
 }
 
-/** The release a session has a commit in: an active one, else the last finished one. */
-export function releaseForSession(snapshot: ReleaseSnapshot, session: SessionRef): Release | null {
-  const candidates = [...activeReleases(snapshot)];
-  const last = lastFinished(snapshot);
-  if (last) candidates.push(last);
-  return candidates.find((release) => release.sessions.some((known) => sameSession(known, session))) ?? null;
+/**
+ * The release a session belongs to: an active one first, else the newest non-superseded finished
+ * release in the snapshot (so an agent does not lose its pill when another agent ships later),
+ * else a recent `none` release this session pushed directly.
+ */
+export function releaseForSession(snapshot: ReleaseSnapshot, session: SessionRef, now: Date = new Date()): Release | null {
+  const has = (release: Release) => release.sessions.some((known) => sameSession(known, session));
+  const active = activeReleases(snapshot).find(has);
+  if (active) return active;
+  const finished = snapshot.releases.find((release) => !isActive(release) && !isSuperseded(release) && has(release));
+  if (finished) return finished;
+  const pushedNoop = snapshot.releases.find((release) => {
+    if (isActive(release) || release.verdict !== "none" || !release.pusher || !sameSession(release.pusher, session)) return false;
+    const ended = time(release.completedAt);
+    return ended !== null && now.getTime() - ended <= RECENT_VERDICT_MS;
+  });
+  return pushedNoop ?? null;
 }
 
 export function findRelease(snapshot: ReleaseSnapshot, number: number): Release | null {
@@ -1168,6 +1187,8 @@ export function verdictDetail(release: Release): string {
       return release.failedJob ? `${release.failedJob.name} falhou` : "falhou";
     case "green":
       return "vigia sem regressão";
+    case "published":
+      return "publicado em produção";
     case "inconclusive": {
       const missing = missingEvidence(release);
       return missing ? `inconclusivo · faltou ${missing}` : "inconclusivo";
@@ -1189,7 +1210,12 @@ export function imageJobs(release: Release): Job[] {
 /** Job names of a step, deduped (`check · scanners`); the watch's gate and dispatch are not tiers. */
 export function stepJobNames(release: Release, id: StepId): string[] {
   const names = release.jobs
-    .filter((job) => job.step === id && job.state !== "skipped" && (id === "watch" || (job.name !== PREVIOUS_WATCH && job.name !== WATCH_DISPATCH)))
+    .filter(
+      (job) =>
+        job.step === id &&
+        job.state !== "skipped" &&
+        (id === "watch" || (job.name !== PREVIOUS_WATCH && job.name !== PREVIOUS_INVESTIGATION && job.name !== WATCH_DISPATCH)),
+    )
     .map((job) => {
       const [prefix, rest] = splitJobName(job.name);
       if (id === "images") return job.image ?? job.name;

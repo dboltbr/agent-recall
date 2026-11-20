@@ -1,14 +1,16 @@
-// Sidebar footer row (mock p3): the release in focus (with `+N` for the others in flight), or the
-// last verdict for two hours after, with the five-segment step bar. A press opens the step
-// popover; with nothing to show the row reads "Releases" and opens the screen.
+// Sidebar footer row: the release in focus (with `+N` for the others in flight), or the last
+// verdict for two hours after, with the step bar. When no release is in focus and the Mergify
+// queue is active, shows the queue summary; otherwise "Releases".
 import type { PluginPopoverProps, PluginSidebarItemProps } from "@getpaseo/plugin/client";
 import { SidebarRow } from "@getpaseo/plugin/client/ui";
-import { watchTone } from "../shared/release-copy.ts";
+import { queueFooterLabel, queuedPrs } from "../shared/queue-status.ts";
+import { visibleSteps, watchTone } from "../shared/release-copy.ts";
 import { footerRelease, isActive, otherActive, releaseLabel, watchPhaseLabel, type Release } from "../shared/release-status.ts";
 import type { ReleaseView } from "../shared/rpc.ts";
 import { useNow, useReleaseState } from "./data.ts";
 import { SegBar } from "./kit.tsx";
 import { hopToAgent, RELEASES_SCREEN } from "./navigate.ts";
+import { QueuePopover } from "./queue-popover.tsx";
 import { ReleasePopover } from "./release-popover.tsx";
 
 function pickFooter(view: ReleaseView): Release | null {
@@ -32,6 +34,19 @@ function FooterPopover({ theme, close, openScreen }: PluginPopoverProps) {
   );
 }
 
+function QueueFooterPopover({ theme, close, openScreen }: PluginPopoverProps) {
+  return (
+    <QueuePopover
+      theme={theme}
+      pick={(view) => queuedPrs(view.snapshot?.queue)[0] ?? null}
+      openReleases={() => {
+        close();
+        openScreen({ screenId: RELEASES_SCREEN });
+      }}
+    />
+  );
+}
+
 export function ReleaseFooterItem({ theme, currentScreen, openScreen, openPopover }: PluginSidebarItemProps) {
   const { view } = useReleaseState();
   const now = useNow(30_000);
@@ -40,6 +55,10 @@ export function ReleaseFooterItem({ theme, currentScreen, openScreen, openPopove
   const others = release && isActive(release) && view?.snapshot ? otherActive(view.snapshot, release).length : 0;
   const onScreen = currentScreen?.screenId === RELEASES_SCREEN;
   if (!release) {
+    const queueLabel = queueFooterLabel(view?.snapshot?.queue);
+    if (queueLabel) {
+      return <SidebarRow icon="GitMerge" label={queueLabel} active={onScreen} onPress={() => openPopover(QueueFooterPopover)} />;
+    }
     return <SidebarRow icon="Rocket" label="Releases" active={onScreen} onPress={() => openScreen({ screenId: RELEASES_SCREEN })} />;
   }
   // `#356 01/11 14:02 · faltam 7m`: the open watch's phase, short.
@@ -50,7 +69,7 @@ export function ReleaseFooterItem({ theme, currentScreen, openScreen, openPopove
       label={others ? `${label} +${others}` : label}
       active={onScreen}
       onPress={() => openPopover(FooterPopover)}
-      trailing={<SegBar theme={theme} steps={release.steps} watchTone={isActive(release) ? null : watchTone(release)} />}
+      trailing={<SegBar theme={theme} steps={visibleSteps(release)} watchTone={isActive(release) ? null : watchTone(release)} />}
     />
   );
 }

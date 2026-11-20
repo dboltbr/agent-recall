@@ -28,7 +28,7 @@
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "@getpaseo/plugin": "0.13.2",
+    "@getpaseo/plugin": "^0.16.2",
     "@openchamber/sdk": "2.5.1",
     "@types/node": "^24.0.0",
     "@types/react": "^19.3.0",

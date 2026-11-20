@@ -5,6 +5,7 @@
 // from here.
 import type { PluginCommandCapabilities } from "@getpaseo/plugin/client";
 import { useEffect, useState, useSyncExternalStore } from "react";
+import { hasActiveQueueWork } from "../shared/queue-status.ts";
 import { releaseRefresh, releaseSnapshot, type ReleaseView } from "../shared/rpc.ts";
 import { isActive } from "../shared/release-status.ts";
 
@@ -62,7 +63,7 @@ function withTimeout<T>(promise: Promise<T>): Promise<T> {
 }
 
 function anyActive(view: ReleaseView | null): boolean {
-  return view?.snapshot?.releases.some(isActive) ?? false;
+  return (view?.snapshot?.releases.some(isActive) ?? false) || hasActiveQueueWork(view?.snapshot?.queue);
 }
 
 function schedule(): void {

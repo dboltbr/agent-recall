@@ -1,6 +1,7 @@
 // pt-BR copy and layout numbers of the release surfaces (popover, timeline card, Releases screen),
 // derived from the snapshot. Pure and runtime-neutral: the Paseo client (`shared/release-copy.ts`)
 // and the OpenChamber extension read the same strings.
+import type { RowBadgeDescriptor } from "./queue-status.ts";
 import {
   formatAgo,
   formatDuration,
@@ -11,10 +12,12 @@ import {
   missingEvidence,
   freezeLabel,
   queueGroups,
+  RECENT_VERDICT_MS,
   revertSummary,
   rollbackLabel,
   STEP_LABELS,
   stepJobNames,
+  stepOf,
   VERDICT_LABELS,
   watchPhaseLabel,
   type HandoffRole,
@@ -39,7 +42,8 @@ export function releaseBadge(release: Release): { label: string; tone: Tone } {
   if (isActive(release)) return { label: "em andamento", tone: "run" };
   switch (release.verdict) {
     case "green":
-      return { label: VERDICT_LABELS.green, tone: "ok" };
+    case "published":
+      return { label: VERDICT_LABELS[release.verdict], tone: "ok" };
     case "reverted":
       return { label: VERDICT_LABELS.reverted, tone: "warn" };
     case "red":
@@ -59,11 +63,60 @@ export function stepTone(state: Step["state"]): Tone {
   return "muted";
 }
 
-/** Tone of the watch step once the verdict is in (the vigia node of the pipe). */
+/** Tone of the watch step once the verdict is in (the vigia node of the pipe and SegBar). */
 export function watchTone(release: Release): Tone | null {
   if (release.verdict === "reverted") return "warn";
   if (release.verdict === "red") return "bad";
+  if (release.verdict === "inconclusive") return "muted";
   return null;
+}
+
+/**
+ * Steps to show in the UI: hides the legacy `verify` step when it was skipped because CI moved
+ * to the PR/merge-queue workflow and at least one release step ran.
+ */
+export function visibleSteps(release: Release): Step[] {
+  const verify = release.steps.find((step) => step.id === "verify");
+  if (verify?.state === "skipped" && release.steps.some((step) => step.id !== "verify" && step.state !== "skipped")) {
+    return release.steps.filter((step) => step.id !== "verify");
+  }
+  return [...release.steps];
+}
+
+/** Compact badge for Paseo's sidebar workspace meta row (`WorkspaceRowBadge`). */
+export function releaseRowBadge(release: Release, now: Date = new Date()): RowBadgeDescriptor | null {
+  if (isActive(release)) {
+    if (release.status === "queued") return { icon: "Clock", label: `#${release.number} · fila`, tone: "info" };
+    if (release.current === "images") {
+      const step = stepOf(release, "images");
+      const progressText = step.total ? `img ${step.done ?? 0}/${step.total}` : "imagens";
+      return { icon: "Rocket", label: `#${release.number} · ${progressText}`, tone: "info" };
+    }
+    if (release.current === "watch") {
+      const phase = watchPhaseLabel(release, now, true) ?? "vigia";
+      return { icon: "Rocket", label: `#${release.number} · ${phase}`, tone: "info" };
+    }
+    const label = release.current ? STEP_LABELS[release.current] : "release";
+    return { icon: "Rocket", label: `#${release.number} · ${label}`, tone: "info" };
+  }
+  if (release.verdict === "cancelled" || release.verdict === "none") return null;
+  const ended = release.completedAt ? Date.parse(release.completedAt) : Number.NaN;
+  if (!Number.isFinite(ended) || now.getTime() - ended > RECENT_VERDICT_MS) return null;
+  switch (release.verdict) {
+    case "green":
+      return { icon: "Rocket", label: `#${release.number} · verde`, tone: "success" };
+    case "published":
+      return { icon: "Rocket", label: `#${release.number} · publicado`, tone: "success" };
+    case "reverted":
+      return { icon: "Undo2", label: `#${release.number} · revertido`, tone: "warning" };
+    case "red":
+    case "failed":
+      return { icon: "CircleX", label: `#${release.number} · ${VERDICT_LABELS[release.verdict]}`, tone: "danger" };
+    case "inconclusive":
+      return { icon: "Rocket", label: `#${release.number} · inconclusivo`, tone: "muted" };
+    default:
+      return null;
+  }
 }
 
 /** `push do agente Paseo “Aviso ao morador: push” · há 36 min`, or null without a trailer. */
@@ -321,6 +374,8 @@ export function verdictSignals(release: Release): { text: string; tone: Tone } {
       const ok = judged.filter((signal) => signal.outcome === "green").length;
       return { text: judged.length ? `${ok}/${judged.length} sinais ok` : "sem regressão", tone: "muted" };
     }
+    case "published":
+      return { text: "publicado em produção", tone: "muted" };
     case "inconclusive": {
       const missing = missingEvidence(release);
       return { text: missing ? `faltou ${missing}` : "sem veredito", tone: "muted" };
@@ -336,6 +391,8 @@ export function verdictBanner(release: Release): { tone: Tone; text: string; lin
   switch (release.verdict) {
     case "green":
       return { tone: "ok", text: "vigia: sem regressão", link: "signals" };
+    case "published":
+      return { tone: "ok", text: "publicado em produção", link: null };
     case "reverted":
       return { tone: "warn", text: revertSummary(release) ?? "vigia reverteu", link: "signals" };
     case "red": {
@@ -362,6 +419,7 @@ export function releaseLineIcon(release: Release): string {
   if (isActive(release)) return "LoaderCircle";
   switch (release.verdict) {
     case "green":
+    case "published":
       return "CircleCheck";
     case "red":
     case "failed":

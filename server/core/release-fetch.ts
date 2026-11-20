@@ -4,6 +4,17 @@
 import { releaseName } from "./notes.ts";
 import { describe } from "./poll.ts";
 import {
+  buildMergeQueue,
+  CI_WORKFLOW,
+  hasActiveQueueWork,
+  isMergifyBatchBranch,
+  matchCiRun,
+  type GitHubCiJob,
+  type GitHubCiRun,
+  type GitHubPullRequest,
+  type MergeQueueSnapshot,
+} from "./queue-status.ts";
+import {
   buildRelease,
   buildSnapshot,
   isActive,
@@ -199,6 +210,9 @@ export function createReleaseSource(options: ReleaseSourceOptions): ReleaseSourc
   let snapshot: ReleaseSnapshot | null = null;
   let runners: readonly GitHubRunner[] = [];
   let loadedRuns: unknown = null;
+  let loadedPulls: unknown = null;
+  let loadedCiRuns: unknown = null;
+  let lastQueue: MergeQueueSnapshot | undefined;
   /** Watch runs of the last load by release number. */
   let watchRuns = new Map<number, GitHubRun>();
   /** Progress by watch run attempt (`attemptKey`), read while it is open; `settled` ones had their last read after it closed. */
@@ -207,6 +221,8 @@ export function createReleaseSource(options: ReleaseSourceOptions): ReleaseSourc
 
   const runsPath = (perPage: number, page = 1, name = workflow) =>
     `repos/${repository}/actions/workflows/${name}.yml/runs?per_page=${perPage}&page=${page}`;
+  const pullsPath = () => `repos/${repository}/pulls?state=open&per_page=100`;
+  const ciRunsPath = () => `repos/${repository}/actions/workflows/${CI_WORKFLOW}.yml/runs?per_page=30&page=1`;
 
   /** The newest `watch release-<n>` run of each release number on one page of the watch workflow. */
   async function watchPage(perPage: number, token: string): Promise<Map<number, GitHubRun>> {
@@ -307,12 +323,65 @@ export function createReleaseSource(options: ReleaseSourceOptions): ReleaseSourc
     });
   }
 
+  async function loadQueue(token: string): Promise<MergeQueueSnapshot | undefined> {
+    try {
+      const [pulls, ciPage] = await Promise.all([
+        get<readonly GitHubPullRequest[]>(pullsPath(), token),
+        get<{ workflow_runs: readonly GitHubCiRun[] }>(ciRunsPath(), token).catch(() => ({ workflow_runs: [] as GitHubCiRun[] })),
+      ]);
+      loadedPulls = pulls;
+      loadedCiRuns = ciPage;
+      const runs = [...ciPage.workflow_runs].sort((a, b) => b.id - a.id);
+      // Fetch jobs for active Mergify batches and up to 3 active/failed queue-labelled PR runs.
+      const toInspect = new Map<number, GitHubCiRun>();
+      for (const pr of pulls) {
+        if (isMergifyBatchBranch(pr.head.ref)) {
+          const run = matchCiRun(runs, pr.head.ref, pr.head.sha, true);
+          if (run) toInspect.set(run.id, run);
+        }
+      }
+      let extra = 0;
+      for (const pr of pulls) {
+        if (isMergifyBatchBranch(pr.head.ref) || extra >= 3) continue;
+        const labels = (pr.labels ?? []).map((label) => label.name ?? "");
+        const run = matchCiRun(runs, pr.head.ref, pr.head.sha);
+        if (!run || toInspect.has(run.id)) continue;
+        if (labels.includes("queue") || run.status === "in_progress" || run.conclusion === "failure") {
+          toInspect.set(run.id, run);
+          extra++;
+        }
+      }
+      const jobsByRunId = new Map<number, readonly GitHubCiJob[]>();
+      if (toInspect.size > 0) {
+        await pool([...toInspect.values()], async (run) => {
+          const key = `ci:${run.id}`;
+          const done = finishedJobs.get(key);
+          if (done) {
+            jobsByRunId.set(run.id, done);
+            return;
+          }
+          try {
+            const body = await get<JobsPage>(`repos/${repository}/actions/runs/${run.id}/jobs?per_page=100&page=1`, token);
+            if (run.status === "completed") finishedJobs.set(key, body.jobs);
+            jobsByRunId.set(run.id, body.jobs);
+          } catch (error) {
+            options.log.warn(`jobs do CI ${run.id}: ${describe(error)}`);
+          }
+        });
+      }
+      lastQueue = buildMergeQueue({ pulls, ciRuns: runs, jobsByRunId });
+      return lastQueue;
+    } catch {
+      return lastQueue;
+    }
+  }
+
   async function load(input: ReleaseLoadInput): Promise<ReleaseSnapshot> {
     const now = options.clock.now();
     const notes = notesByRelease(input.notes);
     try {
       // Each watch run judges one release: a page as long as the history covers it.
-      const [page, tags, watches] = await Promise.all([
+      const [page, tags, watches, queue] = await Promise.all([
         get<RunsPage>(runsPath(RELEASE_HISTORY), input.token),
         tagList(input.token),
         // Room for re-dispatched watches; a failure keeps the last watch runs instead of the whole load.
@@ -320,6 +389,7 @@ export function createReleaseSource(options: ReleaseSourceOptions): ReleaseSourc
           options.log.warn(`runs do vigia: ${describe(error)}`);
           return watchRuns;
         }),
+        loadQueue(input.token),
       ]);
       loadedRuns = page;
       watchRuns = watches;
@@ -349,7 +419,7 @@ export function createReleaseSource(options: ReleaseSourceOptions): ReleaseSourc
           options.log.warn(`runners: ${describe(error)}`);
           return runners;
         });
-      snapshot = buildSnapshot({ repository, workflow, releases, runners, now });
+      snapshot = buildSnapshot({ repository, workflow, releases, runners, ...(queue ? { queue } : {}), now });
     } catch (error) {
       const message = describe(error);
       snapshot = snapshot
@@ -383,7 +453,21 @@ export function createReleaseSource(options: ReleaseSourceOptions): ReleaseSourc
 
   async function probe(token: string): Promise<boolean> {
     // A 304 hands back the cached body itself, so identity means "unchanged".
-    return (await get<RunsPage>(runsPath(RELEASE_HISTORY), token)) !== loadedRuns;
+    const runsMoved = (await get<RunsPage>(runsPath(RELEASE_HISTORY), token)) !== loadedRuns;
+    if (runsMoved) return true;
+    if (loadedPulls !== null) {
+      const pullsMoved = await get<readonly GitHubPullRequest[]>(pullsPath(), token)
+        .then((body) => body !== loadedPulls)
+        .catch(() => false);
+      if (pullsMoved) return true;
+    }
+    if (loadedCiRuns !== null) {
+      const ciMoved = await get<{ workflow_runs: readonly GitHubCiRun[] }>(ciRunsPath(), token)
+        .then((body) => body !== loadedCiRuns)
+        .catch(() => false);
+      if (ciMoved) return true;
+    }
+    return false;
   }
 
   return { load, lookup, probe, current: () => snapshot };
@@ -444,7 +528,11 @@ export function createReleaseTracker(options: TrackerOptions): ReleaseTracker {
       last = input;
       const current = options.source.current();
       const scheduled =
-        ticks++ % IDLE_EVERY_TICKS === 0 || current === null || current.releases.some(isActive) || input.notesChanged;
+        ticks++ % IDLE_EVERY_TICKS === 0 ||
+        current === null ||
+        current.releases.some(isActive) ||
+        hasActiveQueueWork(current.queue) ||
+        input.notesChanged;
       const due =
         scheduled ||
         (await options.source.probe(input.token).then(

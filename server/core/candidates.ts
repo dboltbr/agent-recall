@@ -8,31 +8,35 @@ const message = z.object({
   result: z.object({ candidateId: z.string(), revisionId: z.string().nullable(), outcome: z.enum(['approved', 'rejected']), baseSha: z.string().nullable(), candidateSha: z.string().nullable(), evidence: z.string(), finishedAt: z.string() }),
 });
 
-/** A claim is durable in the factory before the prompt. Ambiguous prompts never fall back. */
-export async function pollCandidates(input: { fetch: Fetch; url: string; token: string; me: Me; delivery: Delivery }) {
-  if (!input.delivery.promptCandidate) return;
+/** A claim is durable in the factory before the prompt. Ambiguous prompts never fall back. Returns false when the factory does not expose `/verification/recall` (HTTP 404). */
+export async function pollCandidates(input: { fetch: Fetch; url: string; token: string; me: Me; delivery: Delivery }): Promise<boolean> {
+  if (!input.delivery.promptCandidate) return true;
   const base = new URL(input.url);
   if (base.username || base.password || base.search || base.hash || (base.protocol !== 'https:' && !(base.protocol === 'http:' && ['127.0.0.1', 'localhost'].includes(base.hostname))) || !input.token) throw new Error('Configuração de retorno de candidato inválida');
-  async function request(path: string, body?: object) {
+  async function request(path: string, body?: object): Promise<{ status: number; body: unknown }> {
     const response = await input.fetch(new URL('/verification/recall' + path, base).href, {
       method: body ? 'POST' : 'GET', redirect: 'error', signal: AbortSignal.timeout(10000),
       headers: { Authorization: `Bearer ${input.token}`, 'Content-Type': 'application/json' },
       body: body ? JSON.stringify(body) : undefined,
     });
+    if (response.status === 404 && !body && path === '') return { status: 404, body: null };
     if (!response.ok) throw new Error(`Retorno de candidato: HTTP ${response.status}`);
-    return response.json();
+    return { status: response.status, body: await response.json() };
   }
-  const data = z.object({ candidates: z.array(message).max(1000) }).parse(await request(''));
+  const initial = await request('');
+  if (initial.status === 404) return false;
+  const data = z.object({ candidates: z.array(message).max(1000) }).parse(initial.body);
   for (const event of data.candidates) {
     const target = parseSessionValue(event.session);
     if (!target || target.host !== input.me.host || target.harness !== input.me.harness) continue;
-    const claim = z.object({ claimed: z.boolean() }).parse(await request('/claim', { key: event.key }));
+    const claim = z.object({ claimed: z.boolean() }).parse((await request('/claim', { key: event.key })).body);
     if (!claim.claimed) continue;
     const text = `Resultado do candidato ${event.result.candidateId}: ${event.result.outcome === 'approved' ? 'aprovado' : 'recusado'}. SHA enviado ${event.submittedSha}; SHA verificado ${event.result.candidateSha ?? 'não preparado'}; base ${event.result.baseSha ?? 'não preparada'}. Evidência: ${event.result.evidence}. Este retorno é da fila antes da publicação, não é incidente de release; não executar rollback nem congelar produção.`;
     const receipt = await input.delivery.promptCandidate(target, text, event.key);
     if (!receipt) { await request('/queued', { key: event.key }); continue; }
-    z.object({ receipt: z.string().min(1) }).parse(await request('/confirm', { key: event.key, receipt }));
+    z.object({ receipt: z.string().min(1) }).parse((await request('/confirm', { key: event.key, receipt })).body);
   }
+  return true;
 }
 
 export async function confirmCandidate(input: { fetch: Fetch; url: string; token: string; key: string; receipt: string }) {

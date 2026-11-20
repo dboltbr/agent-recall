@@ -372,7 +372,7 @@ function snapshotOf(...releases: Release[]) {
   return buildSnapshot({ repository: "dboltbr/dbolt", workflow: "release", releases, runners: RUNNERS, now: NOW });
 }
 
-test("pílula: só a sessão com commit na release ativa ou na última concluída", () => {
+test("pílula: release ativa primeiro, senão a mais recente da sessão no histórico (e nunca de outro host ou cancelada)", () => {
   const commits = (session: string) => [commit("c", "x", session)];
   const old = buildRelease({
     run: run({ run_number: 170, status: "completed", conclusion: "success" }),
@@ -388,13 +388,40 @@ test("pílula: só a sessão com commit na release ativa ou na última concluíd
     commits: commits("paseo/srv_X/agent-171"),
     now: NOW,
   });
-  const cancelled = completed(173, [job("trigger", "cancelled", [1, 1])], null, { conclusion: "cancelled" });
+  const cancelled = buildRelease({
+    run: run({ run_number: 173, status: "completed", conclusion: "cancelled", head_commit: null }),
+    jobs: [job("trigger", "cancelled", [1, 1])],
+    note: null,
+    commits: commits("paseo/srv_X/agent-cancelled"),
+    now: NOW,
+  });
   const active = buildRelease({ run: run({ run_number: 174, head_commit: null }), jobs: midImages(), note: null, commits: commits("paseo/srv_X/agent-174"), now: NOW });
   const snapshot = snapshotOf(old, last, cancelled, active);
-  assert.equal(releaseForSession(snapshot, { harness: "paseo", host: "srv_X", id: "agent-174" })?.number, 174);
-  assert.equal(releaseForSession(snapshot, { harness: "paseo", host: "srv_X", id: "agent-171" })?.number, 171);
-  assert.equal(releaseForSession(snapshot, { harness: "paseo", host: "srv_X", id: "agent-170" }), null);
-  assert.equal(releaseForSession(snapshot, { harness: "paseo", host: "srv_Y", id: "agent-174" }), null);
+  assert.equal(releaseForSession(snapshot, { harness: "paseo", host: "srv_X", id: "agent-174" }, NOW)?.number, 174);
+  assert.equal(releaseForSession(snapshot, { harness: "paseo", host: "srv_X", id: "agent-171" }, NOW)?.number, 171);
+  assert.equal(releaseForSession(snapshot, { harness: "paseo", host: "srv_X", id: "agent-170" }, NOW)?.number, 170);
+  assert.equal(releaseForSession(snapshot, { harness: "paseo", host: "srv_X", id: "agent-cancelled" }, NOW), null);
+  assert.equal(releaseForSession(snapshot, { harness: "paseo", host: "srv_Y", id: "agent-174" }, NOW), null);
+});
+
+test("release publicada sem nota da factory nem job watch vira verdict published (não none)", () => {
+  const jobs = [
+    job("previous-investigation", "success", [10, 9.5]),
+    job("images / shard 0", "success", [9.5, 5]),
+    job("pins", "success", [5, 4]),
+    job("release-tag", "success", [4, 3.8]),
+  ];
+  const release = buildRelease({
+    run: run({ run_number: 693, status: "completed", conclusion: "success", updated_at: minutesAgo(3) }),
+    jobs,
+    note: null,
+    commits: null,
+    now: NOW,
+  });
+  assert.equal(release.verdict, "published");
+  assert.equal(release.tag, "release-693");
+  assert.equal(verdictDetail(release), "publicado em produção");
+  assert.equal(pillLabel(release), "#693 27/10 11:24 · publicado");
 });
 
 test("rodapé: a ativa; depois o último veredito por 2 h; depois nada", () => {

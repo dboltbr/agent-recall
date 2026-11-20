@@ -20,6 +20,7 @@ import {
   stepDurationMs,
   stepLabelOf,
   stepTone,
+  visibleSteps,
   watchTone,
   shortSha,
   type Tone,
@@ -362,16 +363,17 @@ export function StepList({
   /** What holds the release (`waitingFor`): the deploy step says it while pending. */
   waiting?: string | null;
 }) {
+  const steps = visibleSteps(release);
   return (
     <View>
-      {release.steps.map((step, index) => {
+      {steps.map((step, index) => {
         const pending = step.state === "pending" || step.state === "skipped";
         const duration = stepDurationMs(step, now);
         const detail = stepDetail(release, step, waiting, now);
         const markTone = stepMarkTone(release, step);
         return (
           <View key={step.id} style={{ flexDirection: "row", gap: 10, paddingVertical: 4, alignItems: "flex-start" }}>
-            {index < release.steps.length - 1 ? (
+            {index < steps.length - 1 ? (
               <View style={{ position: "absolute", left: 8.5, top: 23, bottom: -3, width: 1, backgroundColor: theme.colors.border }} />
             ) : null}
             {step.state === "running" ? (
@@ -434,13 +436,14 @@ export function Pipe({
 }) {
   // One session: the vigia node itself opens it. More: the links go under the pipe.
   const single = watch && watch.links.length === 1 ? watch.links[0]! : null;
+  const steps = visibleSteps(release);
   const pipe = (
     <View style={{ flexDirection: "row", alignItems: "flex-start" }}>
-      {release.steps.map((step, index) => {
+      {steps.map((step, index) => {
         const markTone = stepMarkTone(release, step);
         const tone = markTone ?? stepTone(step.state);
         const color = toneColor(theme, tone);
-        const last = index === release.steps.length - 1;
+        const last = index === steps.length - 1;
         const muted = tone === "muted";
         const link = step.id === "watch" ? single : null;
         const node = (
@@ -457,12 +460,14 @@ export function Pipe({
               opacity={muted ? 1 : 0.2}
               style={{ position: "absolute", top: 0, left: 0, width: 16, height: 16, borderRadius: 8, alignItems: "center", justifyContent: "center" }}
             >
-              {step.state === "done" ? (
+              {markTone === "warn" ? (
+                <Icon name="Undo2" size={10} color={color} />
+              ) : markTone === "muted" ? (
+                <Icon name="CircleDashed" size={10} color={color} />
+              ) : step.state === "done" ? (
                 <Icon name="Check" size={10} color={color} />
               ) : step.state === "failed" ? (
                 <Icon name="X" size={10} color={color} />
-              ) : markTone === "warn" ? (
-                <Icon name="Undo2" size={10} color={color} />
               ) : (
                 <View style={{ width: 5, height: 5, borderRadius: 3, backgroundColor: color }} />
               )}

@@ -61,3 +61,36 @@ test('inbox assíncrono registra queued, nunca recibo de entrega', async () => {
   assert.equal(queued, 1);
   assert.equal(remote.receipt(), null);
 });
+
+test('endpoint /verification/recall 404 entra em backoff sem erro nem spam no log', async () => {
+  const stateDir = await tempState();
+  let calls = 0;
+  const warnings: string[] = [];
+  const log = { info: () => {}, warn: (m: string) => warnings.push(m), error: (m: string) => warnings.push(m) };
+  const fetch: Fetch = async (url) => {
+    if (url.endsWith('/verification/recall')) { calls++; return new Response(null, { status: 404 }); }
+    if (url.includes('api.github.com')) return new Response(null, { status: 404 });
+    return Response.json({ releases: [] });
+  };
+  const delivery = fakeDelivery();
+  const watcher = createWatcher({
+    harness: 'opencode',
+    host: () => 'host',
+    loadConfig: async () => ({ instance: 'host', repository: 'dboltbr/dbolt', notesRef: 'refs/notes/release-watch', blockedRef: 'refs/notes/release-blocked', factoryApiUrl: 'https://factory.test/releases/recall', factoryToken: 'test-only' }),
+    stateDir,
+    sha: 'proof',
+    pid: process.pid,
+    clock: fixedClock(),
+    fetch,
+    exec: fakeExec(() => ({})).exec,
+    delivery: { ...delivery.delivery, promptCandidate: async () => 'r' },
+    log,
+    release: fixedReleases([]),
+  });
+  try {
+    await watcher.tick();
+    await watcher.tick();
+    assert.equal(calls, 1, '404 desliga novas tentativas durante o backoff');
+    assert.deepEqual(warnings.filter((w) => w.includes('candidato')), []);
+  } finally { await rm(stateDir, { recursive: true, force: true }); }
+});

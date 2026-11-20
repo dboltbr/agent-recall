@@ -87,6 +87,7 @@ export function Section({ theme, children, trailing }: { theme: PluginTheme; chi
 export function StepMark({ theme, state, tone }: { theme: PluginTheme; state: Step["state"]; tone?: Tone }) {
   const box = { width: 18, height: 18, alignItems: "center", justifyContent: "center" } as const;
   if (tone === "warn") return <View style={box}><Icon name="Undo2" size={15} color={theme.colors.statusWarning} /></View>;
+  if (tone === "muted") return <View style={box}><Icon name="CircleDashed" size={15} color={theme.colors.foregroundMuted} /></View>;
   if (state === "done") return <View style={box}><Icon name="CircleCheck" size={15} color={theme.colors.statusSuccess} /></View>;
   if (state === "failed") return <View style={box}><Icon name="CircleX" size={15} color={theme.colors.statusDanger} /></View>;
   if (state === "running") return <View style={box}><Icon name="LoaderCircle" size={15} color={theme.colors.accent} /></View>;
@@ -107,13 +108,15 @@ export function StepMark({ theme, state, tone }: { theme: PluginTheme; state: St
   );
 }
 
-/** Five-segment step bar (sidebar row trailing). */
+/** Step bar (sidebar row trailing). */
 export function SegBar({ theme, steps, watchTone }: { theme: PluginTheme; steps: readonly Step[]; watchTone?: Tone | null }) {
   return (
     <View style={{ flexDirection: "row", gap: 3, alignItems: "center" }}>
       {steps.map((step) => {
-        const color =
-          step.id === "watch" && watchTone
+        const isMutedWatch = step.id === "watch" && watchTone === "muted";
+        const color = isMutedWatch
+          ? null
+          : step.id === "watch" && watchTone
             ? toneColor(theme, watchTone)
             : step.state === "done"
               ? theme.colors.statusSuccess
@@ -128,8 +131,8 @@ export function SegBar({ theme, steps, watchTone }: { theme: PluginTheme; steps:
             </Tint>
           );
         }
-        // Pending: a translucent muted tone, visible on the plain and on the highlighted row.
-        if (!color) return <Tint key={step.id} color={theme.colors.foregroundMuted} opacity={0.28} style={{ width: 18, height: 5, borderRadius: 3 }} />;
+        // Pending or inconclusive watch: translucent muted segment, never bright green.
+        if (!color) return <Tint key={step.id} color={theme.colors.foregroundMuted} opacity={isMutedWatch ? 0.48 : 0.28} style={{ width: 18, height: 5, borderRadius: 3 }} />;
         return <View key={step.id} style={{ width: 18, height: 5, borderRadius: 3, backgroundColor: color }} />;
       })}
     </View>
