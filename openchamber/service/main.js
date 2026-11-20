@@ -5969,6 +5969,31 @@ function superRefine(fn, params) {
 // openchamber/scripts/zod-slim.ts
 var z = { array, boolean: boolean2, enum: _enum, literal, number: number2, object, string: string2 };
 
+// core/trailer.ts
+var HARNESSES = ["paseo", "opencode", "claude"];
+var VALUE = /^(paseo|opencode|claude)\/([^/\s]+)\/([^/\s]+)$/;
+var LINE = /^Agent-Session:[ \t]*(\S+)[ \t]*$/gm;
+function parseSessionValue(value) {
+  const match = VALUE.exec((value ?? "").trim());
+  if (!match) return null;
+  return { harness: match[1], host: match[2], id: match[3] };
+}
+function parseAgentSession(message) {
+  let found = null;
+  for (const match of message.matchAll(LINE)) found = parseSessionValue(match[1]) ?? found;
+  return found;
+}
+function sameSession(a, b) {
+  return a.harness === b.harness && a.host === b.host && a.id === b.id;
+}
+function toSessionRef(value) {
+  if (!value || typeof value !== "object") return null;
+  const { harness, host, id } = value;
+  if (typeof harness !== "string" || typeof host !== "string" || typeof id !== "string") return null;
+  if (!HARNESSES.includes(harness)) return null;
+  return parseSessionValue(`${harness}/${host}/${id}`);
+}
+
 // core/queue-status.ts
 var CI_WORKFLOW = "ci";
 var MERGIFY_BRANCH_PREFIX = "mergify/merge-queue/";
@@ -5996,6 +6021,11 @@ var QueueBatchSchema = z.object({
   failedJob: z.string().nullable(),
   jobs: z.array(CiJobSchema)
 });
+var PrSessionSchema = z.object({
+  harness: z.enum(["paseo", "opencode", "claude"]),
+  host: z.string(),
+  id: z.string()
+});
 var PullRequestStatusSchema = z.object({
   number: z.number(),
   title: z.string(),
@@ -6014,6 +6044,8 @@ var PullRequestStatusSchema = z.object({
   runningJobs: z.array(z.string()),
   failedJob: z.string().nullable(),
   jobs: z.array(CiJobSchema),
+  /** `Agent-Session` trailer(s) on the PR's head commit, so agents match even off-branch. */
+  sessions: z.array(PrSessionSchema).optional(),
   updatedAt: z.string()
 });
 var MergeQueueSnapshotSchema = z.object({
@@ -6079,6 +6111,12 @@ function matchCiRun(runs, branch, headSha, allowBranchFallback = false) {
 function buildMergeQueue(input) {
   const runs = [...input.ciRuns].sort((a, b) => b.id - a.id);
   const jobsByRunId = input.jobsByRunId ?? /* @__PURE__ */ new Map();
+  const sessionsBySha = input.sessionsBySha ?? /* @__PURE__ */ new Map();
+  const sessionsOf = (sha) => {
+    const found = sessionsBySha.get(sha);
+    if (!found?.length) return void 0;
+    return found.map((ref) => ({ harness: ref.harness, host: ref.host, id: ref.id }));
+  };
   const rawBatches = [];
   const rawPrs = [];
   for (const pr of input.pulls) {
@@ -6115,6 +6153,7 @@ function buildMergeQueue(input) {
   const prs = rawPrs.map((pr) => {
     const labels = (pr.labels ?? []).map((label) => label.name ?? "").filter(Boolean);
     const batch = batchByPr.get(pr.number) ?? null;
+    const sessions = sessionsOf(pr.head.sha);
     if (batch) {
       return {
         number: pr.number,
@@ -6134,6 +6173,7 @@ function buildMergeQueue(input) {
         runningJobs: batch.runningJobs,
         failedJob: batch.failedJob,
         jobs: batch.jobs,
+        ...sessions ? { sessions } : {},
         updatedAt: pr.updated_at
       };
     }
@@ -6157,35 +6197,11 @@ function buildMergeQueue(input) {
       ciState: ciRunState(run),
       runUrl: run?.html_url ?? null,
       ...summary,
+      ...sessions ? { sessions } : {},
       updatedAt: pr.updated_at
     };
   });
   return { batches, prs };
-}
-
-// core/trailer.ts
-var HARNESSES = ["paseo", "opencode", "claude"];
-var VALUE = /^(paseo|opencode|claude)\/([^/\s]+)\/([^/\s]+)$/;
-var LINE = /^Agent-Session:[ \t]*(\S+)[ \t]*$/gm;
-function parseSessionValue(value) {
-  const match = VALUE.exec((value ?? "").trim());
-  if (!match) return null;
-  return { harness: match[1], host: match[2], id: match[3] };
-}
-function parseAgentSession(message) {
-  let found = null;
-  for (const match of message.matchAll(LINE)) found = parseSessionValue(match[1]) ?? found;
-  return found;
-}
-function sameSession(a, b) {
-  return a.harness === b.harness && a.host === b.host && a.id === b.id;
-}
-function toSessionRef(value) {
-  if (!value || typeof value !== "object") return null;
-  const { harness, host, id } = value;
-  if (typeof harness !== "string" || typeof host !== "string" || typeof id !== "string") return null;
-  if (!HARNESSES.includes(harness)) return null;
-  return parseSessionValue(`${harness}/${host}/${id}`);
 }
 
 // core/release-status.ts
@@ -6911,6 +6927,7 @@ function createReleaseSource(options) {
   const get = createGitHubClient(options.fetch);
   const finishedJobs = /* @__PURE__ */ new Map();
   const ranges = /* @__PURE__ */ new Map();
+  const headCommitSessions = /* @__PURE__ */ new Map();
   let snapshot = null;
   let runners = [];
   let loadedRuns = null;
@@ -7048,7 +7065,30 @@ function createReleaseSource(options) {
           }
         });
       }
-      lastQueue = buildMergeQueue({ pulls, ciRuns: runs, jobsByRunId });
+      const sessionsBySha = /* @__PURE__ */ new Map();
+      const uncachedPulls = [];
+      for (const pr of pulls) {
+        if (isMergifyBatchBranch(pr.head.ref)) continue;
+        const cached2 = headCommitSessions.get(pr.head.sha);
+        if (cached2 !== void 0) {
+          if (cached2.length) sessionsBySha.set(pr.head.sha, cached2);
+        } else {
+          uncachedPulls.push(pr);
+        }
+      }
+      if (uncachedPulls.length > 0) {
+        await pool(uncachedPulls, async (pr) => {
+          try {
+            const commit = await get(`repos/${repository}/commits/${pr.head.sha}`, token);
+            const ref = parseAgentSession(commit.commit.message);
+            const refs = ref ? [ref] : [];
+            headCommitSessions.set(pr.head.sha, refs);
+            if (refs.length) sessionsBySha.set(pr.head.sha, refs);
+          } catch {
+          }
+        });
+      }
+      lastQueue = buildMergeQueue({ pulls, ciRuns: runs, jobsByRunId, sessionsBySha });
       return lastQueue;
     } catch {
       return lastQueue;

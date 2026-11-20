@@ -19770,6 +19770,34 @@ function date4(params) {
   return _coercedDate(ZodDate, params);
 }
 
+// core/trailer.ts
+var HARNESSES = ["paseo", "opencode", "claude"];
+var VALUE = /^(paseo|opencode|claude)\/([^/\s]+)\/([^/\s]+)$/;
+var LINE = /^Agent-Session:[ \t]*(\S+)[ \t]*$/gm;
+function parseSessionValue(value) {
+  const match = VALUE.exec((value ?? "").trim());
+  if (!match) return null;
+  return { harness: match[1], host: match[2], id: match[3] };
+}
+function parseAgentSession(message2) {
+  let found = null;
+  for (const match of message2.matchAll(LINE)) found = parseSessionValue(match[1]) ?? found;
+  return found;
+}
+function formatSession(ref) {
+  return `${ref.harness}/${ref.host}/${ref.id}`;
+}
+function sameSession(a, b) {
+  return a.harness === b.harness && a.host === b.host && a.id === b.id;
+}
+function toSessionRef(value) {
+  if (!value || typeof value !== "object") return null;
+  const { harness, host, id } = value;
+  if (typeof harness !== "string" || typeof host !== "string" || typeof id !== "string") return null;
+  if (!HARNESSES.includes(harness)) return null;
+  return parseSessionValue(`${harness}/${host}/${id}`);
+}
+
 // core/queue-status.ts
 var CI_WORKFLOW = "ci";
 var MERGIFY_BRANCH_PREFIX = "mergify/merge-queue/";
@@ -19797,6 +19825,11 @@ var QueueBatchSchema = external_exports.object({
   failedJob: external_exports.string().nullable(),
   jobs: external_exports.array(CiJobSchema)
 });
+var PrSessionSchema = external_exports.object({
+  harness: external_exports.enum(["paseo", "opencode", "claude"]),
+  host: external_exports.string(),
+  id: external_exports.string()
+});
 var PullRequestStatusSchema = external_exports.object({
   number: external_exports.number(),
   title: external_exports.string(),
@@ -19815,6 +19848,8 @@ var PullRequestStatusSchema = external_exports.object({
   runningJobs: external_exports.array(external_exports.string()),
   failedJob: external_exports.string().nullable(),
   jobs: external_exports.array(CiJobSchema),
+  /** `Agent-Session` trailer(s) on the PR's head commit, so agents match even off-branch. */
+  sessions: external_exports.array(PrSessionSchema).optional(),
   updatedAt: external_exports.string()
 });
 var MergeQueueSnapshotSchema = external_exports.object({
@@ -19880,6 +19915,12 @@ function matchCiRun(runs, branch, headSha, allowBranchFallback = false) {
 function buildMergeQueue(input2) {
   const runs = [...input2.ciRuns].sort((a, b) => b.id - a.id);
   const jobsByRunId = input2.jobsByRunId ?? /* @__PURE__ */ new Map();
+  const sessionsBySha = input2.sessionsBySha ?? /* @__PURE__ */ new Map();
+  const sessionsOf = (sha) => {
+    const found = sessionsBySha.get(sha);
+    if (!found?.length) return void 0;
+    return found.map((ref) => ({ harness: ref.harness, host: ref.host, id: ref.id }));
+  };
   const rawBatches = [];
   const rawPrs = [];
   for (const pr of input2.pulls) {
@@ -19916,6 +19957,7 @@ function buildMergeQueue(input2) {
   const prs = rawPrs.map((pr) => {
     const labels = (pr.labels ?? []).map((label) => label.name ?? "").filter(Boolean);
     const batch = batchByPr.get(pr.number) ?? null;
+    const sessions = sessionsOf(pr.head.sha);
     if (batch) {
       return {
         number: pr.number,
@@ -19935,6 +19977,7 @@ function buildMergeQueue(input2) {
         runningJobs: batch.runningJobs,
         failedJob: batch.failedJob,
         jobs: batch.jobs,
+        ...sessions ? { sessions } : {},
         updatedAt: pr.updated_at
       };
     }
@@ -19958,6 +20001,7 @@ function buildMergeQueue(input2) {
       ciState: ciRunState(run),
       runUrl: run?.html_url ?? null,
       ...summary,
+      ...sessions ? { sessions } : {},
       updatedAt: pr.updated_at
     };
   });
@@ -19969,34 +20013,6 @@ function hasActiveQueueWork(queue) {
   return queue.prs.some(
     (pr) => pr.stage === "checking" || pr.stage === "queued" || pr.ciState === "running" || pr.ciState === "queued"
   );
-}
-
-// core/trailer.ts
-var HARNESSES = ["paseo", "opencode", "claude"];
-var VALUE = /^(paseo|opencode|claude)\/([^/\s]+)\/([^/\s]+)$/;
-var LINE = /^Agent-Session:[ \t]*(\S+)[ \t]*$/gm;
-function parseSessionValue(value) {
-  const match = VALUE.exec((value ?? "").trim());
-  if (!match) return null;
-  return { harness: match[1], host: match[2], id: match[3] };
-}
-function parseAgentSession(message2) {
-  let found = null;
-  for (const match of message2.matchAll(LINE)) found = parseSessionValue(match[1]) ?? found;
-  return found;
-}
-function formatSession(ref) {
-  return `${ref.harness}/${ref.host}/${ref.id}`;
-}
-function sameSession(a, b) {
-  return a.harness === b.harness && a.host === b.host && a.id === b.id;
-}
-function toSessionRef(value) {
-  if (!value || typeof value !== "object") return null;
-  const { harness, host, id } = value;
-  if (typeof harness !== "string" || typeof host !== "string" || typeof id !== "string") return null;
-  if (!HARNESSES.includes(harness)) return null;
-  return parseSessionValue(`${harness}/${host}/${id}`);
 }
 
 // core/release-status.ts
@@ -21034,6 +21050,7 @@ function createReleaseSource(options) {
   const get = createGitHubClient(options.fetch);
   const finishedJobs = /* @__PURE__ */ new Map();
   const ranges = /* @__PURE__ */ new Map();
+  const headCommitSessions = /* @__PURE__ */ new Map();
   let snapshot = null;
   let runners = [];
   let loadedRuns = null;
@@ -21171,7 +21188,30 @@ function createReleaseSource(options) {
           }
         });
       }
-      lastQueue = buildMergeQueue({ pulls, ciRuns: runs, jobsByRunId });
+      const sessionsBySha = /* @__PURE__ */ new Map();
+      const uncachedPulls = [];
+      for (const pr of pulls) {
+        if (isMergifyBatchBranch(pr.head.ref)) continue;
+        const cached2 = headCommitSessions.get(pr.head.sha);
+        if (cached2 !== void 0) {
+          if (cached2.length) sessionsBySha.set(pr.head.sha, cached2);
+        } else {
+          uncachedPulls.push(pr);
+        }
+      }
+      if (uncachedPulls.length > 0) {
+        await pool(uncachedPulls, async (pr) => {
+          try {
+            const commit = await get(`repos/${repository}/commits/${pr.head.sha}`, token);
+            const ref = parseAgentSession(commit.commit.message);
+            const refs = ref ? [ref] : [];
+            headCommitSessions.set(pr.head.sha, refs);
+            if (refs.length) sessionsBySha.set(pr.head.sha, refs);
+          } catch {
+          }
+        });
+      }
+      lastQueue = buildMergeQueue({ pulls, ciRuns: runs, jobsByRunId, sessionsBySha });
       return lastQueue;
     } catch {
       return lastQueue;
@@ -22894,7 +22934,7 @@ async function main() {
     stateDir,
     claudePid,
     pid: process.pid,
-    sha: true ? "fd054e5329b9f1eb530cad00c31c4761fe38294d" : "unknown",
+    sha: true ? "468163b42ddcf14d4e206f4a68ee9bfcc46a71c1" : "unknown",
     clock,
     fetch: (url2, init) => fetch(url2, init),
     exec: nodeExec,
