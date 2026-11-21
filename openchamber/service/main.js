@@ -6220,6 +6220,12 @@ var SessionSchema = z.object({
   host: z.string(),
   id: z.string()
 });
+var ReleasePrSchema = z.object({
+  number: z.number(),
+  branch: z.string(),
+  title: z.string().optional(),
+  url: z.string().optional()
+});
 var JobSchema = z.object({
   id: z.number(),
   name: z.string(),
@@ -6317,6 +6323,8 @@ var ReleaseSchema = z.object({
   handoffs: z.array(HandoffSchema).default([]),
   /** The watch's live progress (its check run); null before it publishes or for older watches. */
   progress: WatchProgressSchema.nullable().default(null),
+  /** Merged pull requests included in this release (head PR first; empty on direct/manual pushes). */
+  prs: z.array(ReleasePrSchema).default([]),
   jobs: z.array(JobSchema)
 });
 var RunnerSchema = z.object({
@@ -6439,8 +6447,10 @@ function buildStep(id, jobs, runDone, now, attemptStart = null) {
   const starts = (publishing.length ? publishing : ran).map((job) => time2(job.startedAt)).filter((ms) => ms !== null);
   const startedMs = starts.length ? Math.min(...starts) : null;
   let state;
-  if (live.length === 0) state = runDone ? "skipped" : "pending";
-  else if (failed) state = "failed";
+  if (live.length === 0) {
+    const legacyVerifyAbsent = id === "verify" && jobs.some((job) => job.step !== null && job.step !== "verify");
+    state = runDone || legacyVerifyAbsent ? "skipped" : "pending";
+  } else if (failed) state = "failed";
   else if (live.every((job) => job.state === "success")) state = "done";
   else if (live.some((job) => job.state === "running") || live.some((job) => job.state === "success") && !runDone)
     state = "running";
@@ -6678,6 +6688,7 @@ function buildRelease(input) {
     sessions,
     handoffs: releaseHandoffs(note, input.handoffs ?? []),
     progress: input.progress ?? null,
+    prs: [...input.prs ?? []],
     jobs
   };
 }
@@ -6928,6 +6939,7 @@ function createReleaseSource(options) {
   const finishedJobs = /* @__PURE__ */ new Map();
   const ranges = /* @__PURE__ */ new Map();
   const headCommitSessions = /* @__PURE__ */ new Map();
+  const commitPulls = /* @__PURE__ */ new Map();
   let snapshot = null;
   let runners = [];
   let loadedRuns = null;
@@ -6994,6 +7006,44 @@ function createReleaseSource(options) {
   async function tagList(token) {
     return tagNumbers(await get(`repos/${repository}/git/matching-refs/tags/release-`, token));
   }
+  async function pullsOfCommit(sha, token) {
+    const cached2 = commitPulls.get(sha);
+    if (cached2 !== void 0) return cached2;
+    try {
+      const body = await get(`repos/${repository}/commits/${sha}/pulls?per_page=10`, token);
+      const prs = [];
+      for (const pr of body) {
+        const branch = pr.head?.ref ?? "";
+        if (!branch || isMergifyBatchBranch(branch)) continue;
+        if (prs.some((known) => known.number === pr.number)) continue;
+        prs.push({ number: pr.number, branch, title: pr.title, url: pr.html_url });
+      }
+      commitPulls.set(sha, prs);
+      return prs;
+    } catch (error2) {
+      if (error2 instanceof GitHubError && (error2.status === 404 || error2.status === 422)) {
+        commitPulls.set(sha, []);
+      }
+      return [];
+    }
+  }
+  async function pullsOfRelease(run, commits, token) {
+    const shas = [run.head_sha];
+    if (commits) {
+      for (const commit of [...commits].reverse()) {
+        if (shas.length >= 5) break;
+        if (commit.sha && !shas.includes(commit.sha)) shas.push(commit.sha);
+      }
+    }
+    const groups = await Promise.all(shas.map((sha) => pullsOfCommit(sha, token)));
+    const out = [];
+    for (const group of groups) {
+      for (const pr of group) {
+        if (!out.some((known) => known.number === pr.number)) out.push(pr);
+      }
+    }
+    return out;
+  }
   async function build(run, tags, notes, watches, token) {
     const watchRun = watches.get(run.run_number) ?? null;
     const [jobs, watchJobs, watchProgress, commits] = await Promise.all([
@@ -7005,6 +7055,7 @@ function createReleaseSource(options) {
         return null;
       })
     ]);
+    const prs = await pullsOfRelease(run, commits, token);
     const name = releaseNameOf(run.run_number);
     const note = notes.get(name) ?? null;
     const handoffs = note && options.handoffs ? await options.handoffs(name).catch(() => []) : [];
@@ -7013,6 +7064,7 @@ function createReleaseSource(options) {
       jobs,
       note,
       commits,
+      prs,
       tagged: tags.includes(run.run_number),
       handoffs,
       watch: watchRun && watchJobs ? { run: watchRun, jobs: watchJobs } : null,
