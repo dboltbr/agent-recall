@@ -6,9 +6,11 @@ import { Icon } from "@getpaseo/plugin/client/ui";
 import { useEffect, useRef, type ReactNode } from "react";
 import { Animated, Easing, Platform, Pressable, Text, View } from "react-native";
 import {
+  deployChips,
   imageChips,
   liveSources,
   pipeMeta,
+  popoverSteps,
   pusherLine,
   releaseBadge,
   releaseLineIcon,
@@ -160,14 +162,32 @@ export function SupersededLine({
   );
 }
 
-export function CommitLine({ theme, release }: { theme: PluginTheme; release: Release }) {
+export function CommitLine({ theme, release, compact = false }: { theme: PluginTheme; release: Release; compact?: boolean }) {
   const prs = release.prs ?? [];
+  const headline = prs[0]?.title || release.title;
   const branchText =
     prs.length === 1
       ? prs[0]!.branch
       : prs.length > 1
         ? prs.map((pr) => `#${pr.number} ${pr.branch}`).join(" · ")
         : null;
+  if (compact) {
+    return (
+      <View style={{ gap: 3, marginTop: 6 }}>
+        <Text numberOfLines={2} style={{ color: theme.colors.foreground, fontSize: 12.5, lineHeight: 17 }}>
+          {headline}
+        </Text>
+        {branchText ? (
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 5, minWidth: 0 }}>
+            <Icon name="GitBranch" size={11.5} color={theme.colors.foregroundMuted} />
+            <Text numberOfLines={1} style={{ fontFamily: MONO, fontSize: 11, color: theme.colors.foregroundMuted, flexShrink: 1 }}>
+              {branchText}
+            </Text>
+          </View>
+        ) : null}
+      </View>
+    );
+  }
   return (
     <View style={{ gap: 3, marginTop: 4 }}>
       {branchText ? (
@@ -188,26 +208,57 @@ export function CommitLine({ theme, release }: { theme: PluginTheme; release: Re
   );
 }
 
-export function PusherLine({ theme, release, title, now }: { theme: PluginTheme; release: Release; title: string | null; now: Date }) {
+export function PusherLine({
+  theme,
+  release,
+  title,
+  now,
+  onPress = null,
+}: {
+  theme: PluginTheme;
+  release: Release;
+  title: string | null;
+  now: Date;
+  onPress?: (() => void) | null;
+}) {
   const line = pusherLine(release, title, now);
   if (!line) return null;
   // The quoted title reads in the foreground color, the rest muted (mock p1b).
   const open = line.indexOf("“");
   const close = line.indexOf("”");
-  return (
-    <View style={{ flexDirection: "row", alignItems: "center", gap: 7, marginTop: 4, minWidth: 0 }}>
-      <Icon name="Bot" size={13} color={theme.colors.foregroundMuted} />
-      <Text numberOfLines={1} style={{ color: theme.colors.foregroundMuted, fontSize: 12, flexShrink: 1 }}>
+  const content = (
+    <>
+      <Icon name="Bot" size={12.5} color={onPress ? theme.colors.accent : theme.colors.foregroundMuted} />
+      <Text numberOfLines={1} style={{ color: theme.colors.foregroundMuted, fontSize: 11.5, flexShrink: 1 }}>
         {open >= 0 && close > open ? (
           <>
             {line.slice(0, open)}
-            <Text style={{ color: theme.colors.foreground }}>{line.slice(open, close + 1)}</Text>
+            <Text style={{ color: onPress ? theme.colors.accent : theme.colors.foreground }}>{line.slice(open, close + 1)}</Text>
             {line.slice(close + 1)}
           </>
         ) : (
           line
         )}
       </Text>
+      {onPress ? <Icon name="ArrowUpRight" size={11} color={theme.colors.accent} /> : null}
+    </>
+  );
+  if (onPress) {
+    return (
+      <Pressable
+        accessibilityRole="link"
+        accessibilityLabel={`Abrir agente: ${line}`}
+        onPress={onPress}
+        hitSlop={4}
+        style={({ pressed }) => ({ flexDirection: "row", alignItems: "center", gap: 6, marginTop: 4, minWidth: 0, opacity: pressed ? 0.6 : 1 })}
+      >
+        {content}
+      </Pressable>
+    );
+  }
+  return (
+    <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginTop: 4, minWidth: 0 }}>
+      {content}
     </View>
   );
 }
@@ -367,6 +418,28 @@ function stepMarkTone(release: Release, step: Step): Tone | undefined {
   return step.id === "watch" && !isActive(release) ? (watchTone(release) ?? undefined) : undefined;
 }
 
+/** Per-target deploy chips (`✓ pins`, `✓ marketing`, `⟳ console`) so stuck/failed targets stand out. */
+export function DeployChips({ theme, release }: { theme: PluginTheme; release: Release }) {
+  const chips = deployChips(release);
+  if (!chips.length) return null;
+  const text = { fontFamily: MONO, fontSize: 11 } as const;
+  return (
+    <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 5, marginTop: 5 }}>
+      {chips.map((chip) => {
+        const tone: Tone =
+          chip.state === "success" ? "ok" : chip.state === "failure" ? "bad" : chip.state === "running" ? "run" : "muted";
+        const icon = tone === "ok" ? "Check" : tone === "bad" ? "X" : null;
+        return (
+          <Chip key={chip.name} theme={theme} tone={tone} queued={chip.state === "queued" || chip.state === "waiting"}>
+            {tone === "run" ? <Spin color={toneColor(theme, "run")} size={10} /> : icon ? <Icon name={icon} size={11} color={toneColor(theme, tone)} /> : null}
+            <Text style={[text, { color: tone === "muted" ? theme.colors.foregroundMuted : theme.colors.foreground }]}>{chip.name}</Text>
+          </Chip>
+        );
+      })}
+    </View>
+  );
+}
+
 /** "Etapas": the vertical list with a connector line (mock p1b). */
 export function StepList({
   theme,
@@ -384,7 +457,7 @@ export function StepList({
   /** What holds the release (`waitingFor`): the deploy step says it while pending. */
   waiting?: string | null;
 }) {
-  const steps = visibleSteps(release);
+  const steps = popoverSteps(release);
   return (
     <View>
       {steps.map((step, index) => {
@@ -392,6 +465,7 @@ export function StepList({
         const duration = stepDurationMs(step, now);
         const detail = stepDetail(release, step, waiting, now);
         const markTone = stepMarkTone(release, step);
+        const showDeployChips = step.id === "deploy" && (step.state === "running" || step.state === "failed" || step.state === "done") && deployChips(release).length > 0;
         return (
           <View key={step.id} style={{ flexDirection: "row", gap: 10, paddingVertical: 4, alignItems: "flex-start" }}>
             {index < steps.length - 1 ? (
@@ -416,6 +490,8 @@ export function StepList({
                   <ImageChips theme={theme} release={release} />
                   {queue && step.state === "running" ? <QueueLine theme={theme} text={queue} style={{ marginTop: 6 }} /> : null}
                 </>
+              ) : showDeployChips ? (
+                <DeployChips theme={theme} release={release} />
               ) : detail ? (
                 <Text
                   style={{

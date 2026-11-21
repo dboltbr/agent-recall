@@ -4,7 +4,7 @@
 import type { PluginPopoverProps, PluginSidebarItemProps } from "@getpaseo/plugin/client";
 import { SidebarRow } from "@getpaseo/plugin/client/ui";
 import { queueFooterLabel, queuedPrs } from "../shared/queue-status.ts";
-import { visibleSteps, watchTone } from "../shared/release-copy.ts";
+import { popoverSteps, watchTone } from "../shared/release-copy.ts";
 import { footerLabel, footerRelease, isActive, otherActive, type Release } from "../shared/release-status.ts";
 import type { ReleaseView } from "../shared/rpc.ts";
 import { useNow, useReleaseState } from "./data.ts";
@@ -69,7 +69,7 @@ export function ReleaseFooterItem({ theme, currentScreen, openScreen, openPopove
       label={label}
       active={onScreen}
       onPress={() => openPopover(FooterPopover)}
-      trailing={<SegBar theme={theme} steps={visibleSteps(release)} watchTone={isActive(release) ? null : watchTone(release)} />}
+      trailing={<SegBar theme={theme} steps={popoverSteps(release)} watchTone={isActive(release) ? null : watchTone(release)} />}
     />
   );
 }

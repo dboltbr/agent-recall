@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { buildMergeQueue } from "../../shared/queue-status.ts";
-import { watchTone, visibleSteps } from "../../shared/release-copy.ts";
+import { deployChips, popoverSteps, runnerAlert, watchTone, visibleSteps } from "../../shared/release-copy.ts";
 import { buildRelease, buildSnapshot } from "../../shared/release-status.ts";
 import type { ReleaseView } from "../../shared/rpc.ts";
 import { NOW } from "../../core/test/fakes.ts";
@@ -170,4 +170,50 @@ test("visibleSteps oculta verify mesmo com release ativa quando não há verify-
     label: "PR #275 · img 1/2",
     tone: "info",
   });
+});
+
+test("popoverSteps, deployChips e runnerAlert: só 3 etapas humanas, alvo travado em destaque e runners ociosos ocultos", () => {
+  const stuckDeploy = buildRelease({
+    run: run({ run_number: 712, head_commit: null }),
+    jobs: [
+      job("previous-investigation", "success", [36, 35.5]),
+      job("images / shard 0", "success", [36, 35]),
+      job("pins", "success", [35, 34.8]),
+      job("marketing / deploy", "success", [35, 34]),
+      job("console / build", "success", [35, 33]),
+      job("console / deploy", "running", [33]),
+    ],
+    prs: [{ number: 274, branch: "fix-review-recheck-batches" }],
+    note: null,
+    commits: null,
+    now: NOW,
+  });
+  assert.deepEqual(
+    popoverSteps(stuckDeploy).map((step) => step.id),
+    ["images", "deploy", "watch"],
+    "popover omite verify fantasma e tag interno",
+  );
+  assert.deepEqual(deployChips(stuckDeploy), [
+    { name: "pins", state: "success" },
+    { name: "marketing", state: "success" },
+    { name: "console", state: "running" },
+  ]);
+
+  const healthySnap = buildSnapshot({
+    repository: "dboltbr/dbolt",
+    workflow: "release",
+    releases: [stuckDeploy],
+    runners: RUNNERS.map((runner) => ({ ...runner, status: "online", busy: false })),
+    now: NOW,
+  });
+  assert.equal(runnerAlert(healthySnap), null, "runners online e ociosos não poluem o popover");
+
+  const offlineSnap = buildSnapshot({
+    repository: "dboltbr/dbolt",
+    workflow: "release",
+    releases: [stuckDeploy],
+    runners: RUNNERS.map((runner, idx) => ({ ...runner, status: idx === 0 ? "offline" : "online", busy: false })),
+    now: NOW,
+  });
+  assert.deepEqual(runnerAlert(offlineSnap), { tone: "bad", text: `Runner ${offlineSnap.runners.find((r) => !r.online)!.name} offline` });
 });

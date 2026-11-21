@@ -35,6 +35,18 @@ export function watchLinks(view: ReleaseView | null, release: Release, known: re
   return links;
 }
 
+/** Only incident handoff links (`owner`, `notified`, `blocked`) — avoids repeating the pusher shown in the header. */
+export function incidentLinks(view: ReleaseView | null, release: Release, known: readonly string[] = []): WatchLink[] {
+  const links: WatchLink[] = [];
+  for (const entry of watchSessions(release)) {
+    if (!entry.kinds.some((kind) => kind !== "push")) continue;
+    const agentId = localAgent(view, entry.session, known);
+    if (!agentId || links.some((link) => link.agentId === agentId)) continue;
+    links.push({ agentId, label: watchSessionLabel(entry, agentTitle(view, agentId)) });
+  }
+  return links;
+}
+
 /**
  * The Paseo agent of this daemon behind `session`, or null: a `paseo/<host>/…` agent of this host,
  * or the agent on the OpenCode provider running the `opencode/…/<ses_…>` session.

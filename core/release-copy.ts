@@ -11,6 +11,8 @@ import {
   isActive,
   missingEvidence,
   freezeLabel,
+  PREVIOUS_INVESTIGATION,
+  PREVIOUS_WATCH,
   queueGroups,
   RECENT_VERDICT_MS,
   releaseIdLabel,
@@ -87,6 +89,55 @@ export function visibleSteps(release: Release): Step[] {
   return [...release.steps];
 }
 
+/**
+ * Human-facing stages for compact surfaces (popover & sidebar progress bar): hides legacy `verify`
+ * (when unused) and internal bookkeeping `tag` (unless `tag` itself failed), leaving `imagens →
+ * deploy → vigia`.
+ */
+export function popoverSteps(release: Release): Step[] {
+  return visibleSteps(release).filter((step) => step.id !== "tag" || step.state === "failed");
+}
+
+const DEPLOY_STATE_RANK: Record<Job["state"], number> = {
+  failure: 0,
+  running: 1,
+  queued: 2,
+  waiting: 3,
+  cancelled: 4,
+  success: 5,
+  skipped: 6,
+};
+
+/** Deploy target chips (`pins`, `console`, `marketing`, …) with aggregate state, skipping wait gates. */
+export function deployChips(release: Release): ImageChip[] {
+  const byTarget = new Map<string, Job["state"]>();
+  for (const job of release.jobs) {
+    if (job.step !== "deploy" || job.state === "skipped") continue;
+    if (job.name === PREVIOUS_WATCH || job.name === PREVIOUS_INVESTIGATION) continue;
+    const at = job.name.indexOf(" / ");
+    const target = at < 0 ? job.name.trim() : job.name.slice(0, at).trim();
+    const prev = byTarget.get(target);
+    if (!prev || DEPLOY_STATE_RANK[job.state] < DEPLOY_STATE_RANK[prev]) {
+      byTarget.set(target, job.state);
+    }
+  }
+  return [...byTarget.entries()].map(([name, state]) => ({ name, state }));
+}
+
+/**
+ * Compact 1-line runner alert for the popover: null when all runners are online and nothing waits
+ * for a runner (so idle runners never clutter the popover).
+ */
+export function runnerAlert(snapshot: ReleaseSnapshot): { tone: Tone; text: string } | null {
+  const offline = snapshot.runners.filter((runner) => !runner.online);
+  if (offline.length === 1) return { tone: "bad", text: `Runner ${offline[0]!.name} offline` };
+  if (offline.length > 1) return { tone: "bad", text: `${offline.length} runners offline` };
+  const hint = queueHint(snapshot);
+  if (hint) return { tone: "warn", text: hint };
+  const waiting = waitingLabel(snapshot);
+  if (waiting) return { tone: "warn", text: waiting };
+  return null;
+}
 /** Compact badge for Paseo's sidebar workspace meta row (`WorkspaceRowBadge`). */
 export function releaseRowBadge(release: Release, now: Date = new Date()): RowBadgeDescriptor | null {
   const id = releaseIdLabel(release);
@@ -210,7 +261,7 @@ export function stepDetail(release: Release, step: Step, waiting: string | null 
         const missing = missingEvidence(release);
         return missing ? `faltou ${missing}` : "sem veredito";
       }
-      return watchPhaseLabel(release, now) ?? (isActive(release) ? "sinais do blast radius → veredito" : "");
+      return watchPhaseLabel(release, now) ?? (step.state === "pending" ? "aguardando deploy" : isActive(release) ? "observando produção" : "");
   }
 }
 

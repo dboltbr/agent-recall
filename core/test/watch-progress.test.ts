@@ -101,7 +101,7 @@ test("pílula, atividade e etapa do vigia mostram a fase; sem progresso, o texto
   const old = watching(null);
   assert.equal(pillLabel(old, NOW), "r172 · vigia");
   assert.equal(activityLabel(snapshot, old, NOW), "vigia aberto");
-  assert.equal(stepDetail(old, stepOf(old, "watch"), null, NOW), "sinais do blast radius → veredito");
+  assert.equal(stepDetail(old, stepOf(old, "watch"), null, NOW), "observando produção");
 });
 
 test("fontes ao vivo só com a release aberta; pendente vira medindo, vermelho vira vermelho", () => {

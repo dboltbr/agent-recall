@@ -82,7 +82,7 @@ test("stepDetail e pipeMeta: as linhas do mock p1b/p4a", () => {
   assert.equal(stepDetail(release, stepOf(release, "verify")), "scanners · check");
   assert.equal(stepDetail(release, stepOf(release, "deploy")), "produção");
   assert.equal(stepDetail(release, stepOf(release, "tag")), "release-172");
-  assert.equal(stepDetail(release, stepOf(release, "watch")), "sinais do blast radius → veredito");
+  assert.equal(stepDetail(release, stepOf(release, "watch")), "aguardando deploy");
   assert.equal(pipeMeta(release, stepOf(release, "verify"), NOW), "23m 30s");
   assert.equal(pipeMeta(release, stepOf(release, "images"), NOW), "3/9 · 11m");
   assert.equal(pipeMeta(release, stepOf(release, "deploy"), NOW), "");
