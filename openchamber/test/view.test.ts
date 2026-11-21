@@ -110,7 +110,7 @@ test("headline e stepDetail: com o vigia publicando, a fase e a contagem regress
   assert.equal(headline(release, FIXTURE_NOW), "observando · faltam 7m");
   assert.equal(stepDetail(release, stepOf(release, "watch"), null, FIXTURE_NOW), "observando · faltam 7m");
   const old = { ...release, progress: null };
-  assert.equal(stepDetail(old, stepOf(old, "watch"), null, FIXTURE_NOW), "sinais do blast radius → veredito");
+  assert.equal(stepDetail(old, stepOf(old, "watch"), null, FIXTURE_NOW), "observando produção");
   assert.notEqual(headline(old, FIXTURE_NOW), "observando · faltam 7m");
 });
 

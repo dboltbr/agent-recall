@@ -175,7 +175,7 @@ export function releaseRowBadge(release: Release, now: Date = new Date()): RowBa
   }
 }
 
-/** `push do agente Paseo “Aviso ao morador: push” · há 36 min`, or null without a trailer. */
+/** `Paseo “FFMPEG 9” · há 1 h`, or null without a trailer. */
 export function pusherLine(release: Release, title: string | null, now: Date): string | null {
   const pusher = release.pusher;
   if (!pusher) return null;
@@ -183,11 +183,11 @@ export function pusherLine(release: Release, title: string | null, now: Date): s
   const who =
     pusher.harness === "paseo"
       ? title
-        ? `push do agente Paseo “${title}”`
-        : `push do agente Paseo ${pusher.id.slice(0, 8)}`
+        ? `Paseo “${title}”`
+        : `Paseo ${pusher.id.slice(0, 8)}`
       : title
-        ? `push da sessão ${harness} “${title}”`
-        : `push da sessão ${harness} · ${pusher.host}`;
+        ? `${harness} “${title}”`
+        : `${harness} · ${pusher.host}`;
   const ago = formatAgo(release.createdAt, now);
   return ago ? `${who} · ${ago}` : who;
 }

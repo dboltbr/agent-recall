@@ -1,12 +1,13 @@
 // Rail panel: the release in focus step by step, the runner queue and recent verdicts.
 import { isGuestAttachItem, type GuestItem } from "@openchamber/sdk";
-import { findRelease, formatAgo, releaseLabel, type Release, type ReleaseSnapshot } from "../../../core/release-status.ts";
+import { runnerAlert } from "../../../core/release-copy.ts";
+import { findRelease, formatAgo, isActive, releaseLabel, type Release, type ReleaseSnapshot } from "../../../core/release-status.ts";
 import { SEEN_KEY, hostActions, hostWatch } from "../ui/actions.ts";
 import { boot, serviceCall, type Host } from "../ui/boot.ts";
 import { h, icon, replaceChildren, spinner } from "../ui/dom.ts";
 import { startFeed, type FeedState } from "../ui/feed.ts";
-import { commitLines, outcomeBanner, releaseHead, runnersList, signalsList, stepsList, verdictRows, type Actions, type Watch } from "../ui/render.ts";
-import { activityLabel, badgeState, cancelledCount, otherActive, primaryRelease, queueView, recentVerdicts, snapshotError } from "../ui/view.ts";
+import { commitLines, outcomeBanner, releaseHead, signalsList, stepsList, verdictRows, type Actions, type Watch } from "../ui/render.ts";
+import { activityLabel, badgeState, cancelledCount, otherActive, primaryRelease, recentVerdicts, snapshotError } from "../ui/view.ts";
 
 function chipNumber(item: GuestItem | null): number | null {
   if (!item || !isGuestAttachItem(item)) return null;
@@ -15,16 +16,17 @@ function chipNumber(item: GuestItem | null): number | null {
 }
 
 export function releaseView(snapshot: ReleaseSnapshot, release: Release, now: Date, actions: Actions, select: (release: Release | null) => void, pinned: boolean, watch: Watch | null = null): HTMLElement {
-  const queue = queueView(snapshot);
   const history = recentVerdicts(snapshot, release).slice(0, 5);
   const others = otherActive(snapshot, release);
   const cancelled = cancelledCount(snapshot);
+  const problem = isActive(release) ? runnerAlert(snapshot) : null;
+  const pr = release.prs?.[0] ?? null;
   return h(
     "div",
     { class: "rl" },
     pinned ? h("div", { class: "toolbar" }, h("button", { class: "link quiet", onClick: () => select(null) }, "← release atual")) : null,
     releaseHead(release, now),
-    ...commitLines(release, now, actions),
+    ...commitLines(release, now, actions, true),
     ...others.map((other) =>
       h(
         "div",
@@ -38,17 +40,15 @@ export function releaseView(snapshot: ReleaseSnapshot, release: Release, now: Da
     stepsList(snapshot, release, now, watch),
     release.signals.length > 0 ? h("div", { class: "rl-sec" }, "Sinais do vigia") : null,
     signalsList(release),
-    h("div", { class: "rl-sec" }, "Fila de runners", queue.waiting > 0 ? h("span", { class: "sp" }) : null, queue.waiting > 0 ? h("span", { class: "tx-warn", style: "text-transform:none;letter-spacing:0" }, `${queue.waiting} aguardando`) : null),
-    runnersList(snapshot),
-    queue.hint ? h("div", { class: "note tx-warn" }, icon("alert", 12), queue.hint) : null,
+    problem ? h("div", { class: `rl-banner ${problem.tone === "bad" ? "bad" : "warn"}` }, icon(problem.tone === "bad" ? "xCircle" : "clock", 14), h("span", null, problem.text)) : null,
     h("div", { class: "rl-sec" }, "Vereditos recentes"),
     verdictRows(history, (picked) => select(picked)),
     cancelled > 0 ? h("div", { class: "muted", style: "font-size:11.5px;margin-top:4px" }, `${cancelled} ${cancelled === 1 ? "run cancelada oculta" : "runs canceladas ocultas"}`) : null,
     h(
       "div",
       { class: "rl-foot" },
-      h("button", { class: "link", onClick: () => actions.openUrl(release.url) }, icon("external", 12), "ver run"),
-      h("button", { class: "link quiet", onClick: () => actions.openCommit(release.headSha) }, icon("commit", 12), "ver commit"),
+      pr?.url ? h("button", { class: "link", onClick: () => actions.openUrl(pr.url) }, icon("external", 12), `ver PR #${pr.number}`) : null,
+      h("button", { class: pr?.url ? "link quiet" : "link", onClick: () => actions.openUrl(release.url) }, icon("external", 12), "ver run"),
       h("span", { class: "sp" }),
       h("span", { class: "muted", style: "font-size:11.5px", title: "Abra pela lista Extension pages da barra lateral" }, "página Releases no menu lateral"),
     ),

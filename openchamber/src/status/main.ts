@@ -5,6 +5,7 @@ import { startFeed, type FeedState } from "../ui/feed.ts";
 import { readSeen } from "../ui/actions.ts";
 import { releaseRing, segBar } from "../ui/render.ts";
 import { PANEL_SURFACE, badgeState, elapsedLabel, headline, primaryRelease, revertParts, snapshotError, visibleBadge } from "../ui/view.ts";
+import { queueFooterLabel } from "../../../core/queue-status.ts";
 import { formatAgo, isActive, releaseLabel, trippedSignals, type Release } from "../../../core/release-status.ts";
 
 function strip(release: Release, now: Date, onOpen: () => void, onLink: (url: string) => void): HTMLElement {
@@ -97,7 +98,8 @@ function mount(host: Host, root: HTMLElement): void {
     } else if (state.unavailable || snapshotError(state.envelope)) {
       replaceChildren(root, h("div", { class: "ws" }, icon("alert", 14, "t-warn"), h("span", { class: "ellipsis" }, state.unavailable ?? snapshotError(state.envelope) ?? "")));
     } else if (snapshot) {
-      replaceChildren(root, h("div", { class: "ws" }, h("span", null, "Nenhum release recente.")));
+      const queueLabel = queueFooterLabel(snapshot.queue);
+      replaceChildren(root, h("div", { class: "ws", onClick: openPanel }, h("span", null, queueLabel ?? "Nenhum release recente.")));
     } else {
       replaceChildren(root, h("div", { class: "ws" }, spinner(14), h("span", null, "carregando release…")));
     }

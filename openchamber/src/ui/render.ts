@@ -7,6 +7,7 @@ import {
   isActive,
   progress,
   releaseLabel,
+  releaseMeta,
   STEP_LABELS,
   stepLabel,
   waitingFor,
@@ -16,7 +17,7 @@ import {
   type Signal,
   type Step,
 } from "../../../core/release-status.ts";
-import { liveSources, signalOutcome } from "../../../core/release-copy.ts";
+import { deployChips, liveSources, popoverSteps, signalOutcome, visibleSteps, type ImageChip } from "../../../core/release-copy.ts";
 import { h, icon, ring, spinner, type IconName } from "./dom.ts";
 import type { WatchLink } from "./sessions.ts";
 import {
@@ -77,8 +78,9 @@ export function pill(release: Release): HTMLElement {
 }
 
 export function segBar(release: Release): HTMLElement {
-  const bar = h("span", { class: "seg", title: release.steps.map((step) => `${stepLabel(step)}: ${step.state}`).join(" · ") });
-  for (const step of release.steps) {
+  const steps = popoverSteps(release);
+  const bar = h("span", { class: "seg", title: steps.map((step) => `${stepLabel(step)}: ${step.state}`).join(" · ") });
+  for (const step of steps) {
     const cell = h("i");
     if (step.state === "done" || step.state === "skipped") cell.className = "ok";
     else if (step.state === "failed") cell.className = "bad";
@@ -104,20 +106,34 @@ export function releaseHead(release: Release, now: Date): HTMLElement {
     releaseRing(release, 18),
     h("span", { class: "t" }, releaseLabel(release)),
     pill(release),
+    h("span", { class: "s ellipsis" }, releaseMeta(release)),
     h("span", { class: "sp" }),
     h("span", { class: "s" }, elapsedLabel(release, now)),
   );
 }
 
-export function commitLines(release: Release, now: Date, actions: Actions): HTMLElement[] {
-  const lines = [
-    h(
-      "div",
-      { class: "rl-commit" },
-      h("button", { class: "link sha", title: "ver commit", onClick: () => actions.openCommit(release.headSha) }, shortSha(release.headSha)),
-      h("span", { class: "ellipsis" }, release.title || "(sem título)"),
-    ),
-  ];
+export function commitLines(release: Release, now: Date, actions: Actions, compact = false): HTMLElement[] {
+  const prs = release.prs ?? [];
+  const headlineText = prs[0]?.title || release.title || "(sem título)";
+  const branchText =
+    prs.length === 1
+      ? prs[0]!.branch
+      : prs.length > 1
+        ? prs.map((pr) => `#${pr.number} ${pr.branch}`).join(" · ")
+        : null;
+  const lines: HTMLElement[] = compact
+    ? [h("div", { class: "rl-commit", style: "color:var(--fg)" }, h("span", { class: "ellipsis" }, headlineText))]
+    : [
+        h(
+          "div",
+          { class: "rl-commit" },
+          h("button", { class: "link sha", title: "ver commit", onClick: () => actions.openCommit(release.headSha) }, shortSha(release.headSha)),
+          h("span", { class: "ellipsis" }, headlineText),
+        ),
+      ];
+  if (branchText) {
+    lines.push(h("div", { class: "rl-commit" }, h("span", { class: "mono ellipsis", style: "font-size:11px" }, branchText)));
+  }
   const session = release.pusher ?? release.sessions[0] ?? null;
   if (session) {
     lines.push(
@@ -125,7 +141,7 @@ export function commitLines(release: Release, now: Date, actions: Actions): HTML
         "div",
         { class: "rl-commit" },
         icon("bot", 13),
-        h("span", { class: "ellipsis" }, `push da sessão ${sessionLabel(session)} · ${formatAgo(release.createdAt, now)}`),
+        h("span", { class: "ellipsis" }, `${sessionLabel(session)} · ${formatAgo(release.createdAt, now)}`),
       ),
     );
   }
@@ -175,13 +191,29 @@ function imageChips(release: Release): HTMLElement | null {
   return box;
 }
 
+function deployChip(chip: ImageChip): HTMLElement {
+  switch (chip.state) {
+    case "success":
+      return h("span", { class: "chip" }, icon("check", 11, "t-ok", 2.5), chip.name);
+    case "failure":
+      return h("span", { class: "chip x" }, icon("x", 11, "t-bad", 2.5), chip.name);
+    case "running":
+      return h("span", { class: "chip b" }, spinner(11), chip.name);
+    default:
+      return h("span", { class: "chip q" }, chip.name);
+  }
+}
+
 export function stepsList(snapshot: ReleaseSnapshot, release: Release, now: Date, watch: Watch | null = null): HTMLElement {
   const list = h("div", { class: "rl-steps" });
   const queue = queueView(snapshot);
-  for (const step of release.steps) {
+  const targets = deployChips(release);
+  for (const step of popoverSteps(release)) {
     const detail = h("div", { class: "sd" });
     const text = stepDetail(release, step, waitingFor(snapshot, release), now);
-    if (step.id === "tag") detail.append(h("span", { class: "mono" }, text));
+    const showDeployChips = step.id === "deploy" && (step.state === "running" || step.state === "failed" || step.state === "done") && targets.length > 0;
+    if (showDeployChips) detail.append(h("div", { class: "rl-imgs" }, ...targets.map(deployChip)));
+    else if (step.id === "tag") detail.append(h("span", { class: "mono" }, text));
     else if (text) detail.append(text);
     if (step.id === "images" && step.state !== "pending" && step.state !== "skipped") {
       const chips = imageChips(release);
@@ -305,7 +337,7 @@ export function toneText(release: Release): string {
 /** Horizontal steps; the vigia sessions go on a row under the pipe (too wide for a column). */
 export function pipeline(release: Release, now: Date, watch: Watch | null = null): HTMLElement {
   const pipe = h("div", { class: "pipe" });
-  for (const step of release.steps) {
+  for (const step of visibleSteps(release)) {
     const tone = stepTone(step);
     const cls = tone === "ok" ? "ok" : tone === "run" ? "cur" : tone === "bad" ? "bad" : "pend";
     const glyph = tone === "ok" ? icon("check", 10, "", 3) : tone === "bad" ? icon("x", 10, "", 3) : h("span", { class: "dot" });

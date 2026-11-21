@@ -101,7 +101,22 @@ export function createReleaseService(options: ReleaseServiceOptions): ReleaseSer
     await paseo!.agents.ref(agentId).timeline.append(item);
   };
 
+  const snapshotPath = join(options.stateDir, "snapshot.json");
+
+  async function saveSnapshot(snapshot: ReleaseSnapshot | null): Promise<void> {
+    if (!snapshot) return;
+    try {
+      await mkdir(options.stateDir, { recursive: true });
+      const tmp = `${snapshotPath}.${process.pid}.tmp`;
+      await writeFile(tmp, `${JSON.stringify(snapshot)}\n`, "utf8");
+      await rename(tmp, snapshotPath);
+    } catch (error) {
+      log.warn(`snapshot.json: ${describe(error)}`);
+    }
+  }
+
   async function publish(snapshot: ReleaseSnapshot | null): Promise<void> {
+    void saveSnapshot(snapshot);
     if (!snapshot || !publisher) return;
     try {
       const count = await publisher.publish(snapshot, paseo ? append : null);
