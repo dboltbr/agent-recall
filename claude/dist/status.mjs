@@ -20645,6 +20645,13 @@ function releaseForSession(snapshot, session, now = /* @__PURE__ */ new Date()) 
   });
   return pushedNoop ?? null;
 }
+function prBeatsFinishedRelease(pr, release) {
+  if (pr.stage === "checking" || pr.stage === "queued" || pr.ciState === "running") return true;
+  const prMs = time3(pr.updatedAt);
+  const releaseMs = time3(release.completedAt ?? release.updatedAt ?? release.createdAt);
+  if (prMs === null || releaseMs === null) return false;
+  return prMs > releaseMs;
+}
 var RELEASE_TIME_ZONE = "America/Sao_Paulo";
 var RELEASE_TIME_ZONE_OFFSET_MS = -3 * 60 * 60 * 1e3;
 var zoned;
@@ -21379,7 +21386,7 @@ function formatClaudeStatusLine(snapshot, ctx = {}) {
     const detail = ownRelease.current === "deploy" ? deployInline(ownRelease) : "";
     return `\u{1F680} ${pillLabel(ownRelease, now)}${detail ? ` ${detail}` : ""}${alertSuffix}`;
   }
-  if (pr && (pr.stage !== "open" || pr.ciState === "running" || pr.ciState === "failure")) {
+  if (pr && (pr.stage !== "open" || pr.ciState === "running" || pr.ciState === "failure") && (!ownRelease || prBeatsFinishedRelease(pr, ownRelease))) {
     return `\u{1F500} ${prPillLabel(pr)}${alertSuffix}`;
   }
   const focused = ownRelease ?? footerRelease(snapshot, now);
