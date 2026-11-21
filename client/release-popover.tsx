@@ -7,7 +7,7 @@ import { Loading } from "@getpaseo/plugin/client/ui";
 import { useState } from "react";
 import { Text, View } from "react-native";
 import { commitUrl, verdictBanner, waitingLabel, watchUrl } from "../shared/release-copy.ts";
-import { isActive, queueSummary, waitingFor, type Release } from "../shared/release-status.ts";
+import { isActive, queueSummary, releaseLabel, waitingFor, type Release } from "../shared/release-status.ts";
 import type { ReleaseView } from "../shared/rpc.ts";
 import { agentTitle, retryReleases, useNow, useReleaseState } from "./data.ts";
 import { Banner, LinkText, PressText } from "./kit.tsx";
@@ -80,7 +80,8 @@ export function ReleaseBody({
       {release.verdict === "reverted" || release.verdict === "red" ? <Signals theme={theme} release={release} /> : null}
       {onSelect ? <OtherReleases theme={theme} snapshot={snapshot} release={release} onSelect={onSelect} /> : null}
       <View style={{ flexDirection: "row", alignItems: "center", gap: 14, marginTop: 10, paddingTop: 8, borderTopWidth: 1, borderTopColor: theme.colors.border }}>
-        <LinkText theme={theme} href={release.url} icon="ExternalLink" label="ver run" />
+        {release.prs?.[0]?.url ? <LinkText theme={theme} href={release.prs[0].url} icon="GitPullRequest" label={`ver PR #${release.prs[0].number}`} /> : null}
+        <LinkText theme={theme} href={release.url} icon="ExternalLink" label="ver run" muted={!!release.prs?.[0]?.url} />
         <LinkText theme={theme} href={commitUrl(snapshot.repository, release.headSha)} icon="GitCommitHorizontal" label="ver commit" muted />
         <View style={{ flex: 1 }} />
         {openReleases ? <PressText theme={theme} label="abrir Releases" onPress={openReleases} muted /> : null}
@@ -127,7 +128,7 @@ export function ReleasePopover({
         <>
           {focused && picked && focused.runId !== picked.runId ? (
             <View style={{ marginBottom: 6 }}>
-              <PressText theme={theme} label={`← voltar para #${picked.number}`} onPress={() => setFocus(null)} muted />
+              <PressText theme={theme} label={`← voltar para ${releaseLabel(picked)}`} onPress={() => setFocus(null)} muted />
             </View>
           ) : null}
           <ReleaseBody

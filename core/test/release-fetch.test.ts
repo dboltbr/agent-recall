@@ -136,7 +136,44 @@ test("load: snapshot das runs, jobs, faixa e runners; depois só pergunta com ET
   assert.ok(second.every((call) => call.status === 304), "tudo 304 sem mudança");
   assert.ok(!second.some((call) => call.path.includes(`/runs/${state.runs[1]!.id}/jobs`)), "jobs da run concluída ficam em cache");
   assert.ok(!second.some((call) => call.path.includes("/compare/")), "faixa imutável fica em cache");
+  assert.ok(!second.some((call) => call.path.includes("/commits/") && call.path.endsWith("/pulls?per_page=10")), "PRs por SHA ficam em cache");
   assert.ok(second.every((call) => call.ifNoneMatch !== null));
+});
+
+test("load: resolve PRs da release via commits/{sha}/pulls ignorando branch do Mergify e cacheando por SHA", async () => {
+  const { state } = fixture();
+  const activeRun = state.runs[0]!;
+  const github = api(state);
+  const fetch: typeof github.fetch = async (url, init) => {
+    if (url.includes(`/commits/${activeRun.head_sha}/pulls`)) {
+      return new Response(
+        JSON.stringify([
+          { number: 999, title: "merge queue: checking #275", html_url: "https://gh/pr/999", head: { ref: "mergify/merge-queue/abc", sha: activeRun.head_sha } },
+          { number: 275, title: "feat: ksm", html_url: "https://gh/pr/275", head: { ref: "eng-1017-ksm-deleting", sha: activeRun.head_sha } },
+        ]),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+    if (url.includes("/commits/c1/pulls")) {
+      return new Response(
+        JSON.stringify([
+          { number: 274, title: "fix: batches", html_url: "https://gh/pr/274", head: { ref: "fix-review-recheck-batches", sha: "c1" } },
+        ]),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+    return github.fetch(url, init);
+  };
+  const source = createReleaseSource({ fetch, clock: fixedClock(), log: quietLog });
+  const snap = await source.load({ token: "t", notes: NOTES });
+  const r172 = snap.releases.find((r) => r.number === 172)!;
+  assert.deepEqual(
+    r172.prs.map((pr) => [pr.number, pr.branch]),
+    [
+      [275, "eng-1017-ksm-deleting"],
+      [274, "fix-review-recheck-batches"],
+    ],
+  );
 });
 
 test("nota da release vira veredito sem esperar a run", async () => {

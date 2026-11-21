@@ -35,8 +35,8 @@ test("headline e statusLabel: etapa em curso enquanto ativo, veredito depois", (
   assert.equal(headline(failed), "verify-production / check falhou");
   assert.deepEqual(revertParts(reverted), { what: "vigia reverteu no dbolt-deploy · main congelada", notice: "dona ses_culp" });
   assert.equal(revertParts(green), null);
-  assert.equal(releaseColumn(failed), "#169 27/10 06:26");
-  assert.equal(releaseColumn(green), "#171 27/10 10:00");
+  assert.equal(releaseColumn(failed), "r169");
+  assert.equal(releaseColumn(green), "r171");
 });
 
 test("queueView: linha do core e dica quando os ociosos não têm o label", () => {
@@ -69,7 +69,7 @@ test("releaseChip: título curto, contexto completo dentro dos limites do host",
   assert.equal(chip.id, "#172");
   assert.equal(chip.title, "27/10 11:24 · imagens 3/9");
   assert.equal(releaseChip(null, failed, FIXTURE_NOW).id, "#169");
-  assert.match(chip.text, /^Release #172 27\/10 11:24 do repositório/);
+  assert.match(chip.text, /^Release r172 do repositório/);
   assert.match(chip.text, /Fila: 5 na fila/);
   assert.match(chip.text, /^- imagens 3\/9: running/m);
   assert.ok(chip.text.length <= 16_000 && chip.title.length <= 200);

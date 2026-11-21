@@ -111,7 +111,7 @@ export function StepMark({ theme, state, tone }: { theme: PluginTheme; state: St
 /** Step bar (sidebar row trailing). */
 export function SegBar({ theme, steps, watchTone }: { theme: PluginTheme; steps: readonly Step[]; watchTone?: Tone | null }) {
   return (
-    <View style={{ flexDirection: "row", gap: 3, alignItems: "center" }}>
+    <View style={{ flexDirection: "row", gap: 2, alignItems: "center" }}>
       {steps.map((step) => {
         const isMutedWatch = step.id === "watch" && watchTone === "muted";
         const color = isMutedWatch
@@ -126,14 +126,14 @@ export function SegBar({ theme, steps, watchTone }: { theme: PluginTheme; steps:
         if (step.state === "running") {
           const fraction = step.total ? Math.max(0.15, Math.min(1, (step.done ?? 0) / step.total)) : 0.33;
           return (
-            <Tint key={step.id} color={theme.colors.foregroundMuted} opacity={0.28} style={{ width: 18, height: 5, borderRadius: 3 }}>
-              <View style={{ width: `${fraction * 100}%`, height: 5, backgroundColor: theme.colors.accent }} />
+            <Tint key={step.id} color={theme.colors.foregroundMuted} opacity={0.28} style={{ width: 12, height: 4, borderRadius: 2 }}>
+              <View style={{ width: `${fraction * 100}%`, height: 4, backgroundColor: theme.colors.accent }} />
             </Tint>
           );
         }
         // Pending or inconclusive watch: translucent muted segment, never bright green.
-        if (!color) return <Tint key={step.id} color={theme.colors.foregroundMuted} opacity={isMutedWatch ? 0.48 : 0.28} style={{ width: 18, height: 5, borderRadius: 3 }} />;
-        return <View key={step.id} style={{ width: 18, height: 5, borderRadius: 3, backgroundColor: color }} />;
+        if (!color) return <Tint key={step.id} color={theme.colors.foregroundMuted} opacity={isMutedWatch ? 0.48 : 0.28} style={{ width: 12, height: 4, borderRadius: 2 }} />;
+        return <View key={step.id} style={{ width: 12, height: 4, borderRadius: 2, backgroundColor: color }} />;
       })}
     </View>
   );

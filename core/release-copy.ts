@@ -13,6 +13,7 @@ import {
   freezeLabel,
   queueGroups,
   RECENT_VERDICT_MS,
+  releaseIdLabel,
   revertSummary,
   rollbackLabel,
   STEP_LABELS,
@@ -72,12 +73,15 @@ export function watchTone(release: Release): Tone | null {
 }
 
 /**
- * Steps to show in the UI: hides the legacy `verify` step when it was skipped because CI moved
- * to the PR/merge-queue workflow and at least one release step ran.
+ * Steps to show in the UI: hides the legacy `verify` step whenever the run has no actual
+ * `verify-production` job (CI verification moved to the PR/merge-queue workflow), both while the
+ * release is in flight and after it completes.
  */
 export function visibleSteps(release: Release): Step[] {
   const verify = release.steps.find((step) => step.id === "verify");
-  if (verify?.state === "skipped" && release.steps.some((step) => step.id !== "verify" && step.state !== "skipped")) {
+  const verifyHasJob = release.jobs.some((job) => job.step === "verify" && job.state !== "skipped");
+  const verifyActiveOrRan = verify?.state === "running" || verify?.state === "done" || verify?.state === "failed";
+  if (verify && !verifyHasJob && !verifyActiveOrRan) {
     return release.steps.filter((step) => step.id !== "verify");
   }
   return [...release.steps];
@@ -85,35 +89,36 @@ export function visibleSteps(release: Release): Step[] {
 
 /** Compact badge for Paseo's sidebar workspace meta row (`WorkspaceRowBadge`). */
 export function releaseRowBadge(release: Release, now: Date = new Date()): RowBadgeDescriptor | null {
+  const id = releaseIdLabel(release);
   if (isActive(release)) {
-    if (release.status === "queued") return { icon: "Clock", label: `#${release.number} · fila`, tone: "info" };
+    if (release.status === "queued") return { icon: "Clock", label: `${id} · fila`, tone: "info" };
     if (release.current === "images") {
       const step = stepOf(release, "images");
       const progressText = step.total ? `img ${step.done ?? 0}/${step.total}` : "imagens";
-      return { icon: "Rocket", label: `#${release.number} · ${progressText}`, tone: "info" };
+      return { icon: "Rocket", label: `${id} · ${progressText}`, tone: "info" };
     }
     if (release.current === "watch") {
       const phase = watchPhaseLabel(release, now, true) ?? "vigia";
-      return { icon: "Rocket", label: `#${release.number} · ${phase}`, tone: "info" };
+      return { icon: "Rocket", label: `${id} · ${phase}`, tone: "info" };
     }
     const label = release.current ? STEP_LABELS[release.current] : "release";
-    return { icon: "Rocket", label: `#${release.number} · ${label}`, tone: "info" };
+    return { icon: "Rocket", label: `${id} · ${label}`, tone: "info" };
   }
   if (release.verdict === "cancelled" || release.verdict === "none") return null;
   const ended = release.completedAt ? Date.parse(release.completedAt) : Number.NaN;
   if (!Number.isFinite(ended) || now.getTime() - ended > RECENT_VERDICT_MS) return null;
   switch (release.verdict) {
     case "green":
-      return { icon: "Rocket", label: `#${release.number} · verde`, tone: "success" };
+      return { icon: "Rocket", label: `${id} · verde`, tone: "success" };
     case "published":
-      return { icon: "Rocket", label: `#${release.number} · publicado`, tone: "success" };
+      return { icon: "Rocket", label: `${id} · publicado`, tone: "success" };
     case "reverted":
-      return { icon: "Undo2", label: `#${release.number} · revertido`, tone: "warning" };
+      return { icon: "Undo2", label: `${id} · revertido`, tone: "warning" };
     case "red":
     case "failed":
-      return { icon: "CircleX", label: `#${release.number} · ${VERDICT_LABELS[release.verdict]}`, tone: "danger" };
+      return { icon: "CircleX", label: `${id} · ${VERDICT_LABELS[release.verdict]}`, tone: "danger" };
     case "inconclusive":
-      return { icon: "Rocket", label: `#${release.number} · inconclusivo`, tone: "muted" };
+      return { icon: "Rocket", label: `${id} · inconclusivo`, tone: "muted" };
     default:
       return null;
   }

@@ -5,7 +5,7 @@ import type { PluginPopoverProps, PluginSidebarItemProps } from "@getpaseo/plugi
 import { SidebarRow } from "@getpaseo/plugin/client/ui";
 import { queueFooterLabel, queuedPrs } from "../shared/queue-status.ts";
 import { visibleSteps, watchTone } from "../shared/release-copy.ts";
-import { footerRelease, isActive, otherActive, releaseLabel, watchPhaseLabel, type Release } from "../shared/release-status.ts";
+import { footerLabel, footerRelease, isActive, otherActive, type Release } from "../shared/release-status.ts";
 import type { ReleaseView } from "../shared/rpc.ts";
 import { useNow, useReleaseState } from "./data.ts";
 import { SegBar } from "./kit.tsx";
@@ -61,12 +61,12 @@ export function ReleaseFooterItem({ theme, currentScreen, openScreen, openPopove
     }
     return <SidebarRow icon="Rocket" label="Releases" active={onScreen} onPress={() => openScreen({ screenId: RELEASES_SCREEN })} />;
   }
-  // `#356 01/11 14:02 · faltam 7m`: the open watch's phase, short.
-  const phase = watchPhaseLabel(release, now, true);
-  const label = phase ? `${releaseLabel(release)} · ${phase}` : releaseLabel(release);
+  // `PR #275 · deploy`, `PR #275 · img 4/9`, `PR #275 · faltam 7m (+1)` — compact, no date noise.
+  const label = footerLabel(release, now, others);
   return (
     <SidebarRow
-      label={others ? `${label} +${others}` : label}
+      icon="Rocket"
+      label={label}
       active={onScreen}
       onPress={() => openPopover(FooterPopover)}
       trailing={<SegBar theme={theme} steps={visibleSteps(release)} watchTone={isActive(release) ? null : watchTone(release)} />}

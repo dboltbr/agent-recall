@@ -33,6 +33,7 @@ import {
   otherActive,
   releaseDurationMs,
   releaseLabel,
+  releaseMeta,
   watchPhaseLabel,
   type Release,
   type ReleaseSnapshot,
@@ -68,10 +69,13 @@ export function ReleaseHeader({ theme, release, now, icon }: { theme: PluginThem
   const headIcon = icon ? HEAD_ICONS[badge.tone] : undefined;
   const duration = releaseDurationMs(release, now);
   return (
-    <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+    <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
       {headIcon ? <Icon name={headIcon} size={15} color={toneColor(theme, badge.tone)} /> : null}
       <Text style={{ color: theme.colors.foreground, fontWeight: "600", fontSize: 13.5 }}>{releaseLabel(release)}</Text>
       <Badge theme={theme} tone={badge.tone} label={badge.label} icon={BADGE_ICONS[badge.tone]} />
+      <Text numberOfLines={1} style={{ color: theme.colors.foregroundMuted, fontSize: 11.5, flexShrink: 1 }}>
+        {releaseMeta(release)}
+      </Text>
       <View style={{ flex: 1 }} />
       <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
         {formatShortDuration(duration)}
@@ -157,12 +161,29 @@ export function SupersededLine({
 }
 
 export function CommitLine({ theme, release }: { theme: PluginTheme; release: Release }) {
+  const prs = release.prs ?? [];
+  const branchText =
+    prs.length === 1
+      ? prs[0]!.branch
+      : prs.length > 1
+        ? prs.map((pr) => `#${pr.number} ${pr.branch}`).join(" · ")
+        : null;
   return (
-    <View style={{ flexDirection: "row", alignItems: "center", gap: 7, marginTop: 4, minWidth: 0 }}>
-      <Sha theme={theme} sha={shortSha(release.headSha)} />
-      <Text numberOfLines={1} style={{ color: theme.colors.foregroundMuted, fontSize: 12, flexShrink: 1 }}>
-        {release.title}
-      </Text>
+    <View style={{ gap: 3, marginTop: 4 }}>
+      {branchText ? (
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 6, minWidth: 0 }}>
+          <Icon name="GitBranch" size={12} color={theme.colors.foregroundMuted} />
+          <Text numberOfLines={1} style={{ fontFamily: MONO, fontSize: 11.5, color: theme.colors.foregroundMuted, flexShrink: 1 }}>
+            {branchText}
+          </Text>
+        </View>
+      ) : null}
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 7, minWidth: 0 }}>
+        <Sha theme={theme} sha={shortSha(release.headSha)} />
+        <Text numberOfLines={1} style={{ color: theme.colors.foregroundMuted, fontSize: 12, flexShrink: 1 }}>
+          {release.title}
+        </Text>
+      </View>
     </View>
   );
 }

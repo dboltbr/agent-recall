@@ -33,6 +33,7 @@ import {
   type GitHubRunner,
   type Handoff,
   type Release,
+  type ReleasePr,
   type ReleaseSnapshot,
   type WatchProgress,
 } from "./release-status.ts";
@@ -210,6 +211,8 @@ export function createReleaseSource(options: ReleaseSourceOptions): ReleaseSourc
   const ranges = new Map<string, readonly GitHubCommit[]>();
   /** PR head commit trailers are immutable: keyed by `head.sha`. */
   const headCommitSessions = new Map<string, readonly SessionRef[]>();
+  /** Merged pull requests per release commit SHA (immutable once merged). */
+  const commitPulls = new Map<string, readonly ReleasePr[]>();
   let snapshot: ReleaseSnapshot | null = null;
   let runners: readonly GitHubRunner[] = [];
   let loadedRuns: unknown = null;
@@ -293,6 +296,51 @@ export function createReleaseSource(options: ReleaseSourceOptions): ReleaseSourc
     return tagNumbers(await get<{ ref?: string }[]>(`repos/${repository}/git/matching-refs/tags/release-`, token));
   }
 
+  async function pullsOfCommit(sha: string, token: string): Promise<readonly ReleasePr[]> {
+    const cached = commitPulls.get(sha);
+    if (cached !== undefined) return cached;
+    try {
+      const body = await get<readonly GitHubPullRequest[]>(`repos/${repository}/commits/${sha}/pulls?per_page=10`, token);
+      const prs: ReleasePr[] = [];
+      for (const pr of body) {
+        const branch = pr.head?.ref ?? "";
+        if (!branch || isMergifyBatchBranch(branch)) continue;
+        if (prs.some((known) => known.number === pr.number)) continue;
+        prs.push({ number: pr.number, branch, title: pr.title, url: pr.html_url });
+      }
+      commitPulls.set(sha, prs);
+      return prs;
+    } catch (error) {
+      if (error instanceof GitHubError && (error.status === 404 || error.status === 422)) {
+        commitPulls.set(sha, []);
+      }
+      return [];
+    }
+  }
+
+  /** Pull requests behind this release: head commit first, then up to 4 range commits for batches. */
+  async function pullsOfRelease(
+    run: GitHubRun,
+    commits: readonly GitHubCommit[] | null,
+    token: string,
+  ): Promise<ReleasePr[]> {
+    const shas = [run.head_sha];
+    if (commits) {
+      for (const commit of [...commits].reverse()) {
+        if (shas.length >= 5) break;
+        if (commit.sha && !shas.includes(commit.sha)) shas.push(commit.sha);
+      }
+    }
+    const groups = await Promise.all(shas.map((sha) => pullsOfCommit(sha, token)));
+    const out: ReleasePr[] = [];
+    for (const group of groups) {
+      for (const pr of group) {
+        if (!out.some((known) => known.number === pr.number)) out.push(pr);
+      }
+    }
+    return out;
+  }
+
   async function build(
     run: GitHubRun,
     tags: readonly number[],
@@ -310,6 +358,7 @@ export function createReleaseSource(options: ReleaseSourceOptions): ReleaseSourc
         return null;
       }),
     ]);
+    const prs = await pullsOfRelease(run, commits, token);
     const name = releaseNameOf(run.run_number);
     const note = notes.get(name) ?? null;
     const handoffs = note && options.handoffs ? await options.handoffs(name).catch(() => []) : [];
@@ -318,6 +367,7 @@ export function createReleaseSource(options: ReleaseSourceOptions): ReleaseSourc
       jobs,
       note,
       commits,
+      prs,
       tagged: tags.includes(run.run_number),
       handoffs,
       watch: watchRun && watchJobs ? { run: watchRun, jobs: watchJobs } : null,

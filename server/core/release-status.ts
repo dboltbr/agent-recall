@@ -41,6 +41,15 @@ export const SessionSchema = z.object({
 });
 export type Session = z.infer<typeof SessionSchema>;
 
+/** Merged pull request behind a release run (from GitHub's commit→pulls lookup). */
+export const ReleasePrSchema = z.object({
+  number: z.number(),
+  branch: z.string(),
+  title: z.string().optional(),
+  url: z.string().optional(),
+});
+export type ReleasePr = z.infer<typeof ReleasePrSchema>;
+
 export const JobSchema = z.object({
   id: z.number(),
   name: z.string(),
@@ -163,6 +172,8 @@ export const ReleaseSchema = z.object({
   handoffs: z.array(HandoffSchema).default([]),
   /** The watch's live progress (its check run); null before it publishes or for older watches. */
   progress: WatchProgressSchema.nullable().default(null),
+  /** Merged pull requests included in this release (head PR first; empty on direct/manual pushes). */
+  prs: z.array(ReleasePrSchema).default([]),
   jobs: z.array(JobSchema),
 });
 export type Release = z.infer<typeof ReleaseSchema>;
@@ -414,8 +425,12 @@ export function buildStep(id: StepId, jobs: readonly Job[], runDone: boolean, no
     .filter((ms): ms is number => ms !== null);
   const startedMs = starts.length ? Math.min(...starts) : null;
   let state: StepState;
-  if (live.length === 0) state = runDone ? "skipped" : "pending";
-  else if (failed) state = "failed";
+  // `verify-production` moved to the merge-queue CI workflow: once any release job exists without
+  // a verify job, mark verify skipped immediately instead of leaving an empty pending ghost step.
+  if (live.length === 0) {
+    const legacyVerifyAbsent = id === "verify" && jobs.some((job) => job.step !== null && job.step !== "verify");
+    state = runDone || legacyVerifyAbsent ? "skipped" : "pending";
+  } else if (failed) state = "failed";
   else if (live.every((job) => job.state === "success")) state = "done";
   else if (live.some((job) => job.state === "running") || (live.some((job) => job.state === "success") && !runDone))
     state = "running";
@@ -627,6 +642,8 @@ export interface ReleaseInput {
   readonly watch?: { readonly run: GitHubRun; readonly jobs: readonly GitHubJob[] } | null;
   /** The watch run's progress (`parseWatchProgress` of its check run), when read. */
   readonly progress?: WatchProgress | null;
+  /** Merged pull requests behind this release (head PR first). */
+  readonly prs?: readonly ReleasePr[];
   readonly now: Date;
 }
 
@@ -748,6 +765,7 @@ export function buildRelease(input: ReleaseInput): Release {
     sessions,
     handoffs: releaseHandoffs(note, input.handoffs ?? []),
     progress: input.progress ?? null,
+    prs: [...(input.prs ?? [])],
     jobs,
   };
 }
@@ -986,25 +1004,51 @@ export function releaseStamp(at: string | null): string {
   return `${pad(local.getUTCDate())}/${pad(local.getUTCMonth() + 1)} ${pad(local.getUTCHours())}:${pad(local.getUTCMinutes())}`;
 }
 
-/**
- * The one name every surface shows: `#190 28/10 14:49`, the run number (the N of tag
- * `release-N`) and when the run started. `#190` alone when the time is unknown. The tag step keeps
- * showing the tag itself (`release-190`).
- */
-export function releaseLabel(release: Pick<Release, "number" | "startedAt" | "createdAt">): string {
-  const stamp = releaseStamp(release.startedAt ?? release.createdAt);
-  return stamp ? `#${release.number} ${stamp}` : `#${release.number}`;
+/** `14:49` in America/Sao_Paulo, or "" for a missing or bad timestamp. */
+export function releaseTime(at: string | null): string {
+  const stamp = releaseStamp(at);
+  if (!stamp) return "";
+  const atSpace = stamp.indexOf(" ");
+  return atSpace < 0 ? stamp : stamp.slice(atSpace + 1);
 }
 
-/** 0..1 for the progress ring: finished steps plus the images fraction. */
+/**
+ * Compact identifier tying a release to its pull request(s): `PR #275`, `PR #275 +1` for a
+ * Mergify batch, or `r712` when the run has no PR (manual dispatch / direct push) so a workflow
+ * run number never looks like a PR number.
+ */
+export function releaseIdLabel(release: Pick<Release, "number"> & { readonly prs?: readonly ReleasePr[] }): string {
+  const prs = release.prs ?? [];
+  if (prs.length === 1) return `PR #${prs[0]!.number}`;
+  if (prs.length > 1) return `PR #${prs[0]!.number} +${prs.length - 1}`;
+  return `r${release.number}`;
+}
+
+/**
+ * The primary label shown across surfaces: `PR #275`, `PR #275 +1` (batch), or `r712` (no PR).
+ * Dates are omitted since releases ship every day; time and run number live in `releaseMeta`.
+ */
+export function releaseLabel(release: Pick<Release, "number"> & { readonly prs?: readonly ReleasePr[] }): string {
+  return releaseIdLabel(release);
+}
+
+/** Secondary metadata for headers and popovers: `release #712 · 09:32` (or `release #712`). */
+export function releaseMeta(release: Pick<Release, "number" | "startedAt" | "createdAt">): string {
+  const clock = releaseTime(release.startedAt ?? release.createdAt);
+  return clock ? `release #${release.number} · ${clock}` : `release #${release.number}`;
+}
+
+/** 0..1 for the progress ring: finished steps plus the images fraction (ignoring skipped legacy verify). */
 export function progress(release: Release): number {
   if (!isActive(release)) return 1;
+  const activeSteps = release.steps.filter((step) => !(step.id === "verify" && step.state === "skipped"));
+  const counted = activeSteps.length ? activeSteps : release.steps;
   let sum = 0;
-  for (const step of release.steps) {
+  for (const step of counted) {
     if (step.state === "done" || step.state === "skipped") sum += 1;
     else if (step.state === "running") sum += step.total ? (step.done ?? 0) / step.total : 0.5;
   }
-  return Math.min(1, sum / release.steps.length);
+  return Math.min(1, sum / counted.length);
 }
 
 export function stepOf(release: Release, id: StepId): Step {
@@ -1017,18 +1061,32 @@ export function stepLabel(step: Step): string {
   return step.total !== null && step.total > 0 ? `${label} ${step.done ?? 0}/${step.total}` : label;
 }
 
+/** Short step text for compact badges/pills: `img 3/9`, `deploy`, `tag`, `vigia`. */
+function compactStepLabel(step: Step): string {
+  if (step.id === "images" && step.total !== null && step.total > 0) return `img ${step.done ?? 0}/${step.total}`;
+  return STEP_LABELS[step.id];
+}
+
 /**
- * Composer pill text: `#172 27/10 11:24 · imagens 3/9` while active, `#172 27/10 11:24 · observando ·
- * faltam 7m` while the watch reports, `#172 27/10 11:24 · verde` after.
+ * Compact pill & header label: `PR #275 · img 3/9` while active, `PR #275 · faltam 7m` while the
+ * watch observes, `PR #275 · verde` after, or `r712 · …` without a PR.
  */
 export function pillLabel(release: Release, now: Date = new Date()): string {
+  const id = releaseIdLabel(release);
   if (isActive(release)) {
-    const watching = release.current === "watch" ? watchPhaseLabel(release, now) : null;
-    if (watching) return `${releaseLabel(release)} · ${watching}`;
+    if (release.status === "queued") return `${id} · fila`;
+    const watching = release.current === "watch" ? watchPhaseLabel(release, now, true) : null;
+    if (watching) return `${id} · ${watching}`;
     const step = release.current ? stepOf(release, release.current) : null;
-    return step ? `${releaseLabel(release)} · ${stepLabel(step)}` : releaseLabel(release);
+    return step ? `${id} · ${compactStepLabel(step)}` : id;
   }
-  return release.verdict ? `${releaseLabel(release)} · ${VERDICT_LABELS[release.verdict]}` : releaseLabel(release);
+  return release.verdict ? `${id} · ${VERDICT_LABELS[release.verdict]}` : id;
+}
+
+/** Sidebar footer text: `PR #275 · deploy`, with ` (+1)` when other releases are also in flight. */
+export function footerLabel(release: Release, now: Date = new Date(), others = 0): string {
+  const base = pillLabel(release, now);
+  return others > 0 ? `${base} (+${others})` : base;
 }
 
 /** Total run time: start → end, or → now while active. */

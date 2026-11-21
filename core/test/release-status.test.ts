@@ -4,6 +4,7 @@ import {
   buildRelease,
   buildSnapshot,
   classifyJob,
+  footerLabel,
   footerRelease,
   formatAgo,
   formatDuration,
@@ -13,8 +14,11 @@ import {
   queueSummary,
   releaseForSession,
   releaseHandoffs,
+  releaseIdLabel,
   releaseLabel,
+  releaseMeta,
   releaseStamp,
+  releaseTime,
   ReleaseSnapshotSchema,
   revertSummary,
   stepJobNames,
@@ -176,8 +180,8 @@ test("release em andamento: verificação feita, imagens 3/9, resto pendente", (
   assert.equal(images.done, 3);
   assert.equal(images.total, 9, "a build pulada fica fora do total");
   assert.equal(images.durationMs, 11.4 * 60_000, "conta até agora");
-  assert.equal(pillLabel(release), "#172 27/10 11:24 · imagens 3/9");
-  assert.equal(releaseLabel(release), "#172 27/10 11:24");
+  assert.equal(pillLabel(release), "r172 · img 3/9");
+  assert.equal(releaseLabel(release), "r172");
   assert.deepEqual(stepJobNames(release, "verify"), ["scanners", "check"]);
   assert.deepEqual(stepJobNames(release, "images").slice(0, 4), ["api", "rtpengine", "fs-bridge", "vms-client-gateway"]);
   assert.ok(Math.abs(progress(release) - (1 + 3 / 9) / 5) < 1e-9);
@@ -192,11 +196,11 @@ test("veredito verde: o watch passou", () => {
     release.steps.map((step) => step.state),
     ["done", "done", "done", "done", "done"],
   );
-  assert.equal(pillLabel(release), "#171 27/10 11:24 · verde");
+  assert.equal(pillLabel(release), "r171 · verde");
   assert.equal(progress(release), 1);
 });
 
-test("falhou: a etapa que falhou, as seguintes puladas, mesmo nome `#N` dos outros", () => {
+test("falhou: a etapa que falhou, as seguintes puladas, mesmo nome `rN` sem PR", () => {
   const jobs = [
     job("trigger", "success", [24, 23.9]),
     job("verify-production / qlty", "success", [23, 22]),
@@ -210,7 +214,7 @@ test("falhou: a etapa que falhou, as seguintes puladas, mesmo nome `#N` dos outr
     release.steps.map((step) => step.state),
     ["failed", "skipped", "skipped", "skipped", "skipped"],
   );
-  assert.equal(releaseLabel(release), "#4818 27/10 11:24");
+  assert.equal(releaseLabel(release), "r4818");
   assert.equal(verdictDetail(release), "verify-production / check falhou");
 });
 
@@ -293,7 +297,7 @@ test("inconclusivo, cancelado e sem publicação", () => {
     conclusion: "cancelled",
   });
   assert.equal(cancelled.verdict, "cancelled");
-  assert.equal(releaseLabel(cancelled), "#188 27/10 11:24");
+  assert.equal(releaseLabel(cancelled), "r188");
   const paused = completed(189, [job("trigger", "success", [3, 2.8]), job("flags", "skipped", [2.8, 2.8])]);
   assert.equal(paused.verdict, "none");
   assert.deepEqual(new Set(paused.steps.map((step) => step.state)), new Set(["skipped"]));
@@ -421,7 +425,7 @@ test("release publicada sem nota da factory nem job watch vira verdict published
   assert.equal(release.verdict, "published");
   assert.equal(release.tag, "release-693");
   assert.equal(verdictDetail(release), "publicado em produção");
-  assert.equal(pillLabel(release), "#693 27/10 11:24 · publicado");
+  assert.equal(pillLabel(release), "r693 · publicado");
 });
 
 test("rodapé: a ativa; depois o último veredito por 2 h; depois nada", () => {
@@ -464,15 +468,51 @@ test("formatação pt-BR de durações e tempo relativo", () => {
   assert.equal(VERIFY_DONE.length, 4);
 });
 
-test("releaseStamp e releaseLabel: hora de São Paulo, virada do dia, sem hora", () => {
+test("releaseStamp, releaseTime, releaseLabel e releaseMeta: PR primeiro, sem data no rótulo", () => {
   assert.equal(releaseStamp("2026-10-28T17:49:30Z"), "28/10 14:49");
   assert.equal(releaseStamp("2026-10-28T02:05:00Z"), "27/10 23:05", "antes das 3 h UTC ainda é o dia anterior");
   assert.equal(releaseStamp("2026-10-28T03:00:00Z"), "28/10 00:00", "meia-noite em h23, não 24:00");
   assert.equal(releaseStamp(null), "");
   assert.equal(releaseStamp("não é data"), "");
-  assert.equal(releaseLabel({ number: 190, startedAt: "2026-10-28T17:49:00Z", createdAt: "2026-10-28T17:48:00Z" }), "#190 28/10 14:49");
-  assert.equal(releaseLabel({ number: 190, startedAt: null, createdAt: "2026-10-28T17:48:00Z" }), "#190 28/10 14:48", "sem início usa a criação");
-  assert.equal(releaseLabel({ number: 190, startedAt: null, createdAt: "" }), "#190");
+  assert.equal(releaseTime("2026-10-28T17:49:30Z"), "14:49");
+  assert.equal(releaseTime(null), "");
+  assert.equal(releaseLabel({ number: 190 }), "r190");
+  assert.equal(releaseIdLabel({ number: 712, prs: [{ number: 275, branch: "eng-1017-ksm-deleting" }] }), "PR #275");
+  assert.equal(
+    releaseIdLabel({
+      number: 712,
+      prs: [
+        { number: 275, branch: "eng-1017-ksm-deleting" },
+        { number: 274, branch: "fix-review-recheck-batches" },
+      ],
+    }),
+    "PR #275 +1",
+  );
+  assert.equal(releaseMeta({ number: 190, startedAt: "2026-10-28T17:49:00Z", createdAt: "2026-10-28T17:48:00Z" }), "release #190 · 14:49");
+  assert.equal(releaseMeta({ number: 190, startedAt: null, createdAt: "2026-10-28T17:48:00Z" }), "release #190 · 14:48", "sem início usa a criação");
+  assert.equal(releaseMeta({ number: 190, startedAt: null, createdAt: "" }), "release #190");
+});
+
+test("release moderna sem verify-production: verify já nasce skipped, current vai direto para images e footer usa PR", () => {
+  const release = buildRelease({
+    run: run({ run_number: 712 }),
+    jobs: [
+      job("plan", "success", [5, 4.8]),
+      job("images / shard 1", "success", [4.8, 3]),
+      job("images / shard 2", "running", [4.8]),
+      job("images / shard 3", "queued"),
+    ],
+    prs: [{ number: 275, branch: "eng-1017-ksm-deleting", url: "https://gh/pr/275" }],
+    note: null,
+    commits: null,
+    now: NOW,
+  });
+  assert.equal(stepOf(release, "verify").state, "skipped");
+  assert.equal(release.current, "images");
+  assert.equal(pillLabel(release, NOW), "PR #275 · img 1/3");
+  assert.equal(footerLabel(release, NOW, 0), "PR #275 · img 1/3");
+  assert.equal(footerLabel(release, NOW, 1), "PR #275 · img 1/3 (+1)");
+  assert.ok(Math.abs(progress(release) - (1 / 3) / 4) < 1e-9, "progresso conta só as 4 etapas reais");
 });
 
 test("releaseStamp sem fuso no runtime: deslocamento fixo UTC−3", async () => {

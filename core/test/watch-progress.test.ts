@@ -92,14 +92,14 @@ test("fase do vigia: implantando, observando com contagem regressiva, janela fec
 test("pílula, atividade e etapa do vigia mostram a fase; sem progresso, o texto de antes", () => {
   const release = watching(OBSERVING);
   assert.equal(release.current, "watch");
-  assert.equal(pillLabel(release, NOW), "#172 27/10 11:24 · observando · faltam 7m");
+  assert.equal(pillLabel(release, NOW), "r172 · faltam 7m");
   const snapshot = buildSnapshot({ repository: "dboltbr/dbolt", workflow: "release", releases: [release], runners: [], now: NOW });
   assert.equal(activityLabel(snapshot, release, NOW), "observando · faltam 7m");
   const watch = stepOf(release, "watch");
   assert.equal(stepDetail(release, watch, null, NOW), "observando · faltam 7m");
   assert.equal(pipeMeta(release, watch, NOW), "faltam 7m");
   const old = watching(null);
-  assert.equal(pillLabel(old, NOW), "#172 27/10 11:24 · vigia");
+  assert.equal(pillLabel(old, NOW), "r172 · vigia");
   assert.equal(activityLabel(snapshot, old, NOW), "vigia aberto");
   assert.equal(stepDetail(old, stepOf(old, "watch"), null, NOW), "sinais do blast radius → veredito");
 });

@@ -114,7 +114,7 @@ test("selectWorkspaceRowBadge: release ativa vence fila; fila vence release term
 
   assert.deepEqual(selectWorkspaceRowBadge(view, "wks-live", "chore/deps-infra-upgrades", NOW), {
     icon: "Rocket",
-    label: "#702 · img 3/9",
+    label: "r702 · img 3/9",
     tone: "info",
   });
   assert.deepEqual(selectWorkspaceRowBadge(view, "wks-228", "mvp/c-historico-handoff", NOW), {
@@ -129,8 +129,45 @@ test("selectWorkspaceRowBadge: release ativa vence fila; fila vence release term
   });
   assert.deepEqual(selectWorkspaceRowBadge(view, "wks-699", "main", NOW), {
     icon: "Rocket",
-    label: "#699 · inconclusivo",
+    label: "r699 · inconclusivo",
     tone: "muted",
   });
   assert.equal(selectWorkspaceRowBadge(view, "wks-open", "feat/open-only", NOW), null);
+});
+
+test("visibleSteps oculta verify mesmo com release ativa quando não há verify-production, e badge mostra PR", () => {
+  const activeNoVerify = buildRelease({
+    run: run({ run_number: 712, head_commit: null }),
+    jobs: [
+      job("plan", "success", [5, 4.9]),
+      job("images / shard 1", "success", [4.9, 3]),
+      job("images / shard 2", "running", [4.9]),
+    ],
+    prs: [{ number: 275, branch: "eng-1017-ksm-deleting", url: "https://gh/pr/275" }],
+    note: null,
+    commits: [commit("c1", "feat: ksm", "paseo/srv_X/agent-275")],
+    now: NOW,
+  });
+  assert.deepEqual(
+    visibleSteps(activeNoVerify).map((step) => step.id),
+    ["images", "deploy", "tag", "watch"],
+    "verify não aparece vazia enquanto a release corre",
+  );
+  const snapshot = buildSnapshot({
+    repository: "dboltbr/dbolt",
+    workflow: "release",
+    releases: [activeNoVerify],
+    runners: RUNNERS,
+    now: NOW,
+  });
+  const view: ReleaseView = {
+    host: HOST,
+    snapshot,
+    agents: [{ id: "agent-275", title: "KSM", workspaceId: "wks-275", openCodeSession: null }],
+  };
+  assert.deepEqual(selectWorkspaceRowBadge(view, "wks-275", "eng-1017-ksm-deleting", NOW), {
+    icon: "Rocket",
+    label: "PR #275 · img 1/2",
+    tone: "info",
+  });
 });
