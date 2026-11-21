@@ -217,3 +217,73 @@ test("popoverSteps, deployChips e runnerAlert: só 3 etapas humanas, alvo travad
   });
   assert.deepEqual(runnerAlert(offlineSnap), { tone: "bad", text: `Runner ${offlineSnap.runners.find((r) => !r.online)!.name} offline` });
 });
+
+test("selectWorkspaceRowBadge: release mais recente vence PR antigo ejetado, mas PR ejetado mais novo ainda vence", () => {
+  const olderDequeued = buildMergeQueue({
+    pulls: [
+      {
+        number: 264,
+        title: "old dequeued",
+        html_url: "https://gh/pr/264",
+        draft: false,
+        created_at: minutesAgo(90),
+        updated_at: minutesAgo(45),
+        head: { ref: "fix/old-dequeued", sha: "sha264" },
+        labels: [{ name: "queue" }, { name: "dequeued" }],
+      },
+    ],
+    ciRuns: [],
+    jobsByRunId: new Map(),
+    sessionsBySha: new Map([["sha264", [{ harness: "paseo", host: HOST, id: "agent-a" }]]]),
+  });
+  const newerRelease = buildRelease({
+    run: run({ run_number: 715, status: "completed", conclusion: "success", head_commit: null, updated_at: minutesAgo(4) }),
+    jobs: [job("pins", "success", [6, 5]), job("release-tag", "success", [5, 4.5])],
+    prs: [{ number: 283, branch: "fix/console-contract-wait-deadlock" }],
+    note: null,
+    commits: [commit("c1", "fix: deadlock", `paseo/${HOST}/agent-a`)],
+    now: NOW,
+  });
+  const snapA = buildSnapshot({
+    repository: "dboltbr/dbolt",
+    workflow: "release",
+    releases: [newerRelease],
+    runners: RUNNERS,
+    queue: olderDequeued,
+    now: NOW,
+  });
+  const viewA: ReleaseView = {
+    host: HOST,
+    snapshot: snapA,
+    agents: [{ id: "agent-a", title: "Session", workspaceId: "wks-a", openCodeSession: null }],
+  };
+  assert.deepEqual(
+    selectWorkspaceRowBadge(viewA, "wks-a", "feat/openbao", NOW),
+    { icon: "Rocket", label: "PR #283 · publicado", tone: "success" },
+    "PR ejetado mais antigo não sobrepõe release mais recente",
+  );
+
+  const newerDequeued = buildMergeQueue({
+    pulls: [
+      {
+        number: 290,
+        title: "fresh dequeued",
+        html_url: "https://gh/pr/290",
+        draft: false,
+        created_at: minutesAgo(3),
+        updated_at: minutesAgo(1),
+        head: { ref: "fix/fresh-dequeued", sha: "sha290" },
+        labels: [{ name: "queue" }, { name: "dequeued" }],
+      },
+    ],
+    ciRuns: [],
+    jobsByRunId: new Map(),
+    sessionsBySha: new Map([["sha290", [{ harness: "paseo", host: HOST, id: "agent-a" }]]]),
+  });
+  const viewB: ReleaseView = { ...viewA, snapshot: { ...snapA, queue: newerDequeued } };
+  assert.deepEqual(
+    selectWorkspaceRowBadge(viewB, "wks-a", "feat/openbao", NOW),
+    { icon: "CircleAlert", label: "ejetado", tone: "danger" },
+    "PR ejetado depois da última release ainda aparece",
+  );
+});

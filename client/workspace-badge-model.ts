@@ -1,7 +1,7 @@
 // Pure workspace badge & release selector shared by `workspace-badge.tsx` and `header-buttons.tsx`.
 import { prForBranch, prForSession, prRowBadge, type PullRequestStatus, type RowBadgeDescriptor } from "../shared/queue-status.ts";
 import { releaseRowBadge } from "../shared/release-copy.ts";
-import { isActive, releaseForSession, type Release } from "../shared/release-status.ts";
+import { isActive, prBeatsFinishedRelease, releaseForSession, type Release } from "../shared/release-status.ts";
 import type { ReleaseView } from "../shared/rpc.ts";
 import { sessionsOfAgent } from "./navigate.ts";
 
@@ -39,7 +39,7 @@ export function releaseForWorkspace(view: ReleaseView | null, workspaceId: strin
   return matched.sort((a, b) => b.number - a.number)[0] ?? null;
 }
 
-/** Pure selector for a workspace's sidebar badge: active release → merge queue PR → recent release. */
+/** Pure selector for a workspace's sidebar badge: active release → active/newer PR → recent release. */
 export function selectWorkspaceRowBadge(
   view: ReleaseView | null,
   workspaceId: string,
@@ -50,11 +50,13 @@ export function selectWorkspaceRowBadge(
   if (!view || !snapshot) return null;
   const release = releaseForWorkspace(view, workspaceId, now);
   if (release && isActive(release)) return releaseRowBadge(release, now);
+  const recentReleaseBadge = release ? releaseRowBadge(release, now) : null;
   const pr = prForWorkspace(view, workspaceId, branch);
   if (pr) {
     const queueBadge = prRowBadge(pr);
-    if (queueBadge) return queueBadge;
+    if (queueBadge && (!recentReleaseBadge || !release || prBeatsFinishedRelease(pr, release))) {
+      return queueBadge;
+    }
   }
-  if (release) return releaseRowBadge(release, now);
-  return null;
+  return recentReleaseBadge;
 }

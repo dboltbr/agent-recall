@@ -11,6 +11,7 @@ import {
   isActive,
   otherActive,
   pillLabel,
+  prBeatsFinishedRelease,
   releaseDurationMs,
   releaseForSession,
   releaseLabel,
@@ -90,7 +91,11 @@ export function formatClaudeStatusLine(snapshot: ReleaseSnapshot, ctx: ClaudeCon
     const detail = ownRelease.current === "deploy" ? deployInline(ownRelease) : "";
     return `🚀 ${pillLabel(ownRelease, now)}${detail ? ` ${detail}` : ""}${alertSuffix}`;
   }
-  if (pr && (pr.stage !== "open" || pr.ciState === "running" || pr.ciState === "failure")) {
+  if (
+    pr &&
+    (pr.stage !== "open" || pr.ciState === "running" || pr.ciState === "failure") &&
+    (!ownRelease || prBeatsFinishedRelease(pr, ownRelease))
+  ) {
     return `🔀 ${prPillLabel(pr)}${alertSuffix}`;
   }
   const focused = ownRelease ?? footerRelease(snapshot, now);

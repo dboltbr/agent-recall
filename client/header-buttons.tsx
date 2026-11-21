@@ -11,7 +11,7 @@ import { Icon } from "@getpaseo/plugin/client/ui";
 import { View } from "react-native";
 import { prPillLabel, prStageBadge, type PullRequestStatus } from "../shared/queue-status.ts";
 import { releaseBadge, releaseRowBadge } from "../shared/release-copy.ts";
-import { isActive, pillLabel, type Release } from "../shared/release-status.ts";
+import { isActive, pillLabel, prBeatsFinishedRelease, type Release } from "../shared/release-status.ts";
 import type { ReleaseView } from "../shared/rpc.ts";
 import { releaseState, subscribeReleases, useReleaseState } from "./data.ts";
 import { directorySnapshot, matchesRepository, subscribeDirectory } from "./directory.ts";
@@ -34,7 +34,7 @@ function prOfWorkspace(view: ReleaseView | null, workspaceId: string): PullReque
   return prForWorkspace(view, workspaceId, branch);
 }
 
-/** Active release → PR in merge queue (or failing/running CI) → recent release (<= 2 h). */
+/** Active release → active/newer PR in merge queue → recent release (<= 2 h). */
 function targetOfWorkspace(
   view: ReleaseView | null,
   workspaceId: string,
@@ -44,11 +44,16 @@ function targetOfWorkspace(
   if (release && isActive(release)) {
     return { mode: "release", release, label: pillLabel(release, now) };
   }
+  const hasRecentRelease = !!(release && releaseRowBadge(release, now));
   const pr = prOfWorkspace(view, workspaceId);
-  if (pr && (pr.stage !== "open" || pr.ciState === "running" || pr.ciState === "failure")) {
+  if (
+    pr &&
+    (pr.stage !== "open" || pr.ciState === "running" || pr.ciState === "failure") &&
+    (!hasRecentRelease || !release || prBeatsFinishedRelease(pr, release))
+  ) {
     return { mode: "queue", pr, label: prPillLabel(pr) };
   }
-  if (release && releaseRowBadge(release, now)) {
+  if (hasRecentRelease && release) {
     return { mode: "release", release, label: pillLabel(release, now) };
   }
   return null;

@@ -12,7 +12,7 @@ import { Icon } from "@getpaseo/plugin/client/ui";
 import { View } from "react-native";
 import { prForBranch, prForSession, prPillLabel, prStageBadge, type PullRequestStatus } from "../shared/queue-status.ts";
 import { releaseBadge } from "../shared/release-copy.ts";
-import { isActive, pillLabel, releaseForSession, type Release } from "../shared/release-status.ts";
+import { isActive, pillLabel, prBeatsFinishedRelease, releaseForSession, type Release } from "../shared/release-status.ts";
 import type { ReleaseView } from "../shared/rpc.ts";
 import { releaseState, subscribeReleases, useReleaseState } from "./data.ts";
 import { directorySnapshot, matchesRepository, subscribeDirectory } from "./directory.ts";
@@ -49,7 +49,7 @@ function prOfAgent(view: ReleaseView | null, agentId: string, workspaceId: strin
   return prForBranch(snapshot.queue, workspace.branch);
 }
 
-/** Active release → open PR / merge queue (by session trailer or workspace branch) → finished release in snapshot. */
+/** Active release → active/newer PR in merge queue → finished release in snapshot. */
 function targetOfAgent(
   view: ReleaseView | null,
   agentId: string,
@@ -60,7 +60,7 @@ function targetOfAgent(
     return { mode: "release", release, label: pillLabel(release) };
   }
   const pr = prOfAgent(view, agentId, workspaceId);
-  if (pr) {
+  if (pr && (!release || prBeatsFinishedRelease(pr, release))) {
     return { mode: "queue", pr, label: prPillLabel(pr) };
   }
   if (release) {

@@ -3,7 +3,7 @@
 // release-watch notes. The Paseo UI (via `shared/release-status.ts`, a sync copy) and the
 // OpenChamber extension import it; `core/release-fetch.ts` is the fetcher that feeds it.
 import { z } from "zod";
-import { MergeQueueSnapshotSchema, type MergeQueueSnapshot } from "./queue-status.ts";
+import { MergeQueueSnapshotSchema, type MergeQueueSnapshot, type PullRequestStatus } from "./queue-status.ts";
 import { parseAgentSession, sameSession, toSessionRef } from "./trailer.ts";
 import type { Note, SessionRef } from "./types.ts";
 
@@ -956,6 +956,22 @@ export function releaseForSession(snapshot: ReleaseSnapshot, session: SessionRef
     return ended !== null && now.getTime() - ended <= RECENT_VERDICT_MS;
   });
   return pushedNoop ?? null;
+}
+
+/**
+ * Whether an open PR should beat a finished release on the same agent/workspace:
+ * an actively moving PR (`checking`, `queued`, or running CI) always wins; a stalled/dequeued/idle
+ * PR only wins if it was updated more recently than the finished release completed.
+ */
+export function prBeatsFinishedRelease(
+  pr: Pick<PullRequestStatus, "stage" | "ciState" | "updatedAt">,
+  release: Pick<Release, "completedAt" | "updatedAt" | "createdAt">,
+): boolean {
+  if (pr.stage === "checking" || pr.stage === "queued" || pr.ciState === "running") return true;
+  const prMs = time(pr.updatedAt);
+  const releaseMs = time(release.completedAt ?? release.updatedAt ?? release.createdAt);
+  if (prMs === null || releaseMs === null) return false;
+  return prMs > releaseMs;
 }
 
 export function findRelease(snapshot: ReleaseSnapshot, number: number): Release | null {
